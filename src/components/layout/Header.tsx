@@ -49,18 +49,18 @@ export function Header({ title, onMenuClick }: HeaderProps) {
 
     return (
         <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 md:px-8 z-10 sticky top-0">
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-4 min-w-0 flex-1 mr-2">
                 <button
                     onClick={handleMenuClick}
-                    className="md:hidden text-gray-500 hover:text-gray-700"
+                    className="md:hidden text-gray-500 hover:text-gray-700 flex-shrink-0"
                 >
                     <Menu size={24} />
                 </button>
-                <h2 className="text-xl font-bold text-[#1E3A5F]">{title}</h2>
+                <h2 className="text-xl font-bold text-[#1E3A5F] truncate">{title}</h2>
             </div>
 
-            <div className="flex items-center gap-4">
-                <div className="relative" ref={searchRef}>
+            <div className="flex items-center gap-2 md:gap-4 flex-shrink-0">
+                <div className="relative hidden md:block" ref={searchRef}>
                     <Search
                         className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
                         size={18}
@@ -104,15 +104,21 @@ export function Header({ title, onMenuClick }: HeaderProps) {
                     )}
                 </div>
 
+                <div className="md:hidden">
+                    <button className="p-2 text-gray-500">
+                        <Search size={20} />
+                    </button>
+                </div>
+
                 <NotificationBell />
 
-                <div className="h-8 w-px bg-gray-200 mx-2"></div>
+                <div className="h-8 w-px bg-gray-200 mx-1 md:mx-2"></div>
 
                 <UserButton
                     afterSignOutUrl="/"
                     appearance={{
                         elements: {
-                            avatarBox: "w-10 h-10",
+                            avatarBox: "w-8 h-8 md:w-10 md:h-10",
                         },
                     }}
                 />
