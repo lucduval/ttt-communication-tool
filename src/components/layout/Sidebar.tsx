@@ -24,7 +24,11 @@ const navItems = [
 import { useQuery } from "convex/react";
 import { api } from "@/../convex/_generated/api";
 
-export function Sidebar() {
+interface SidebarProps {
+    onClose?: () => void;
+}
+
+export function Sidebar({ onClose }: SidebarProps) {
     const pathname = usePathname();
     const access = useQuery(api.users.checkAccess);
     const isAdmin = access?.user?.role === "admin";
@@ -35,12 +39,21 @@ export function Sidebar() {
     };
 
     return (
-        <aside className="bg-[#1E3A5F] text-white w-64 flex flex-col min-h-screen">
-            <div className="p-6 flex items-center gap-3">
-                <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-[#1E3A5F]">
-                    <Send size={20} />
+        <aside className="bg-[#1E3A5F] text-white w-64 flex flex-col min-h-screen h-full">
+            <div className="p-6 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-[#1E3A5F]">
+                        <Send size={20} />
+                    </div>
+                    <span className="font-bold text-xl tracking-tight">TTT Connect</span>
                 </div>
-                <span className="font-bold text-xl tracking-tight">TTT Connect</span>
+                {/* Mobile close button */}
+                <button
+                    onClick={onClose}
+                    className="md:hidden text-white/70 hover:text-white"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18" /><path d="m6 6 18 18" /></svg>
+                </button>
             </div>
 
             <nav className="flex-1 px-4 py-4 space-y-2">

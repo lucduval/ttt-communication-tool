@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { ConvexClientProvider } from "@/components/providers/ConvexClientProvider";
-import { Sidebar } from "@/components/layout";
+
 
 const inter = Inter({
   variable: "--font-inter",
@@ -10,6 +10,8 @@ const inter = Inter({
 });
 
 import { AuthGuard } from "@/components/auth/AuthGuard";
+
+import { MainLayout } from "@/components/layout/MainLayout";
 
 export const metadata: Metadata = {
   title: "TTT Connect",
@@ -26,12 +28,9 @@ export default function RootLayout({
       <body className={`${inter.variable} antialiased`} suppressHydrationWarning>
         <ConvexClientProvider>
           <AuthGuard>
-            <div className="flex h-screen bg-[#F5F7FA] text-gray-800 font-sans">
-              <Sidebar />
-              <main className="flex-1 flex flex-col overflow-hidden">
-                {children}
-              </main>
-            </div>
+            <MainLayout>
+              {children}
+            </MainLayout>
           </AuthGuard>
         </ConvexClientProvider>
       </body>

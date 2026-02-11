@@ -6,17 +6,22 @@ import { useQuery } from "convex/react";
 // @ts-ignore
 import { api } from "../../../convex/_generated/api";
 
-import { Bell, Search } from "lucide-react";
+import { Bell, Search, Menu } from "lucide-react";
 import { UserButton } from "@clerk/nextjs";
 
 import { NotificationBell } from "./NotificationBell";
+import { useSidebar } from "./MainLayout";
 
 interface HeaderProps {
     title: string;
+    onMenuClick?: () => void;
 }
 
-export function Header({ title }: HeaderProps) {
+export function Header({ title, onMenuClick }: HeaderProps) {
     const router = useRouter();
+    const { toggle } = useSidebar();
+    const handleMenuClick = onMenuClick || toggle;
+
     const [searchQuery, setSearchQuery] = useState("");
     const [isFocused, setIsFocused] = useState(false);
     const searchRef = useRef<HTMLDivElement>(null);
@@ -43,8 +48,16 @@ export function Header({ title }: HeaderProps) {
     };
 
     return (
-        <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8 z-10">
-            <h2 className="text-xl font-bold text-[#1E3A5F]">{title}</h2>
+        <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 md:px-8 z-10 sticky top-0">
+            <div className="flex items-center gap-4">
+                <button
+                    onClick={onMenuClick}
+                    className="md:hidden text-gray-500 hover:text-gray-700"
+                >
+                    <Menu size={24} />
+                </button>
+                <h2 className="text-xl font-bold text-[#1E3A5F]">{title}</h2>
+            </div>
 
             <div className="flex items-center gap-4">
                 <div className="relative" ref={searchRef}>
