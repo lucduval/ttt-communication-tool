@@ -107,21 +107,23 @@ export function NotificationBell() {
                                                     <p className={`text-sm font-medium ${!notification.isRead ? "text-gray-900" : "text-gray-700"}`}>
                                                         {notification.title}
                                                     </p>
-                                                    <span className="text-xs text-gray-400 whitespace-nowrap ml-2">
-                                                        {new Date(notification.createdAt).toLocaleDateString(undefined, {
-                                                            month: 'short',
-                                                            day: 'numeric',
-                                                            hour: '2-digit',
-                                                            minute: '2-digit'
-                                                        })}
-                                                    </span>
+                                                    <div className="flex items-center gap-2 ml-2">
+                                                        <span className="text-xs text-gray-400 whitespace-nowrap">
+                                                            {new Date(notification.createdAt).toLocaleDateString(undefined, {
+                                                                month: 'short',
+                                                                day: 'numeric',
+                                                                hour: '2-digit',
+                                                                minute: '2-digit'
+                                                            })}
+                                                        </span>
+                                                        {!notification.isRead && (
+                                                            <span className="w-2 h-2 bg-blue-500 rounded-full flex-shrink-0"></span>
+                                                        )}
+                                                    </div>
                                                 </div>
                                                 <p className="text-sm text-gray-500 mt-1 line-clamp-2">
                                                     {notification.message}
                                                 </p>
-                                                {!notification.isRead && (
-                                                    <span className="absolute top-4 right-4 w-2 h-2 bg-blue-500 rounded-full"></span>
-                                                )}
                                             </div>
                                         </div>
                                     </div>

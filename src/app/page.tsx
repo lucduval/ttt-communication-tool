@@ -47,7 +47,7 @@ export default function DashboardPage() {
       <section className="flex-1 overflow-y-auto p-8">
         <div className="space-y-8">
           {/* Quick Action Header */}
-          <div className="flex justify-between items-end">
+          <div className="flex flex-col md:flex-row justify-between md:items-end gap-4">
             <div>
               <h1 className="text-2xl font-bold text-gray-900">
                 Welcome to TTT Connect
