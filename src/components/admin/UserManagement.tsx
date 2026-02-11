@@ -91,8 +91,8 @@ export function UserManagement() {
 
             {/* Invite Form */}
             <Card className="bg-blue-50 border-blue-100">
-                <form onSubmit={handleInvite} className="flex gap-4 items-end">
-                    <div className="flex-1">
+                <form onSubmit={handleInvite} className="flex flex-col md:flex-row gap-4 md:items-end">
+                    <div className="w-full md:flex-1">
                         <label className="block text-sm font-medium text-blue-900 mb-1">Invite New User</label>
                         <div className="relative">
                             <Mail className="absolute left-3 top-2.5 text-blue-400" size={18} />
@@ -106,10 +106,10 @@ export function UserManagement() {
                             />
                         </div>
                     </div>
-                    <div>
+                    <div className="w-full md:w-auto">
                         <label className="block text-sm font-medium text-blue-900 mb-1">Role</label>
                         <select
-                            className="w-32 px-3 py-2 rounded-lg border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                            className="w-full md:w-32 px-3 py-2 rounded-lg border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
                             value={inviteRole}
                             onChange={(e) => setInviteRole(e.target.value as any)}
                         >
@@ -117,7 +117,7 @@ export function UserManagement() {
                             <option value="admin">Admin</option>
                         </select>
                     </div>
-                    <Button type="submit" disabled={isInviting}>
+                    <Button type="submit" disabled={isInviting} className="w-full md:w-auto">
                         {isInviting ? "Sending..." : "Send Invite"}
                     </Button>
                 </form>
