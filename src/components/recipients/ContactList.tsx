@@ -85,7 +85,7 @@ export function ContactList({
     }
 
     return (
-        <div className="border border-gray-100 rounded-lg overflow-hidden">
+        <div className="border border-gray-100 rounded-lg overflow-hidden overflow-x-auto">
             <table className="w-full text-left text-sm">
                 <thead className="bg-[#F5F7FA] border-b border-gray-200 text-[#1E3A5F] font-bold">
                     <tr>
