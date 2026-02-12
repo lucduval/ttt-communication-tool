@@ -91,7 +91,12 @@ export function Sidebar({ onClose }: SidebarProps) {
                 )}
                 <Link
                     href="/settings"
-                    className="flex items-center gap-3 px-4 py-2 text-gray-400 hover:text-white transition-colors"
+                    className={cn(
+                        "flex items-center gap-3 px-4 py-2 rounded-lg transition-colors",
+                        isActive("/settings")
+                            ? "bg-white/10 text-white"
+                            : "text-gray-400 hover:text-white hover:bg-white/5"
+                    )}
                 >
                     <Settings size={20} />
                     <span>Settings</span>
