@@ -32,6 +32,9 @@ export const sendTestWhatsApp = action({
 
         // Format phone number (remove + and spaces for Clickatell if needed, but usually E.164 is fine without + or with it. 
         const toNumber = args.phoneNumber.replace(/\D/g, "");
+        if (toNumber.startsWith("0")) {
+            console.warn(`WARNING: Phone number ${toNumber} starts with 0. Clickatell requires international format (e.g., 27... or 44...). Messages may fail.`);
+        }
 
         // Prepare Header (Upload if needed)
         // Clickatell requires uploading the media first to get a fileId
@@ -117,6 +120,7 @@ export const sendTestWhatsApp = action({
         }
 
         const result: ClickatellResponse = await response.json();
+        console.log("CLICKATELL RESPONSE:", JSON.stringify(result, null, 2));
 
         // Check first message status
         const msgResult = result.messages[0];
@@ -235,6 +239,9 @@ export const sendBulkWhatsApp = action({
             // Construct messages array for this batch
             const messagesPayload = batchRecipients.map(recipient => {
                 const toNumber = recipient.phoneNumber.replace(/\D/g, "");
+                if (toNumber.startsWith("0")) {
+                    console.warn(`WARNING: Phone number ${toNumber} starts with 0. Clickatell requires international format. Messages may fail.`);
+                }
 
                 // Auto-fill common variables and map to template parameters
                 const allVariables: Record<string, string> = {
@@ -294,6 +301,7 @@ export const sendBulkWhatsApp = action({
                 }
 
                 const result: ClickatellResponse = await response.json();
+                console.log("CLICKATELL BATCH RESPONSE:", JSON.stringify(result, null, 2));
 
                 // Map results back to recipients
                 // Assuming result.messages order matches request messages order OR we use clientMessageId
@@ -368,5 +376,40 @@ export const sendBulkWhatsApp = action({
             },
             details: results.details,
         };
+    },
+});
+
+// Query status of a message
+export const getWhatsAppStatus = action({
+    args: {
+        messageSid: v.string(),
+    },
+    returns: v.any(),
+    handler: async (ctx, args) => {
+        const config = getClickatellConfig();
+
+        console.log(`Checking status for message: ${args.messageSid}`);
+
+        const response = await fetch(
+            `https://platform.clickatell.com/v1/message/${args.messageSid}`,
+            {
+                method: "GET",
+                headers: {
+                    "Authorization": config.apiKey,
+                    "Content-Type": "application/json",
+                },
+            }
+        );
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`Clickatell Status API Error: ${response.status} - ${errorText}`);
+            throw new Error(`Clickatell API error: ${response.status} ${response.statusText} - ${errorText}`);
+        }
+
+        const result = await response.json();
+        console.log("CLICKATELL STATUS RESPONSE:", JSON.stringify(result, null, 2));
+
+        return result;
     },
 });

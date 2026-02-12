@@ -333,6 +333,9 @@ export const processWhatsAppBatch = internalAction({
                 // Build messages payload
                 const messagesPayload = subBatch.map((recipient: { id: string; phone?: string; name: string; variables?: string }) => {
                     const toNumber = (recipient.phone || "").replace(/\D/g, "");
+                    if (toNumber.startsWith("0")) {
+                        console.warn(`WARNING: Phone number ${toNumber} starts with 0. Clickatell requires international format. Messages may fail.`);
+                    }
                     const recipientVars = recipient.variables
                         ? JSON.parse(recipient.variables)
                         : {};
@@ -393,6 +396,7 @@ export const processWhatsAppBatch = internalAction({
                     }
 
                     const result = await response.json();
+                    console.log("CLICKATELL QUEUE BATCH RESPONSE:", JSON.stringify(result, null, 2));
 
                     for (let idx = 0; idx < result.messages.length; idx++) {
                         const msg = result.messages[idx] as { accepted?: boolean; apiMessageId?: string; error?: unknown };

@@ -217,6 +217,12 @@ export const createInvitation = mutation({
         });
 
         // Logic to send email would go here (using internal action)
+        await ctx.scheduler.runAfter(0, internal.actions.email.sendInvitationEmail, {
+            email: args.email,
+            token,
+            role: args.role,
+            invitedBy: adminUser.name || "Admin",
+        });
 
         return { token };
     }

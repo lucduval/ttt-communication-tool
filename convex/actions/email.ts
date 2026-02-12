@@ -266,3 +266,43 @@ export const getSharedMailbox = action({
         };
     },
 });
+
+/**
+ * Send an invitation email to a new user
+ */
+export const sendInvitationEmail = action({
+    args: {
+        email: v.string(),
+        token: v.string(),
+        role: v.string(),
+        invitedBy: v.string(),
+    },
+    handler: async (ctx, args) => {
+        const inviteLink = `${process.env.SITE_URL || "http://localhost:3000"}/accept-invite?token=${args.token}`;
+
+        const htmlBody = `
+        <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2>You've been invited to join the TTT Communication Tool</h2>
+            <p>Hello,</p>
+            <p>You have been invited by <strong>${args.invitedBy}</strong> to join the TTT Communication Tool as a <strong>${args.role}</strong>.</p>
+            <p>To accept this invitation and get started, please click the button below:</p>
+            <div style="text-align: center; margin: 30px 0;">
+                <a href="${inviteLink}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Accept Invitation</a>
+            </div>
+            <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
+            <p><a href="${inviteLink}">${inviteLink}</a></p>
+            <hr style="margin: 30px 0; border: none; border-top: 1px solid #eee;" />
+            <p style="color: #666; font-size: 12px;">This invitation was sent from the TTT Communication Tool. If you were not expecting this, please ignore this email.</p>
+        </div>
+        `;
+
+        const result = await sendEmail({
+            subject: "Invitation to TTT Communication Tool",
+            body: htmlBody,
+            toRecipients: [{ email: args.email }],
+            fromMailbox: "no-reply@ttt-group.co.za",
+        });
+
+        return result;
+    },
+});
