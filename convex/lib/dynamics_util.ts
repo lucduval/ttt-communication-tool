@@ -6,6 +6,7 @@ interface SimpleContact {
     fullname: string;
     emailaddress1: string | null;
     mobilephone: string | null;
+    riivo_referralcode: string | null;
 }
 
 export interface ShimmedContact {
@@ -14,6 +15,7 @@ export interface ShimmedContact {
     email: string | null;
     phone: string | null;
     internationalPhone: string | null;
+    referralCode: string | null;
 }
 
 export interface CampaignFilters {
@@ -26,6 +28,8 @@ export interface CampaignFilters {
     province?: string;
     ageMin?: number;
     ageMax?: number;
+    ownerId?: string;
+    industryId?: string;
 }
 
 /**
@@ -44,7 +48,9 @@ export async function fetchMatchingContacts(
         sourceCode,
         province,
         ageMin,
-        ageMax
+        ageMax,
+        ownerId,
+        industryId
     } = filters;
 
     // Build filter expression
@@ -90,7 +96,17 @@ export async function fetchMatchingContacts(
         filterExpression += ` and riivo_age le ${ageMax}`;
     }
 
-    const selectFields = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber";
+    if (ownerId) {
+        filterExpression += ` and _ownerid_value eq '${ownerId}'`;
+    }
+
+    if (industryId) {
+        filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
+    }
+
+    console.log(`[fetchMatchingContacts] Filter Expression: ${filterExpression}`);
+
+    const selectFields = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber,riivo_referralcode";
     const initialEndpoint = `contacts?$filter=${filterExpression}&$select=${selectFields}&$orderby=fullname asc`;
 
     interface SimpleContactsResponse {
@@ -119,6 +135,7 @@ export async function fetchMatchingContacts(
                     email: contact.emailaddress1,
                     phone: contact.mobilephone,
                     internationalPhone: (contact as any).icon_formattedmobilenumber || null,
+                    referralCode: contact.riivo_referralcode || null,
                 }));
 
                 await onChunk(chunk);

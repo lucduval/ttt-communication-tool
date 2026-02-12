@@ -337,9 +337,14 @@ export const processWhatsAppBatch = internalAction({
                         ? JSON.parse(recipient.variables)
                         : {};
 
+
                     const allVariables: Record<string, string> = {
                         name: recipient.name,
+                        fullname: recipient.name,
                         first_name: recipient.name.split(" ")[0],
+                        firstname: recipient.name.split(" ")[0],
+                        mobilephone: recipient.phone || "",
+                        riivo_referralcode: recipientVars.referralCode || "",
                         ...recipientVars,
                     };
 
@@ -519,7 +524,9 @@ export const processCampaignFilters = internalAction({
                     email: c.email ?? undefined,
                     phone: (c.internationalPhone || c.phone) ?? undefined,
                     name: c.fullName,
-                    variables: JSON.stringify({}), // Empty variables for now
+                    variables: JSON.stringify({
+                        referralCode: c.referralCode,
+                    }), // Include referral code in variables
                 }));
 
                 // Create a batch for this chunk

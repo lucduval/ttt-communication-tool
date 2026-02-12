@@ -21,10 +21,12 @@ export interface FilterState {
     province: string | null;
     ageMin: number | null;
     ageMax: number | null;
+    ownerId: string | null;
+    industryId: string | null;
 }
 
 interface Option {
-    value: number;
+    value: number | string;
     label: string;
 }
 
@@ -46,10 +48,15 @@ export function ContactFilters({
     const [entityTypeOptions, setEntityTypeOptions] = useState<Option[]>([]);
     const [bankOptions, setBankOptions] = useState<Option[]>([]);
     const [sourceCodeOptions, setSourceCodeOptions] = useState<Option[]>([]);
+    const [ownerOptions, setOwnerOptions] = useState<Option[]>([]);
+    const [industryOptions, setIndustryOptions] = useState<Option[]>([]);
 
     // -- API Actions --
     const getAttributeOptions = useAction(api.actions.dynamics.getAttributeOptionSet);
     const getGlobalOptions = useAction(api.actions.dynamics.getGlobalOptionSet);
+
+    const getOwnerOptions = useAction(api.actions.dynamics.fetchUsers);
+    const getIndustryOptions = useAction(api.actions.dynamics.fetchIndustries);
 
     // -- Fetch Metadata on Mount --
     useEffect(() => {
@@ -71,6 +78,14 @@ export function ContactFilters({
                 // Source Code (riivo_sourcecode) -> MultiSelect
                 const sources = await getAttributeOptions({ entityName: "contact", attributeName: "riivo_sourcecode" });
                 setSourceCodeOptions(sources.options);
+
+                // Owners (Consultants)
+                const owners = await getOwnerOptions();
+                setOwnerOptions(owners.map(o => ({ value: o.id, label: o.name })));
+
+                // Industries
+                const industries = await getIndustryOptions();
+                setIndustryOptions(industries.map((i: any) => ({ value: i.id, label: i.name })));
 
             } catch (err) {
                 console.error("Failed to load filter metadata:", err);
@@ -101,6 +116,8 @@ export function ContactFilters({
             province: null,
             ageMin: null,
             ageMax: null,
+            ownerId: null,
+            industryId: null,
         });
     };
 
@@ -114,7 +131,9 @@ export function ContactFilters({
         filters.sourceCode.length > 0 ||
         filters.province !== null ||
         filters.ageMin !== null ||
-        filters.ageMax !== null;
+        filters.ageMax !== null ||
+        filters.ownerId !== null ||
+        filters.industryId !== null;
 
     return (
         <div className="space-y-4">
@@ -191,6 +210,48 @@ export function ContactFilters({
                             >
                                 <option value="">All Entities</option>
                                 {entityTypeOptions.map((opt) => (
+                                    <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+
+                        {/* Consultant (Owner) */}
+                        <div>
+                            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                Consultant
+                            </label>
+                            <select
+                                value={filters.ownerId || ""}
+                                onChange={(e) =>
+                                    updateFilter("ownerId", e.target.value || null)
+                                }
+                                className="w-full bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10"
+                            >
+                                <option value="">All Consultants</option>
+                                {ownerOptions.map((opt) => (
+                                    <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+
+                        {/* Industry */}
+                        <div>
+                            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                Industry
+                            </label>
+                            <select
+                                value={filters.industryId || ""}
+                                onChange={(e) =>
+                                    updateFilter("industryId", e.target.value || null)
+                                }
+                                className="w-full bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10"
+                            >
+                                <option value="">All Industries</option>
+                                {industryOptions.map((opt) => (
                                     <option key={opt.value} value={opt.value}>
                                         {opt.label}
                                     </option>
@@ -377,6 +438,16 @@ export function ContactFilters({
                                     Age: {filters.ageMin || 0} - {filters.ageMax || "∞"}
                                 </Badge>
                             )}
+                            {filters.ownerId && (
+                                <Badge status="info">
+                                    Consultant: {ownerOptions.find(o => o.value === filters.ownerId)?.label || "Unknown"}
+                                </Badge>
+                            )}
+                            {filters.industryId && (
+                                <Badge status="info">
+                                    Industry: {industryOptions.find(o => o.value === filters.industryId)?.label || "Unknown"}
+                                </Badge>
+                            )}
                             {filters.marketingType !== "all" && (
                                 <Badge status="info">
                                     {filters.marketingType.charAt(0).toUpperCase() +
@@ -465,8 +536,8 @@ function MultiSelect({
                             >
                                 <input
                                     type="checkbox"
-                                    checked={selected.includes(option.value)}
-                                    onChange={() => handleToggle(option.value)}
+                                    checked={selected.includes(option.value as number)}
+                                    onChange={() => handleToggle(option.value as number)}
                                     className="h-4 w-4 rounded border-gray-300 text-[#1E3A5F] focus:ring-[#1E3A5F]"
                                 />
                                 <span>{option.label}</span>

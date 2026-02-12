@@ -25,6 +25,8 @@ const INITIAL_FILTERS: FilterState = {
     province: null,
     ageMin: null,
     ageMax: null,
+    ownerId: null,
+    industryId: null,
 };
 
 const ITEMS_PER_PAGE = 50;
@@ -64,6 +66,8 @@ export default function RecipientsPage() {
                     province: filters.province || undefined,
                     ageMin: filters.ageMin ?? undefined,
                     ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
                 }),
                 getContactCount({
                     filter: odataFilter,
@@ -75,6 +79,8 @@ export default function RecipientsPage() {
                     province: filters.province || undefined,
                     ageMin: filters.ageMin ?? undefined,
                     ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
                 }),
             ]);
 

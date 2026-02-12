@@ -84,6 +84,8 @@ export const fetchContacts = action({
         province: v.optional(v.string()),
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
+        ownerId: v.optional(v.string()),
+        industryId: v.optional(v.string()), // New industry filter
     },
     handler: async (ctx, args) => {
         const {
@@ -99,7 +101,10 @@ export const fetchContacts = action({
             sourceCode,
             province,
             ageMin,
-            ageMax
+            ageMax,
+
+            ownerId,
+            industryId
         } = args;
 
         // Build OData query parameters
@@ -158,6 +163,16 @@ export const fetchContacts = action({
             filterExpression += ` and riivo_age le ${ageMax}`;
         }
 
+        if (ownerId) {
+            filterExpression += ` and _ownerid_value eq '${ownerId}'`;
+        }
+
+        if (industryId) {
+            filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
+        }
+
+        console.log(`[fetchContacts] Filter Expression: ${filterExpression}`);
+
         queryParts.push(`$filter=${filterExpression}`);
 
         // Order by name
@@ -212,6 +227,7 @@ export const fetchContacts = action({
             sourceCode: contact.riivo_sourcecode,
             province: contact.address1_stateorprovince,
             age: contact.riivo_age,
+            industryId: (contact as any)._riivo_industryid_value,
             createdOn: contact.createdon,
             modifiedOn: contact.modifiedon,
         }));
@@ -229,6 +245,7 @@ export const fetchContacts = action({
  */
 export const getContactCount = action({
     args: {
+        ownerId: v.optional(v.string()),
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
         // New filters
@@ -239,9 +256,11 @@ export const getContactCount = action({
         province: v.optional(v.string()),
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
+        industryId: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const {
+            ownerId,
             filter,
             search,
             clientType,
@@ -250,7 +269,8 @@ export const getContactCount = action({
             sourceCode,
             province,
             ageMin,
-            ageMax
+            ageMax,
+            industryId
         } = args;
 
         // Build filter expression
@@ -294,6 +314,18 @@ export const getContactCount = action({
         if (ageMax !== undefined) {
             filterExpression += ` and riivo_age le ${ageMax}`;
         }
+
+        if (ownerId) {
+            filterExpression += ` and _ownerid_value eq '${ownerId}'`;
+        }
+
+        if (industryId) {
+            filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
+        }
+
+
+
+        console.log(`[getContactCount] Filter Expression: ${filterExpression}`);
 
         const endpoint = `contacts?$filter=${filterExpression}&$count=true&$top=5`;
 
@@ -311,6 +343,7 @@ export const getContactCount = action({
  */
 export const fetchAllContactIds = action({
     args: {
+        ownerId: v.optional(v.string()),
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
         // New filters
@@ -321,9 +354,11 @@ export const fetchAllContactIds = action({
         province: v.optional(v.string()),
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
+        industryId: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const {
+            ownerId,
             filter,
             search,
             clientType,
@@ -332,7 +367,8 @@ export const fetchAllContactIds = action({
             sourceCode,
             province,
             ageMin,
-            ageMax
+            ageMax,
+            industryId
         } = args;
 
         // Build filter expression
@@ -376,6 +412,16 @@ export const fetchAllContactIds = action({
         if (ageMax !== undefined) {
             filterExpression += ` and riivo_age le ${ageMax}`;
         }
+
+        if (ownerId) {
+            filterExpression += ` and _ownerid_value eq '${ownerId}'`;
+        }
+
+        if (industryId) {
+            filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
+        }
+
+        console.log(`[fetchAllContactIds] Filter Expression: ${filterExpression}`);
 
         // We only need basic fields for campaign creation
         const selectFields = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber";
@@ -558,5 +604,63 @@ export const getGlobalOptionSet = action({
             label: opt.Label.UserLocalizedLabel.Label,
         }));
         return { options: options as OptionSetOption[] };
+    },
+});
+
+/**
+ * Fetch system users (consultants) from Dynamics
+ */
+export const fetchUsers = action({
+    args: {},
+    handler: async (ctx) => {
+        // Fetch active users, excluding system accounts (starting with #)
+        // Note: # must be encoded as %23 to avoid being interpreted as a URL fragment
+        const endpoint = `systemusers?$select=systemuserid,fullname&$filter=isdisabled eq false and not startswith(fullname,'%23')&$orderby=fullname asc`;
+
+        interface DynamicsUser {
+            systemuserid: string;
+            fullname: string;
+        }
+
+        interface UsersResponse {
+            value: DynamicsUser[];
+        }
+
+        const response = await dynamicsRequest<UsersResponse>(endpoint);
+
+        return response.value.map(user => ({
+            id: user.systemuserid,
+            name: user.fullname,
+        }));
+    },
+});
+
+/**
+ * Fetch industries from Dynamics
+ */
+export const fetchIndustries = action({
+    args: {},
+    handler: async (ctx) => {
+        // Fetch industries from riivo_industries entity
+        // Entity: riivo_industry
+        // PK: riivo_industryid
+        // Name: riivo_industry
+        const endpoint = `riivo_industries?$select=riivo_industryid,riivo_industry&$orderby=riivo_industry asc`;
+
+        interface DynamicsIndustry {
+            riivo_industryid: string;
+            riivo_industry: string;
+        }
+
+        interface IndustriesResponse {
+            value: DynamicsIndustry[];
+        }
+
+        const response = await dynamicsRequest<IndustriesResponse>(endpoint);
+
+        return response.value.map(industry => ({
+            id: industry.riivo_industryid,
+            name: industry.riivo_industry,
+        }));
     },
 });

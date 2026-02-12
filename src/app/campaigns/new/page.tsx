@@ -58,6 +58,8 @@ const INITIAL_FILTERS: FilterState = {
     province: null,
     ageMin: null,
     ageMax: null,
+    ownerId: null,
+    industryId: null,
 };
 
 interface UploadedImage {
@@ -161,6 +163,8 @@ export default function NewCampaignPage() {
                     province: filters.province || undefined,
                     ageMin: filters.ageMin ?? undefined,
                     ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
                 }),
                 getContactCount({
                     filter: channelFilter,
@@ -172,6 +176,8 @@ export default function NewCampaignPage() {
                     province: filters.province || undefined,
                     ageMin: filters.ageMin ?? undefined,
                     ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
                 }),
             ]);
 
@@ -357,6 +363,8 @@ export default function NewCampaignPage() {
                     province: filters.province || undefined,
                     ageMin: filters.ageMin ?? undefined,
                     ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
                 });
             } else {
                 // Standard mode: send selected recipients
@@ -504,6 +512,8 @@ export default function NewCampaignPage() {
                 province: filters.province || undefined,
                 ageMin: filters.ageMin ?? undefined,
                 ageMax: filters.ageMax ?? undefined,
+                ownerId: filters.ownerId || undefined,
+                industryId: filters.industryId || undefined,
             });
 
             // Set select all mode active
