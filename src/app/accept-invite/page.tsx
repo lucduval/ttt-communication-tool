@@ -41,7 +41,7 @@ export default function AcceptInvitePage() {
             const userEmail = user.primaryEmailAddress.emailAddress;
 
             // Check email match (case-insensitive)
-            if (userEmail.toLowerCase() !== invitation.email.toLowerCase()) {
+            if (!invitation.email || userEmail.toLowerCase() !== invitation.email.toLowerCase()) {
                 return; // Mismatch handled in UI
             }
 
@@ -92,7 +92,7 @@ export default function AcceptInvitePage() {
                     <AlertCircle className="mx-auto mb-4 text-red-500" size={48} />
                     <h1 className="text-2xl font-bold mb-2 text-gray-900">Invitation Invalid</h1>
                     <p className="text-gray-600 mb-6">{invitation.error || "This invitation is no longer valid."}</p>
-                    <Button onClick={() => router.push("/")} variant="outline">
+                    <Button onClick={() => router.push("/")} variant="secondary">
                         Return to Home
                     </Button>
                 </Card>
@@ -145,7 +145,7 @@ export default function AcceptInvitePage() {
                         This invitation is for <strong>{invitation.email}</strong>, but you are signed in as <strong>{userEmail}</strong>.
                     </p>
                     <div className="flex flex-col gap-3 mt-4">
-                        <Button onClick={() => signOut()} variant="outline" className="w-full text-red-600 border-red-200 hover:bg-red-50">
+                        <Button onClick={() => signOut()} variant="secondary" className="w-full text-red-600 border-red-200 hover:bg-red-50">
                             Sign Out & Switch Account
                         </Button>
                     </div>
@@ -165,7 +165,7 @@ export default function AcceptInvitePage() {
                         <AlertCircle className="mx-auto mb-4 text-red-500" size={48} />
                         <h1 className="text-xl font-bold mb-2 text-gray-900">Something went wrong</h1>
                         <p className="text-gray-600 mb-6">{acceptError}</p>
-                        <Button onClick={() => window.location.reload()} variant="outline">
+                        <Button onClick={() => window.location.reload()} variant="secondary">
                             Try Again
                         </Button>
                     </>
