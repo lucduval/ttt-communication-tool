@@ -289,8 +289,6 @@ export const sendInvitationEmail = internalAction({
             <div style="text-align: center; margin: 30px 0;">
                 <a href="${inviteLink}" style="background-color: #007bff; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Accept Invitation</a>
             </div>
-            <p>If the button doesn't work, you can copy and paste this link into your browser:</p>
-            <p><a href="${inviteLink}">${inviteLink}</a></p>
             <hr style="margin: 30px 0; border: none; border-top: 1px solid #eee;" />
             <p style="color: #666; font-size: 12px;">This invitation was sent from the TTT Communication Tool. If you were not expecting this, please ignore this email.</p>
         </div>

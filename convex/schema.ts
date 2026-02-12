@@ -126,6 +126,8 @@ export default defineSchema({
         invitedBy: v.string(), // ID of user who invited
         status: v.string(), // pending, accepted, expired, revoked
         expiresAt: v.number(),
+        acceptedAt: v.optional(v.number()),
+        acceptedBy: v.optional(v.string()), // Clerk user ID
     })
         .index("by_email", ["email"])
         .index("by_token", ["token"])

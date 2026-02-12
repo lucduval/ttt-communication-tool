@@ -262,4 +262,87 @@ export const updateUser = mutation({
     }
 });
 
+/**
+ * Public: Validate invitation token
+ */
+export const validateInvitation = query({
+    args: { token: v.string() },
+    handler: async (ctx, args) => {
+        const invite = await ctx.db
+            .query("invitations")
+            .withIndex("by_token", (q) => q.eq("token", args.token))
+            .first();
+
+        if (!invite) return { valid: false, error: "Invalid token" };
+        if (invite.status !== "pending") return { valid: false, error: "Invitation already used or revoked" };
+        if (invite.expiresAt < Date.now()) return { valid: false, error: "Invitation expired" };
+
+        return {
+            valid: true,
+            email: invite.email,
+            role: invite.role,
+        };
+    }
+});
+
+/**
+ * Public/Auth: Accept invitation
+ */
+export const acceptInvitation = mutation({
+    args: { token: v.string() },
+    handler: async (ctx, args) => {
+        const identity = await ctx.auth.getUserIdentity();
+        if (!identity) throw new Error("Unauthorized");
+
+        const invite = await ctx.db
+            .query("invitations")
+            .withIndex("by_token", (q) => q.eq("token", args.token))
+            .first();
+
+        if (!invite || invite.status !== "pending" || invite.expiresAt < Date.now()) {
+            throw new Error("Invalid or expired invitation");
+        }
+
+        // Verify email matches
+        if (invite.email.toLowerCase() !== identity.email?.toLowerCase()) {
+            throw new Error("Email mismatch. Please login with the invited email address.");
+        }
+
+        // Update invitation status
+        await ctx.db.patch(invite._id, {
+            status: "accepted",
+            acceptedAt: Date.now(),
+            acceptedBy: identity.subject,
+        });
+
+        // Update user status
+        const user = await ctx.db
+            .query("users")
+            .withIndex("by_email", (q) => q.eq("email", invite.email))
+            .first();
+
+        if (user) {
+            await ctx.db.patch(user._id, {
+                status: "active",
+                role: invite.role,
+                clerkId: identity.subject, // Ensure Clerk ID is linked
+                lastLoginAt: Date.now(),
+            });
+        } else {
+            // Should have been created by createInvitation, but just in case
+            await ctx.db.insert("users", {
+                email: invite.email,
+                role: invite.role,
+                status: "active",
+                clerkId: identity.subject,
+                joinedAt: Date.now(),
+                lastLoginAt: Date.now(),
+                invitedBy: invite.invitedBy,
+            });
+        }
+
+        return { success: true };
+    }
+});
+
 
