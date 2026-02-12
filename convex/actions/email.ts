@@ -1,6 +1,6 @@
 "use node";
 
-import { action } from "../_generated/server";
+import { action, internalAction } from "../_generated/server";
 import { v } from "convex/values";
 import { sendEmail, type EmailAttachment } from "../lib/graph_client";
 import { dynamicsRequest } from "../lib/dynamics_auth";
@@ -270,7 +270,7 @@ export const getSharedMailbox = action({
 /**
  * Send an invitation email to a new user
  */
-export const sendInvitationEmail = action({
+export const sendInvitationEmail = internalAction({
     args: {
         email: v.string(),
         token: v.string(),
