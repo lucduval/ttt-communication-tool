@@ -38,12 +38,12 @@ export function TemplateCard({ template, isSelected, onSelect }: TemplateCardPro
         <div
             onClick={onSelect}
             className={`p-4 border-2 rounded-lg cursor-pointer transition-all ${isSelected
-                    ? "border-[#1E3A5F] bg-[#1E3A5F]/5 shadow-md"
-                    : "border-gray-100 hover:border-gray-200"
+                ? "border-[#1E3A5F] bg-[#1E3A5F]/5 shadow-md"
+                : "border-gray-100 hover:border-gray-200"
                 }`}
         >
-            <div className="flex items-start justify-between mb-3">
-                <h4 className="font-bold text-gray-900">{template.name}</h4>
+            <div className="flex flex-col items-start gap-2 mb-3">
+                <h4 className="font-bold text-gray-900 break-words w-full">{template.name}</h4>
                 <span
                     className={`px-2 py-0.5 rounded-full text-xs font-medium border ${categoryColors[template.category] || "bg-gray-100 text-gray-600"
                         }`}

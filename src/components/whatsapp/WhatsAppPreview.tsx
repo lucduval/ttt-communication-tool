@@ -28,8 +28,9 @@ export function WhatsAppPreview({
         });
 
         // Auto-replace common variables with recipient data
-        message = message.replace(/\{\{name\}\}/gi, recipientName);
-        message = message.replace(/\{\{first_name\}\}/gi, recipientName.split(" ")[0]);
+        const safeName = recipientName || "John Doe";
+        message = message.replace(/\{\{name\}\}/gi, safeName);
+        message = message.replace(/\{\{first_name\}\}/gi, safeName.split(" ")[0]);
 
         return message;
     };
