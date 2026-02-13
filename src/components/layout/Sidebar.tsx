@@ -18,7 +18,8 @@ const navItems = [
     { id: "wizard", label: "Create Campaign", icon: Plus, href: "/campaigns/new" },
     { id: "recipients", label: "CRM Recipients", icon: Users, href: "/recipients" },
     { id: "monitoring", label: "Campaigns", icon: BarChart3, href: "/campaigns" },
-    { id: "templates", label: "Templates", icon: FileText, href: "/templates/whatsapp" },
+    { id: "email-templates", label: "Email Templates", icon: FileText, href: "/templates/email" },
+    { id: "whatsapp-templates", label: "WhatsApp Templates", icon: FileText, href: "/templates/whatsapp" },
 ];
 
 import { useQuery } from "convex/react";

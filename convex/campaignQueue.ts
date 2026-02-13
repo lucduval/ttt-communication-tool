@@ -155,7 +155,12 @@ export const processEmailBatch = internalAction({
                         ? `${siteUrl}/unsubscribe?id=${recipient.id}`
                         : "";
 
-                    let emailBody = (campaign.htmlBody || "") + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : "");
+                    // Generate full email HTML with wrapper
+                    const { wrapEmail } = await import("./lib/emailLayout");
+                    let emailBody = wrapEmail(
+                        (campaign.htmlBody || "") + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : ""),
+                        campaign.subject || "Notification"
+                    );
 
                     // Link rewriting and open tracking
                     if (siteUrl) {

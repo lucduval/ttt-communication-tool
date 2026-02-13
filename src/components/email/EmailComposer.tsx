@@ -37,6 +37,8 @@ interface EmailComposerProps {
     onContentChange: (html: string) => void;
     onImageUpload?: (file: File) => Promise<{ url: string; contentId: string }>;
     onPreview?: () => void;
+    fontSize?: string;
+    onFontSizeChange?: (size: string) => void;
 }
 
 // Max dimensions for compressed images
@@ -105,6 +107,8 @@ export function EmailComposer({
     onPreview,
     attachments = [],
     onAttachmentsChange,
+    fontSize = "18px",
+    onFontSizeChange,
 }: EmailComposerProps & {
     attachments?: File[];
     onAttachmentsChange?: (attachments: File[]) => void;
@@ -124,6 +128,7 @@ export function EmailComposer({
     // Font Popover State
     const [isFontPopoverOpen, setIsFontPopoverOpen] = useState(false);
     const [currentFont, setCurrentFont] = useState("Arial");
+    const [isFontSizePopoverOpen, setIsFontSizePopoverOpen] = useState(false);
 
     // Template Management
     const templates = useQuery(api.emailTemplates.list) || [];
@@ -142,6 +147,7 @@ export function EmailComposer({
                 name: newTemplateName,
                 subject: subject,
                 htmlContent: htmlContent,
+                fontSize: fontSize,
             });
             alert("Template saved successfully");
             setIsSavePopoverOpen(false);
@@ -158,6 +164,9 @@ export function EmailComposer({
             if (confirm("Loading a template will overwrite current subject and content. Continue?")) {
                 onSubjectChange(template.subject);
                 onContentChange(template.htmlContent);
+                if (onFontSizeChange && template.fontSize) {
+                    onFontSizeChange(template.fontSize);
+                }
                 if (editorRef.current) {
                     editorRef.current.innerHTML = template.htmlContent;
                 }
@@ -183,6 +192,10 @@ export function EmailComposer({
         { name: "Georgia", value: "Georgia, serif" },
         { name: "Tahoma", value: "Tahoma, sans-serif" },
         { name: "Trebuchet MS", value: "'Trebuchet MS', sans-serif" },
+    ];
+
+    const fontSizes = [
+        "12px", "14px", "16px", "18px", "20px", "24px", "28px", "32px"
     ];
 
     // Only set initial content once
@@ -399,6 +412,40 @@ export function EmailComposer({
                                     style={{ fontFamily: font.value }}
                                 >
                                     {font.name}
+                                </button>
+                            ))}
+                        </div>
+                    </PopoverContent>
+                </Popover>
+            )
+        },
+        {
+            icon: Type,
+            custom: (
+                <Popover open={isFontSizePopoverOpen} onOpenChange={setIsFontSizePopoverOpen}>
+                    <PopoverTrigger asChild>
+                        <button
+                            type="button"
+                            className="p-2 hover:bg-gray-200 rounded transition-colors flex items-center gap-1"
+                            title="Font Size"
+                            onMouseDown={(e) => e.preventDefault()}
+                        >
+                            <span className="text-xs text-gray-500 w-8 text-center font-medium">{fontSize}</span>
+                        </button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-24 p-1" align="start">
+                        <div className="space-y-1">
+                            {fontSizes.map((size) => (
+                                <button
+                                    key={size}
+                                    onClick={() => {
+                                        if (onFontSizeChange) onFontSizeChange(size);
+                                        setIsFontSizePopoverOpen(false);
+                                    }}
+                                    className={`w-full text-left px-2 py-1.5 text-sm rounded hover:bg-gray-100 ${fontSize === size ? "bg-gray-100 font-medium" : ""
+                                        }`}
+                                >
+                                    {size}
                                 </button>
                             ))}
                         </div>
@@ -670,6 +717,7 @@ export function EmailComposer({
                         onInput={updateContent}
                         style={{
                             fontFamily: "Arial, sans-serif",
+                            fontSize: fontSize,
                         }}
                     />
                 </div>

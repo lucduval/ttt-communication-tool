@@ -88,6 +88,7 @@ export default function NewCampaignPage() {
     // Email state
     const [subject, setSubject] = useState("");
     const [htmlContent, setHtmlContent] = useState("");
+    const [fontSize, setFontSize] = useState("18px");
     const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
     const [attachments, setAttachments] = useState<File[]>([]);
     const [selectedMailbox, setSelectedMailbox] = useState<string | null>(null);
@@ -271,8 +272,8 @@ export default function NewCampaignPage() {
         return processedAttachments;
     };
 
-    const convertBase64ToCid = (html: string): string => {
-        return html.replace(
+    const convertBase64ToCid = (html: string, wrapWithStyle: boolean = false): string => {
+        const processed = html.replace(
             /<img([^>]*)\s+src="data:image\/[^"]+"/gi,
             (match, attrs) => {
                 const contentIdMatch = attrs.match(/data-content-id="([^"]+)"/i);
@@ -283,12 +284,18 @@ export default function NewCampaignPage() {
                 return match;
             }
         );
+
+        if (wrapWithStyle && campaignChannel === "email") {
+            return `<div style="font-size: ${fontSize}; font-family: Arial, sans-serif; color: #333; line-height: 1.6; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%;">${processed}</div>`;
+        }
+        return processed;
     };
 
     const handleSendTest = async (email: string) => {
         setIsSendingTest(true);
         try {
-            const processedHtml = convertBase64ToCid(htmlContent);
+            // Bake font size into HTML for test email
+            const processedHtml = convertBase64ToCid(htmlContent, true);
             const fileAttachments = await processAttachments();
 
             // Combine inline images and file attachments
@@ -386,7 +393,8 @@ export default function NewCampaignPage() {
                         }));
             }
 
-            const processedHtml = campaignChannel === "email" ? convertBase64ToCid(htmlContent) : undefined;
+            // Bake font size into HTML for bulk email
+            const processedHtml = campaignChannel === "email" ? convertBase64ToCid(htmlContent, true) : undefined;
 
             // 1. Process attachments: upload files to Storage if present
             const backendAttachments = [];
@@ -741,6 +749,8 @@ export default function NewCampaignPage() {
                                             onSubjectChange={setSubject}
                                             htmlContent={htmlContent}
                                             onContentChange={setHtmlContent}
+                                            fontSize={fontSize}
+                                            onFontSizeChange={setFontSize}
                                             onImageUpload={handleImageUpload}
                                             attachments={attachments}
                                             onAttachmentsChange={setAttachments}
@@ -752,7 +762,7 @@ export default function NewCampaignPage() {
                                         isOpen={showLivePreview}
                                         onClose={() => setShowLivePreview(false)}
                                         subject={subject}
-                                        htmlContent={convertBase64ToCid(htmlContent)}
+                                        htmlContent={convertBase64ToCid(htmlContent, true)} // Preview with styles
                                         senderEmail={selectedMailbox || undefined}
                                         recipientName={selectedContacts[0]?.fullName || "Recipient Name"}
                                         recipientEmail={selectedContacts[0]?.email || "recipient@example.com"}

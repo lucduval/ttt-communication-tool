@@ -32,6 +32,7 @@ export const create = mutation({
         name: v.string(),
         subject: v.string(),
         htmlContent: v.string(),
+        fontSize: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await checkAccessHelper(ctx);
@@ -53,6 +54,7 @@ export const update = mutation({
         name: v.optional(v.string()),
         subject: v.optional(v.string()),
         htmlContent: v.optional(v.string()),
+        fontSize: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await checkAccessHelper(ctx);

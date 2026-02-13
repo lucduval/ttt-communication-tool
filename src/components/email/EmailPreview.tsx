@@ -10,6 +10,7 @@ interface EmailPreviewProps {
     senderEmail?: string;
     recipientName?: string;
     recipientEmail?: string;
+    fontSize?: string;
 }
 
 export function EmailPreview({
@@ -19,6 +20,7 @@ export function EmailPreview({
     recipientName = "John Doe",
     recipientEmail = "john@example.com",
     attachments = [],
+    fontSize = "18px",
 }: EmailPreviewProps & { attachments?: File[] }) {
     const [viewMode, setViewMode] = useState<"desktop" | "mobile">("desktop");
     const [showAttachments, setShowAttachments] = useState(true);
@@ -105,7 +107,7 @@ export function EmailPreview({
                         className="p-6 min-h-[300px] email-preview-content"
                         style={{
                             fontFamily: "inherit",
-                            fontSize: "14px",
+                            fontSize: fontSize,
                             lineHeight: "1.6",
                         }}
                         dangerouslySetInnerHTML={{

@@ -176,6 +176,7 @@ export default defineSchema({
         htmlContent: v.string(), // The HTML body
         createdBy: v.string(), // User ID
         lastUpdatedAt: v.number(),
+        fontSize: v.optional(v.string()),
     })
         .index("by_name", ["name"])
         .index("by_user", ["createdBy"]),

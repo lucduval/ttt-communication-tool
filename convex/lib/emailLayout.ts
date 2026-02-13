@@ -1,5 +1,5 @@
 export const wrapEmail = (content: string, title: string = "Notification"): string => {
-    return `
+  return `
 <!DOCTYPE html>
 <html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:o="urn:schemas-microsoft-com:office:office">
 <head>
@@ -19,11 +19,13 @@ export const wrapEmail = (content: string, title: string = "Notification"): stri
   <style>
     table, td, div, h1, p { font-family: Arial, sans-serif; }
     body { margin: 0; padding: 0; background-color: #f4f4f4; }
-    .email-container { max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-    img { max-width: 100%; height: auto; display: block; }
+    .email-container { max-width: 800px; margin: 0 auto; background-color: #ffffff; padding: 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    img { max-width: 100%; width: 100%; height: auto; display: block; }
     a { color: #007bff; text-decoration: none; }
-    @media only screen and (max-width: 600px) {
-      .email-container { width: 100% !important; padding: 10px !important; }
+    /* Force tables to expand to full width of container */
+    table { width: 100% !important; }
+    @media only screen and (max-width: 800px) {
+      .email-container { width: 100% !important; padding: 0 !important; }
     }
   </style>
 </head>
@@ -33,9 +35,9 @@ export const wrapEmail = (content: string, title: string = "Notification"): stri
       <tr>
         <td align="center">
           <!-- Main Container -->
-          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:600px;margin:0 auto;background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:800px;margin:0 auto;background-color:#ffffff;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
             <tr>
-              <td style="padding:24px;font-family:Arial,sans-serif;font-size:16px;line-height:1.5;color:#333333;">
+              <td style="padding:0;font-family:Arial,sans-serif;font-size:18px;line-height:1.5;color:#333333;">
                 ${content}
               </td>
             </tr>
