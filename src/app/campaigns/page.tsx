@@ -105,8 +105,19 @@ export default function CampaignsPage() {
                                                     }}
                                                 ></div>
                                             </div>
-                                            <div className="text-xs text-gray-400">
-                                                {campaign.totalRecipients} Total
+                                            <div className="text-xs text-gray-400 flex justify-between">
+                                                <span>{campaign.totalRecipients} Total</span>
+                                                {/* Show stats if they exist */}
+                                                {(campaign.opensCount !== undefined || campaign.clicksCount !== undefined) && (
+                                                    <span className="ml-2 space-x-2">
+                                                        {campaign.opensCount !== undefined && (
+                                                            <span title="Unique Opens">👁️ {campaign.opensCount}</span>
+                                                        )}
+                                                        {campaign.clicksCount !== undefined && (
+                                                            <span title="Unique Clicks">🖱️ {campaign.clicksCount}</span>
+                                                        )}
+                                                    </span>
+                                                )}
                                             </div>
                                         </div>
                                     </td>

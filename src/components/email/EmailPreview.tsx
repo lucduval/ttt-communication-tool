@@ -104,7 +104,7 @@ export function EmailPreview({
                     <div
                         className="p-6 min-h-[300px] email-preview-content"
                         style={{
-                            fontFamily: "Arial, sans-serif",
+                            fontFamily: "inherit",
                             fontSize: "14px",
                             lineHeight: "1.6",
                         }}

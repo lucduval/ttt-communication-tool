@@ -15,20 +15,32 @@ export async function logEmailActivity(
     body: string
 ): Promise<string | undefined> {
     try {
+        // 1. Create email as Draft/Open first
         const emailActivity = {
             subject: subject,
             description: body.replace(/<[^>]*>/g, "").substring(0, 2000), // Strip HTML, limit length
             directioncode: true, // Outgoing
             "regardingobjectid_contact@odata.bind": `/contacts(${contactId})`,
             actualdurationminutes: 1,
-            statuscode: 2, // Sent
-            statecode: 1, // Completed
+            // Don't set state/status on creation, defaults to Open/Draft
         };
 
         const response = await dynamicsRequest<{ emailid: string }>("emails", {
             method: "POST",
             body: JSON.stringify(emailActivity),
         });
+
+        // 2. Mark as Sent (Completed/Sent)
+        // Standard: statecode 1 (Completed), statuscode 3 (Sent)
+        if (response.emailid) {
+            await dynamicsRequest<{ emailid: string }>(`emails(${response.emailid})`, {
+                method: "PATCH",
+                body: JSON.stringify({
+                    statecode: 1, // Completed
+                    statuscode: 3, // Sent
+                }),
+            });
+        }
 
         return response.emailid;
     } catch (err) {

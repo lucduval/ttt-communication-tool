@@ -5,6 +5,7 @@ import { v } from "convex/values";
 import { sendEmail, type EmailAttachment } from "../lib/graph_client";
 import { dynamicsRequest } from "../lib/dynamics_auth";
 import { internal } from "../_generated/api";
+import { wrapEmail } from "../lib/emailLayout";
 
 /**
  * Send a single email via Microsoft Graph
@@ -31,7 +32,7 @@ export const sendSingleEmail = action({
     handler: async (ctx, args) => {
         const result = await sendEmail({
             subject: args.subject,
-            body: args.htmlBody,
+            body: wrapEmail(args.htmlBody, args.subject),
             toRecipients: [args.to],
             attachments: args.attachments as EmailAttachment[] | undefined,
         });
@@ -63,13 +64,13 @@ export const sendTestEmail = action({
     handler: async (ctx, args) => {
         const result = await sendEmail({
             subject: `[TEST] ${args.subject}`,
-            body: `
+            body: wrapEmail(`
         <div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 16px; margin-bottom: 20px; border-radius: 8px;">
           <strong>⚠️ This is a test email</strong><br/>
           <small>This email was sent as a test before launching the campaign.</small>
         </div>
         ${args.htmlBody}
-      `,
+      `, `[TEST] ${args.subject}`),
             toRecipients: [{ email: args.testEmailAddress }],
             attachments: args.attachments as EmailAttachment[] | undefined,
             fromMailbox: args.fromMailbox,
@@ -136,7 +137,7 @@ export const sendBulkEmails = action({
             try {
                 const result = await sendEmail({
                     subject: args.subject,
-                    body: args.htmlBody,
+                    body: wrapEmail(args.htmlBody, args.subject),
                     toRecipients: [{ email: recipient.email, name: recipient.name }],
                     attachments: args.attachments as EmailAttachment[] | undefined,
                     fromMailbox: args.fromMailbox,
@@ -296,7 +297,7 @@ export const sendInvitationEmail = internalAction({
 
         const result = await sendEmail({
             subject: "Invitation to TTT Communication Tool",
-            body: htmlBody,
+            body: wrapEmail(htmlBody, "Invitation to TTT Communication Tool"),
             toRecipients: [{ email: args.email }],
             fromMailbox: "no-reply@ttt-group.co.za",
         });

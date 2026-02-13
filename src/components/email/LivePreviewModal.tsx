@@ -119,7 +119,7 @@ export function LivePreviewModal({
                             <div
                                 className="p-8 min-h-[400px] bg-white"
                                 style={{
-                                    fontFamily: "Arial, sans-serif",
+                                    fontFamily: "inherit",
                                     fontSize: "16px",
                                     lineHeight: "1.6",
                                     color: "#333"

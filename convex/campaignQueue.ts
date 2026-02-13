@@ -154,7 +154,14 @@ export const processEmailBatch = internalAction({
                     const unsubscribeUrl = siteUrl
                         ? `${siteUrl}/unsubscribe?id=${recipient.id}`
                         : "";
-                    const emailBody = (campaign.htmlBody || "") + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : "");
+
+                    let emailBody = (campaign.htmlBody || "") + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : "");
+
+                    // Link rewriting and open tracking
+                    if (siteUrl) {
+                        const { rewriteEmailLinks } = await import("./lib/tracking_utils");
+                        emailBody = rewriteEmailLinks(emailBody, siteUrl, args.campaignId, recipient.id);
+                    }
 
                     const result = await sendEmail({
                         subject: campaign.subject || "",

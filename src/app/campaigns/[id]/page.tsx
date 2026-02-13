@@ -130,6 +130,20 @@ export default function CampaignDetailsPage() {
                     value={stats?.failed || campaign.failedCount}
                     color="bg-red-50 border-red-200"
                 />
+                {(campaign.opensCount !== undefined || campaign.clicksCount !== undefined) && (
+                    <>
+                        <StatCard
+                            label="Opens"
+                            value={campaign.opensCount || 0}
+                            color="bg-purple-50 border-purple-200"
+                        />
+                        <StatCard
+                            label="Clicks"
+                            value={campaign.clicksCount || 0}
+                            color="bg-indigo-50 border-indigo-200"
+                        />
+                    </>
+                )}
             </div>
 
             <div className="bg-white shadow-md rounded-lg overflow-hidden">

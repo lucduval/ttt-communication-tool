@@ -1,8 +1,106 @@
 import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { unsubscribeContact } from "./lib/dynamics_logging";
+import { isBot } from "./lib/tracking_utils";
+
+
+
+
+import { internal } from "./_generated/api";
+import { Id } from "./_generated/dataModel";
 
 const http = httpRouter();
+
+/**
+ * GET /click?u=<url>&c=<campaignId>&r=<recipientId>
+ * Logs the click and redirects to the target URL.
+ */
+http.route({
+    path: "/click",
+    method: "GET",
+    handler: httpAction(async (ctx, request) => {
+        const url = new URL(request.url);
+        const targetUrl = url.searchParams.get("u");
+        const campaignId = url.searchParams.get("c");
+        const recipientId = url.searchParams.get("r");
+
+        if (!targetUrl || !campaignId || !recipientId) {
+            return new Response("Missing parameters", { status: 400 });
+        }
+
+        // Log the click asynchronously
+        try {
+            await ctx.runMutation(internal.tracking.logClick, {
+                campaignId: campaignId as Id<"campaigns">,
+                recipientId: recipientId,
+                url: targetUrl,
+                userAgent: request.headers.get("user-agent") || undefined,
+            });
+        } catch (error) {
+            console.error("Failed to log click:", error);
+        }
+
+        // Redirect to the target URL
+        return new Response(null, {
+            status: 302,
+            headers: { Location: targetUrl },
+        });
+    }),
+});
+
+/**
+ * GET /open?c=<campaignId>&r=<recipientId>
+ * Logs the open and returns a transparent 1x1 GIF.
+ */
+http.route({
+    path: "/open",
+    method: "GET",
+    handler: httpAction(async (ctx, request) => {
+        const url = new URL(request.url);
+        const campaignId = url.searchParams.get("c");
+        const recipientId = url.searchParams.get("r");
+
+        if (campaignId && recipientId) {
+            const userAgent = request.headers.get("user-agent");
+
+            // Ignore bots and scanners to prevent premature opens
+            if (!isBot(userAgent)) {
+                // Log the open asynchronously
+                try {
+                    await ctx.runMutation(internal.tracking.logOpen, {
+                        campaignId: campaignId as Id<"campaigns">,
+                        recipientId: recipientId,
+                        userAgent: userAgent || undefined,
+                    });
+                } catch (error) {
+                    console.error("Failed to log open:", error);
+                }
+            } else {
+                console.log(`Ignored bot open from UA: ${userAgent}`);
+            }
+        }
+
+        // Return a 1x1 transparent GIF
+        // Return a 1x1 transparent GIF
+        const base64Gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+        const binaryString = atob(base64Gif);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        const gif = bytes;
+
+        return new Response(gif, {
+            status: 200,
+            headers: {
+                "Content-Type": "image/gif",
+                "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        });
+    }),
+});
 
 /**
  * Helper to validate a contactId query param. Returns the contactId or an error Response.

@@ -35,6 +35,9 @@ export default defineSchema({
         createDynamicsActivity: v.optional(v.boolean()),
         // Selected sender mailbox for email campaigns
         fromMailbox: v.optional(v.string()),
+        // Tracking stats
+        clicksCount: v.optional(v.number()),
+        opensCount: v.optional(v.number()),
     })
         .index("by_status", ["status"])
         .index("by_user", ["createdBy"])
@@ -145,5 +148,36 @@ export default defineSchema({
     })
         .index("by_user", ["userId"])
         .index("by_user_unread", ["userId", "isRead"]),
+
+    // Tracking tables
+    clicks: defineTable({
+        campaignId: v.id("campaigns"),
+        recipientId: v.string(),
+        url: v.string(),
+        clickedAt: v.number(),
+        userAgent: v.optional(v.string()),
+    })
+        .index("by_campaign", ["campaignId"])
+        .index("by_recipient", ["recipientId"]),
+
+    opens: defineTable({
+        campaignId: v.id("campaigns"),
+        recipientId: v.string(),
+        openedAt: v.number(),
+        userAgent: v.optional(v.string()),
+    })
+        .index("by_campaign", ["campaignId"])
+        .index("by_recipient", ["recipientId"]),
+
+    // Email Templates
+    emailTemplates: defineTable({
+        name: v.string(),
+        subject: v.string(),
+        htmlContent: v.string(), // The HTML body
+        createdBy: v.string(), // User ID
+        lastUpdatedAt: v.number(),
+    })
+        .index("by_name", ["name"])
+        .index("by_user", ["createdBy"]),
 });
 

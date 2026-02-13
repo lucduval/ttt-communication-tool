@@ -21,10 +21,14 @@ import {
     Minimize2,
     Paperclip,
     Eye,
+    Type,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
+import { useQuery, useMutation } from "convex/react";
+import { api } from "../../../convex/_generated/api";
+import { Save, FileDown, Trash2 } from "lucide-react";
 
 interface EmailComposerProps {
     subject: string;
@@ -116,6 +120,70 @@ export function EmailComposer({
     const [isLinkPopoverOpen, setIsLinkPopoverOpen] = useState(false);
     const [linkUrl, setLinkUrl] = useState("");
     const [linkText, setLinkText] = useState("");
+
+    // Font Popover State
+    const [isFontPopoverOpen, setIsFontPopoverOpen] = useState(false);
+    const [currentFont, setCurrentFont] = useState("Arial");
+
+    // Template Management
+    const templates = useQuery(api.emailTemplates.list) || [];
+    const saveTemplate = useMutation(api.emailTemplates.create);
+    const deleteTemplate = useMutation(api.emailTemplates.remove);
+
+    // State for popovers
+    const [isSavePopoverOpen, setIsSavePopoverOpen] = useState(false);
+    const [newTemplateName, setNewTemplateName] = useState("");
+    const [isLoadPopoverOpen, setIsLoadPopoverOpen] = useState(false);
+
+    const handleSaveTemplate = async () => {
+        if (!newTemplateName.trim()) return;
+        try {
+            await saveTemplate({
+                name: newTemplateName,
+                subject: subject,
+                htmlContent: htmlContent,
+            });
+            alert("Template saved successfully");
+            setIsSavePopoverOpen(false);
+            setNewTemplateName("");
+        } catch (error) {
+            alert("Failed to save template");
+            console.error(error);
+        }
+    };
+
+    const handleLoadTemplate = (templateId: string) => {
+        const template = templates.find((t) => t._id === templateId);
+        if (template) {
+            if (confirm("Loading a template will overwrite current subject and content. Continue?")) {
+                onSubjectChange(template.subject);
+                onContentChange(template.htmlContent);
+                if (editorRef.current) {
+                    editorRef.current.innerHTML = template.htmlContent;
+                }
+                setIsLoadPopoverOpen(false);
+            }
+        }
+    };
+
+    const handleDeleteTemplate = async (templateId: string, e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (confirm("Are you sure you want to delete this template?")) {
+            await deleteTemplate({ id: templateId as any });
+        }
+    };
+
+    const fonts = [
+        { name: "Arial", value: "Arial, sans-serif" },
+        { name: "Roboto", value: "Roboto, sans-serif" },
+        { name: "Helvetica", value: "Helvetica, sans-serif" },
+        { name: "Times New Roman", value: "'Times New Roman', serif" },
+        { name: "Courier New", value: "'Courier New', monospace" },
+        { name: "Verdana", value: "Verdana, sans-serif" },
+        { name: "Georgia", value: "Georgia, serif" },
+        { name: "Tahoma", value: "Tahoma, sans-serif" },
+        { name: "Trebuchet MS", value: "'Trebuchet MS', sans-serif" },
+    ];
 
     // Only set initial content once
     useEffect(() => {
@@ -272,6 +340,12 @@ export function EmailComposer({
         }
     };
 
+    const changeFont = (fontValue: string, fontName: string) => {
+        execCommand("fontName", fontValue);
+        setCurrentFont(fontName);
+        setIsFontPopoverOpen(false);
+    };
+
     // Resize selected image
     const resizeImage = (scale: number) => {
         if (!selectedImage || !imageSize) return;
@@ -298,6 +372,40 @@ export function EmailComposer({
         { icon: Bold, command: "bold", title: "Bold" },
         { icon: Italic, command: "italic", title: "Italic" },
         { icon: Underline, command: "underline", title: "Underline" },
+        { divider: true },
+        {
+            icon: Type,
+            custom: (
+                <Popover open={isFontPopoverOpen} onOpenChange={setIsFontPopoverOpen}>
+                    <PopoverTrigger asChild>
+                        <button
+                            type="button"
+                            className="p-2 hover:bg-gray-200 rounded transition-colors flex items-center gap-1"
+                            title="Font Family"
+                            onMouseDown={(e) => e.preventDefault()}
+                        >
+                            <Type size={16} className="text-gray-600" />
+                            <span className="text-xs text-gray-500 w-16 truncate text-left">{currentFont}</span>
+                        </button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-48 p-1" align="start">
+                        <div className="space-y-1">
+                            {fonts.map((font) => (
+                                <button
+                                    key={font.name}
+                                    onClick={() => changeFont(font.value, font.name)}
+                                    className={`w-full text-left px-2 py-1.5 text-sm rounded hover:bg-gray-100 ${currentFont === font.name ? "bg-gray-100 font-medium" : ""
+                                        }`}
+                                    style={{ fontFamily: font.value }}
+                                >
+                                    {font.name}
+                                </button>
+                            ))}
+                        </div>
+                    </PopoverContent>
+                </Popover>
+            )
+        },
         { divider: true },
         { icon: Heading1, command: "formatBlock", value: "h1", title: "Heading 1" },
         { icon: Heading2, command: "formatBlock", value: "h2", title: "Heading 2" },
@@ -391,6 +499,76 @@ export function EmailComposer({
                     className="w-full px-4 py-3 border border-gray-200 rounded-lg text-base outline-none focus:ring-2 focus:ring-[#1E3A5F]/20 focus:border-[#1E3A5F]"
                 />
             </div>
+
+            {/* Template Actions */}
+            <div className="flex gap-2 justify-end">
+                <Popover open={isLoadPopoverOpen} onOpenChange={setIsLoadPopoverOpen}>
+                    <PopoverTrigger asChild>
+                        <Button variant="secondary" className="gap-2 border border-gray-300 h-9 px-3 text-sm">
+                            <FileDown size={14} />
+                            Load Template
+                        </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-80 p-0" align="end">
+                        <div className="p-3 border-b border-gray-100 font-medium text-sm">Select a Template</div>
+                        <div className="max-h-60 overflow-y-auto p-1">
+                            {templates.length === 0 ? (
+                                <div className="p-4 text-center text-sm text-gray-500">No templates saved yet</div>
+                            ) : (
+                                <div className="space-y-1">
+                                    {templates.map((t) => (
+                                        <div
+                                            key={t._id}
+                                            onClick={() => handleLoadTemplate(t._id)}
+                                            className="flex items-center justify-between p-2 hover:bg-gray-100 rounded cursor-pointer group"
+                                        >
+                                            <span className="text-sm truncate flex-1">{t.name}</span>
+                                            <button
+                                                onClick={(e) => handleDeleteTemplate(t._id, e)}
+                                                className="p-1 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                title="Delete template"
+                                            >
+                                                <Trash2 size={12} />
+                                            </button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </PopoverContent>
+                </Popover>
+
+                <Popover open={isSavePopoverOpen} onOpenChange={setIsSavePopoverOpen}>
+                    <PopoverTrigger asChild>
+                        <Button variant="secondary" className="gap-2 border border-gray-300 h-9 px-3 text-sm">
+                            <Save size={14} />
+                            Save as Template
+                        </Button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-80 p-4" align="end">
+                        <div className="space-y-3">
+                            <h4 className="font-medium text-sm">Save New Template</h4>
+                            <div className="space-y-1">
+                                <label className="text-xs text-gray-500">Template Name</label>
+                                <Input
+                                    value={newTemplateName}
+                                    onChange={(e) => setNewTemplateName(e.target.value)}
+                                    placeholder="e.g., Monthly Newsletter"
+                                    className="h-8"
+                                />
+                            </div>
+                            <Button
+                                onClick={handleSaveTemplate}
+                                disabled={!newTemplateName.trim()}
+                                className="w-full h-8 text-xs"
+                            >
+                                Save Template
+                            </Button>
+                        </div>
+                    </PopoverContent>
+                </Popover>
+            </div>
+
 
             {/* Attachments List */}
             {onAttachmentsChange && attachments.length > 0 && (
