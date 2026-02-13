@@ -615,11 +615,13 @@ export const fetchUsers = action({
     handler: async (ctx) => {
         // Fetch active users, excluding system accounts (starting with #)
         // Note: # must be encoded as %23 to avoid being interpreted as a URL fragment
-        const endpoint = `systemusers?$select=systemuserid,fullname&$filter=isdisabled eq false and not startswith(fullname,'%23')&$orderby=fullname asc`;
+        const endpoint = `systemusers?$select=systemuserid,fullname,internalemailaddress,mobilephone&$filter=isdisabled eq false and not startswith(fullname,'%23')&$orderby=fullname asc`;
 
         interface DynamicsUser {
             systemuserid: string;
             fullname: string;
+            internalemailaddress?: string;
+            mobilephone?: string;
         }
 
         interface UsersResponse {
@@ -631,6 +633,8 @@ export const fetchUsers = action({
         return response.value.map(user => ({
             id: user.systemuserid,
             name: user.fullname,
+            email: user.internalemailaddress,
+            phone: user.mobilephone,
         }));
     },
 });

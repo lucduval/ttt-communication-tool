@@ -1,7 +1,8 @@
+
 import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { unsubscribeContact } from "./lib/dynamics_logging";
-import { isBot } from "./lib/tracking_utils";
+import { isBot, verifyUrlSignature } from "./lib/tracking_utils";
 
 
 
@@ -12,7 +13,7 @@ import { Id } from "./_generated/dataModel";
 const http = httpRouter();
 
 /**
- * GET /click?u=<url>&c=<campaignId>&r=<recipientId>
+ * GET /click?u=<url>&c=<campaignId>&r=<recipientId>&s=<signature>
  * Logs the click and redirects to the target URL.
  */
 http.route({
@@ -26,6 +27,10 @@ http.route({
 
         if (!targetUrl || !campaignId || !recipientId) {
             return new Response("Missing parameters", { status: 400 });
+        }
+
+        if (!await verifyUrlSignature(request.url)) {
+            return new Response("Invalid signature", { status: 403 });
         }
 
         // Log the click asynchronously

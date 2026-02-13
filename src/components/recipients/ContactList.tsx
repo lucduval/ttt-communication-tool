@@ -147,10 +147,18 @@ export function ContactList({
                             <td className="px-4 py-4">
                                 <Badge
                                     status={
-                                        contact.clientType === "1" ? "info" : "default"
+                                        contact.clientType === "1"
+                                            ? "info"
+                                            : contact.clientType === "employee"
+                                                ? "success"
+                                                : "default"
                                     }
                                 >
-                                    {contact.clientType === "1" ? "Business" : "Individual"}
+                                    {contact.clientType === "1"
+                                        ? "Business"
+                                        : contact.clientType === "employee"
+                                            ? "Employee"
+                                            : "Individual"}
                                 </Badge>
                             </td>
                             <td className="px-4 py-4">

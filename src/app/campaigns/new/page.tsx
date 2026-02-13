@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useAction, useQuery, useMutation } from "convex/react";
+import { ConvexError } from "convex/values";
 import { api } from "@/../convex/_generated/api";
 import { Header } from "@/components/layout";
 import { Button, Card, Badge, ConfirmationModal } from "@/components/ui";
@@ -84,6 +85,7 @@ export default function NewCampaignPage() {
     const [totalCount, setTotalCount] = useState<number | null>(null);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [selectedContacts, setSelectedContacts] = useState<Contact[]>([]);
+    const [audience, setAudience] = useState<"clients" | "employees">("clients");
 
     // Email state
     const [subject, setSubject] = useState("");
@@ -128,6 +130,7 @@ export default function NewCampaignPage() {
     const sendBulkEmails = useAction(api.actions.email.sendBulkEmails);
     const sendTestWhatsApp = useAction(api.actions.whatsapp.sendTestWhatsApp);
     const sendBulkWhatsApp = useAction(api.actions.whatsapp.sendBulkWhatsApp);
+    const fetchEmployees = useAction(api.actions.dynamics.fetchUsers);
 
     // Build channel-appropriate filter
     const getChannelFilter = useCallback(() => {
@@ -147,49 +150,82 @@ export default function NewCampaignPage() {
         return channelFilter;
     }, [filters, campaignChannel]);
 
+
+
     const loadContacts = useCallback(async () => {
         try {
             setIsLoadingContacts(true);
-            const channelFilter = getChannelFilter();
 
-            const [contactsResult, countResult] = await Promise.all([
-                fetchContacts({
-                    filter: channelFilter,
-                    search: filters.search || undefined,
-                    top: 50,
-                    clientType: filters.clientType || undefined,
-                    entityType: filters.entityType ?? undefined,
-                    bank: filters.bank ?? undefined,
-                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
-                    province: filters.province || undefined,
-                    ageMin: filters.ageMin ?? undefined,
-                    ageMax: filters.ageMax ?? undefined,
-                    ownerId: filters.ownerId || undefined,
-                    industryId: filters.industryId || undefined,
-                }),
-                getContactCount({
-                    filter: channelFilter,
-                    search: filters.search || undefined,
-                    clientType: filters.clientType || undefined,
-                    entityType: filters.entityType ?? undefined,
-                    bank: filters.bank ?? undefined,
-                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
-                    province: filters.province || undefined,
-                    ageMin: filters.ageMin ?? undefined,
-                    ageMax: filters.ageMax ?? undefined,
-                    ownerId: filters.ownerId || undefined,
-                    industryId: filters.industryId || undefined,
-                }),
-            ]);
+            if (audience === "employees") {
+                const employees = await fetchEmployees({});
+                const mappedEmployees: Contact[] = employees.map(emp => ({
+                    id: emp.id,
+                    fullName: emp.name,
+                    firstName: null,
+                    lastName: null,
+                    email: emp.email || null,
+                    phone: emp.phone || null,
+                    internationalPhone: emp.phone || null, // Assuming phone is mobile
+                    isActive: true, // System users are filtered to be active
+                    clientType: "employee",
+                    marketingPreferences: { tax: false, accounting: false, insurance: false },
+                    whatsappOptIn: true, // Internal users assumed opted in? Or check field? Plan says no filters.
+                    emailNotifications: true,
+                    smsNotifications: true,
+                    createdOn: new Date().toISOString(),
+                    modifiedOn: new Date().toISOString(),
+                }));
 
-            setContacts(contactsResult.contacts as Contact[]);
-            setTotalCount(countResult.count);
+                // Filter by channel capability
+                const filteredEmployees = mappedEmployees.filter(e => {
+                    if (campaignChannel === "email") return !!e.email;
+                    return !!e.phone;
+                });
+
+                setContacts(filteredEmployees);
+                setTotalCount(filteredEmployees.length);
+            } else {
+                const channelFilter = getChannelFilter();
+
+                const [contactsResult, countResult] = await Promise.all([
+                    fetchContacts({
+                        filter: channelFilter,
+                        search: filters.search || undefined,
+                        top: 50,
+                        clientType: filters.clientType || undefined,
+                        entityType: filters.entityType ?? undefined,
+                        bank: filters.bank ?? undefined,
+                        sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                        province: filters.province || undefined,
+                        ageMin: filters.ageMin ?? undefined,
+                        ageMax: filters.ageMax ?? undefined,
+                        ownerId: filters.ownerId || undefined,
+                        industryId: filters.industryId || undefined,
+                    }),
+                    getContactCount({
+                        filter: channelFilter,
+                        search: filters.search || undefined,
+                        clientType: filters.clientType || undefined,
+                        entityType: filters.entityType ?? undefined,
+                        bank: filters.bank ?? undefined,
+                        sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                        province: filters.province || undefined,
+                        ageMin: filters.ageMin ?? undefined,
+                        ageMax: filters.ageMax ?? undefined,
+                        ownerId: filters.ownerId || undefined,
+                        industryId: filters.industryId || undefined,
+                    }),
+                ]);
+
+                setContacts(contactsResult.contacts as Contact[]);
+                setTotalCount(countResult.count);
+            }
         } catch (err) {
             console.error("Failed to fetch contacts:", err);
         } finally {
             setIsLoadingContacts(false);
         }
-    }, [fetchContacts, getContactCount, filters, getChannelFilter]);
+    }, [fetchContacts, getContactCount, filters, getChannelFilter, audience, fetchEmployees, campaignChannel]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -202,7 +238,7 @@ export default function NewCampaignPage() {
             const timer = setTimeout(() => loadContacts(), 300);
             return () => clearTimeout(timer);
         }
-    }, [currentStep, filters, loadContacts]);
+    }, [currentStep, filters, loadContacts, audience]);
 
     // Update selected contacts when moving forward from recipients
     useEffect(() => {
@@ -331,9 +367,15 @@ export default function NewCampaignPage() {
 
             return { success: result.success, error: undefined };
         } catch (err) {
+            let errorMessage = "Failed to send test message";
+            if (err instanceof ConvexError) {
+                errorMessage = err.data as string;
+            } else if (err instanceof Error) {
+                errorMessage = err.message;
+            }
             return {
                 success: false,
-                error: err instanceof Error ? err.message : "Failed to send test message",
+                error: errorMessage,
             };
         } finally {
             setIsSendingTest(false);
@@ -357,8 +399,8 @@ export default function NewCampaignPage() {
             let recipients: { id: string; email?: string; phone?: string; name: string; variables?: string }[] = [];
             let filtersJson = undefined;
 
-            if (isSelectAllActive) {
-                // In Select All mode, we pass the filters to the backend
+            if (isSelectAllActive && audience === "clients") {
+                // In Select All mode for clients, we pass the filters to the backend
                 // The backend will fetch contacts and create batches
                 filtersJson = JSON.stringify({
                     filter: getChannelFilter(),
@@ -507,32 +549,42 @@ export default function NewCampaignPage() {
     const handleSelectAll = async () => {
         try {
             setIsSelectingAll(true);
-            const channelFilter = getChannelFilter();
 
-            // Get total count (we might already have it, but let's be sure)
-            const countResult = await getContactCount({
-                filter: channelFilter,
-                search: filters.search || undefined,
-                clientType: filters.clientType || undefined,
-                entityType: filters.entityType ?? undefined,
-                bank: filters.bank ?? undefined,
-                sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
-                province: filters.province || undefined,
-                ageMin: filters.ageMin ?? undefined,
-                ageMax: filters.ageMax ?? undefined,
-                ownerId: filters.ownerId || undefined,
-                industryId: filters.industryId || undefined,
-            });
+            if (audience === "employees") {
+                // For employees, we just select all loaded contacts since we fetch all of them
+                const allIds = new Set(contacts.map(c => c.id));
+                setSelectedIds(allIds);
+                setSelectedContacts(contacts);
+                // We don't set isSelectAllActive to true for employees to avoid backend filtering logic
+                // Instead we just select all explicitly
+            } else {
+                const channelFilter = getChannelFilter();
 
-            // Set select all mode active
-            setIsSelectAllActive(true);
+                // Get total count (we might already have it, but let's be sure)
+                const countResult = await getContactCount({
+                    filter: channelFilter,
+                    search: filters.search || undefined,
+                    clientType: filters.clientType || undefined,
+                    entityType: filters.entityType ?? undefined,
+                    bank: filters.bank ?? undefined,
+                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                    province: filters.province || undefined,
+                    ageMin: filters.ageMin ?? undefined,
+                    ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
+                });
 
-            // Clear specific selections as we are now selecting everything matching the filter
-            setSelectedIds(new Set());
-            setSelectedContacts([]);
+                // Set select all mode active
+                setIsSelectAllActive(true);
 
-            // Store the total count for display
-            setVirtualTotalCount(countResult.count);
+                // Clear specific selections as we are now selecting everything matching the filter
+                setSelectedIds(new Set());
+                setSelectedContacts([]);
+
+                // Store the total count for display
+                setVirtualTotalCount(countResult.count);
+            }
 
         } catch (error) {
             console.error("Failed to select all contacts:", error);
@@ -714,18 +766,48 @@ export default function NewCampaignPage() {
                                     </div>
 
                                     {showValidationErrors && selectedIds.size === 0 && !isSelectAllActive && (
-                                        <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
+                                        <div className="p-3 bg-red-50 border border-red-200 rounded-lg mb-4">
                                             <p className="text-sm text-red-600 font-medium">
                                                 Please select at least one recipient to continue, or use "Select All" to send to everyone.
                                             </p>
                                         </div>
                                     )}
 
-                                    <ContactFilters
-                                        filters={filters}
-                                        onFiltersChange={setFilters}
-                                        totalCount={totalCount}
-                                    />
+                                    <div className="mb-6 bg-gray-50 p-1 rounded-lg inline-flex">
+                                        <button
+                                            onClick={() => {
+                                                setAudience("clients");
+                                                setFilters(INITIAL_FILTERS);
+                                                handleClearSelection();
+                                            }}
+                                            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${audience === "clients"
+                                                ? "bg-white text-[#1E3A5F] shadow-sm"
+                                                : "text-gray-500 hover:text-gray-700"
+                                                }`}
+                                        >
+                                            Clients (External)
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setAudience("employees");
+                                                handleClearSelection();
+                                            }}
+                                            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${audience === "employees"
+                                                ? "bg-white text-[#1E3A5F] shadow-sm"
+                                                : "text-gray-500 hover:text-gray-700"
+                                                }`}
+                                        >
+                                            Employees (Internal)
+                                        </button>
+                                    </div>
+
+                                    {audience === "clients" && (
+                                        <ContactFilters
+                                            filters={filters}
+                                            onFiltersChange={setFilters}
+                                            totalCount={totalCount}
+                                        />
+                                    )}
                                 </div>
                             </Card>
 

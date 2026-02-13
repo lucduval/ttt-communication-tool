@@ -8,7 +8,13 @@ export const list = query({
         const access = await checkAccessHelper(ctx);
         if (!access.hasAccess) throw new Error("Unauthorized");
 
-        const campaigns = await ctx.db.query("campaigns").order("desc").collect();
+        if (!access.user) throw new Error("User not found");
+
+        const campaigns = await ctx.db
+            .query("campaigns")
+            .withIndex("by_user", (q) => q.eq("createdBy", access.user.clerkId!))
+            .order("desc")
+            .collect();
         return campaigns;
     },
 });

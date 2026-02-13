@@ -30,6 +30,24 @@ export const getCampaignStats = query({
     },
 });
 
+export const getFailedMessages = query({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (ctx, args) => {
+        return await ctx.db
+            .query("messages")
+            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
+            .filter((q) => q.eq(q.field("status"), "failed")) // or use by_status index if we had campaign+status index, but filter is fine for typically low volume of fails per campaign relative to total? Actually we have by_campaign_status index!
+            // Wait, schema says: .index("by_campaign_status", ["campaignId", "status"]) on campaignBatches, 
+            // but on messages table we have:
+            // .index("by_campaign", ["campaignId"])
+            // .index("by_campaign_recipient", ["campaignId", "recipientId"])
+            // .index("by_status", ["status"])
+            // So we don't have a compound index for campaign+status on messages.
+            // efficient way is to use by_campaign and filter.
+            .collect();
+    },
+});
+
 export const createBatch = internalMutation({
     args: {
         messages: v.array(

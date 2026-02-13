@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import { useQuery } from "convex/react";
 import { api } from "../../../../convex/_generated/api";
 import { useParams } from "next/navigation";
@@ -8,10 +10,12 @@ import { Id } from "../../../../convex/_generated/dataModel";
 import { Button } from "@/components/ui/Button";
 import Link from "next/link";
 import { ArrowLeft, Loader2 } from "lucide-react";
+import { BouncedEmailsCard } from "@/components/campaigns/BouncedEmailsCard";
 
 export default function CampaignDetailsPage() {
     const params = useParams();
     const campaignId = params.id as Id<"campaigns">;
+    const [statusFilter, setStatusFilter] = useState<string>("all");
 
     const campaign = useQuery(api.campaigns.get, { id: campaignId });
     const messages = useQuery(api.messages.listByCampaign, { campaignId });
@@ -37,6 +41,12 @@ export default function CampaignDetailsPage() {
         const remainingMins = Math.ceil(remainingMs / 60000);
         estimatedTimeRemaining = remainingMins > 1 ? `~${remainingMins} min remaining` : "Almost done...";
     }
+
+    // Filter messages based on status
+    const filteredMessages = messages.filter((message) => {
+        if (statusFilter === "all") return true;
+        return message.status === statusFilter;
+    });
 
     return (
         <div className="container mx-auto py-8 px-8">
@@ -125,11 +135,7 @@ export default function CampaignDetailsPage() {
                     value={stats?.delivered || campaign.deliveredCount}
                     color="bg-green-50 border-green-200"
                 />
-                <StatCard
-                    label="Failed"
-                    value={stats?.failed || campaign.failedCount}
-                    color="bg-red-50 border-red-200"
-                />
+                <BouncedEmailsCard campaignId={campaign._id} />
                 {(campaign.opensCount !== undefined || campaign.clicksCount !== undefined) && (
                     <>
                         <StatCard
@@ -147,8 +153,34 @@ export default function CampaignDetailsPage() {
             </div>
 
             <div className="bg-white shadow-md rounded-lg overflow-hidden">
-                <div className="px-6 py-4 border-b border-gray-200">
+                <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
                     <h2 className="text-lg font-semibold">Messages</h2>
+                    <div className="flex space-x-2">
+                        <FilterButton
+                            active={statusFilter === "all"}
+                            onClick={() => setStatusFilter("all")}
+                            label="All"
+                        />
+                        <FilterButton
+                            active={statusFilter === "sent"}
+                            onClick={() => setStatusFilter("sent")}
+                            label="Sent"
+                            count={stats?.sent}
+                        />
+                        <FilterButton
+                            active={statusFilter === "delivered"}
+                            onClick={() => setStatusFilter("delivered")}
+                            label="Delivered"
+                            count={stats?.delivered}
+                        />
+                        <FilterButton
+                            active={statusFilter === "failed"}
+                            onClick={() => setStatusFilter("failed")}
+                            label="Failed"
+                            count={stats?.failed}
+                            variant="danger"
+                        />
+                    </div>
                 </div>
                 <div className="overflow-x-auto">
                     <table className="min-w-full divide-y divide-gray-200">
@@ -172,14 +204,14 @@ export default function CampaignDetailsPage() {
                             </tr>
                         </thead>
                         <tbody className="bg-white divide-y divide-gray-200">
-                            {messages.length === 0 ? (
+                            {filteredMessages.length === 0 ? (
                                 <tr>
                                     <td colSpan={5} className="px-6 py-4 text-center text-gray-500">
-                                        No messages found for this campaign.
+                                        No messages found matching filter.
                                     </td>
                                 </tr>
                             ) : (
-                                messages.map((message) => (
+                                filteredMessages.map((message) => (
                                     <tr key={message._id} className="hover:bg-gray-50">
                                         <td className="px-6 py-4 whitespace-nowrap">
                                             <div className="text-sm font-medium text-gray-900">
@@ -246,6 +278,36 @@ function StatCard({
             </div>
             <div className="text-2xl font-bold">{value}</div>
         </div>
+    );
+}
+
+function FilterButton({
+    active,
+    onClick,
+    label,
+    count,
+    variant = "default"
+}: {
+    active: boolean;
+    onClick: () => void;
+    label: string;
+    count?: number;
+    variant?: "default" | "danger";
+}) {
+    const baseClasses = "px-3 py-1.5 text-sm font-medium rounded-md transition-colors";
+    const activeClasses = variant === "danger"
+        ? "bg-red-100 text-red-800 border border-red-200"
+        : "bg-blue-100 text-blue-800 border border-blue-200";
+    const inactiveClasses = "text-gray-600 hover:bg-gray-100 border border-transparent";
+
+    return (
+        <button
+            onClick={onClick}
+            className={`${baseClasses} ${active ? activeClasses : inactiveClasses}`}
+        >
+            {label}
+            {count !== undefined && <span className="ml-1.5 opacity-70 text-xs">({count})</span>}
+        </button>
     );
 }
 

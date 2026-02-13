@@ -165,7 +165,7 @@ export const processEmailBatch = internalAction({
                     // Link rewriting and open tracking
                     if (siteUrl) {
                         const { rewriteEmailLinks } = await import("./lib/tracking_utils");
-                        emailBody = rewriteEmailLinks(emailBody, siteUrl, args.campaignId, recipient.id);
+                        emailBody = (await rewriteEmailLinks(emailBody, siteUrl, args.campaignId, recipient.id)) as string;
                     }
 
                     const result = await sendEmail({
@@ -174,6 +174,10 @@ export const processEmailBatch = internalAction({
                         toRecipients: [{ email: recipient.email, name: recipient.name }],
                         attachments: processedAttachments,
                         fromMailbox: campaign.fromMailbox,
+                        headers: {
+                            "X-Campaign-ID": args.campaignId,
+                            "X-Recipient-ID": recipient.id,
+                        },
                     });
 
                     if (result.success) {

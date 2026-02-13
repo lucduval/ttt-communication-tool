@@ -1,5 +1,5 @@
 "use node";
-import { v } from "convex/values";
+import { v, ConvexError } from "convex/values";
 import { action } from "../_generated/server";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
@@ -116,7 +116,28 @@ export const sendTestWhatsApp = action({
 
         if (!response.ok) {
             const errorText = await response.text();
-            throw new Error(`Clickatell API error: ${response.status} ${response.statusText} - ${errorText}`);
+
+            console.error("Clickatell Error Response:", errorText);
+
+            // Try to parse JSON error to check for specific codes
+            try {
+                const errorJson = JSON.parse(errorText);
+                // Clickatell error format: {"error":{"code":21,"description":"Payload data is malformed."}}
+                // Sometimes it might be directly { code: 21 ... } or similar, allowing for some flexibility
+                const code = errorJson?.error?.code || errorJson?.code;
+
+                if (code === 21 || code === "21") {
+                    throw new ConvexError(`WhatsApp template not found or not approved in Clickatell. Please ensure the template '${template.name}' exists and is approved in your Clickatell dashboard.`);
+                }
+            } catch (e) {
+                // If it's the specific error we just threw, rethrow it
+                if (e instanceof ConvexError) {
+                    throw e;
+                }
+                // Otherwise ignore parse errors and throw generic primitive below
+            }
+
+            throw new ConvexError(`Clickatell API error: ${response.status} ${response.statusText} - ${errorText}`);
         }
 
         const result: ClickatellResponse = await response.json();
@@ -294,6 +315,17 @@ export const sendBulkWhatsApp = action({
 
                 if (!response.ok) {
                     const errorText = await response.text();
+
+                    // Try to parse JSON error to check for specific codes
+                    try {
+                        const errorJson = JSON.parse(errorText);
+                        if (errorJson?.error?.code === 21) {
+                            throw new Error(`WhatsApp template not found or not approved in Clickatell. Please ensure the template '${template.name}' exists and is approved in your Clickatell dashboard.`);
+                        }
+                    } catch (e) {
+                        if (e instanceof Error && e.message.includes("WhatsApp template")) throw e;
+                    }
+
                     // If batch fails, mark all as failed
                     // Or parse individual errors if partial success is returned (depends on API)
                     // Usually 202 Accepted is returned with a list of results.

@@ -79,6 +79,7 @@ export interface EmailMessage {
     importance?: "low" | "normal" | "high";
     saveToSentItems?: boolean;
     fromMailbox?: string; // Optional: specific shared mailbox to send from
+    headers?: Record<string, string>;
 }
 
 /**
@@ -113,6 +114,14 @@ export async function sendEmail(message: EmailMessage): Promise<{ success: boole
         },
         saveToSentItems: message.saveToSentItems !== false,
     };
+
+    // Add custom headers if provided
+    if (message.headers) {
+        (emailPayload.message as Record<string, unknown>).internetMessageHeaders = Object.entries(message.headers).map(([name, value]) => ({
+            name,
+            value,
+        }));
+    }
 
     // Add CC recipients if provided
     if (message.ccRecipients && message.ccRecipients.length > 0) {

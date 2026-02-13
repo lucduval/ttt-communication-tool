@@ -140,6 +140,10 @@ export const sendBulkEmails = action({
                     body: wrapEmail(args.htmlBody, args.subject),
                     toRecipients: [{ email: recipient.email, name: recipient.name }],
                     attachments: args.attachments as EmailAttachment[] | undefined,
+                    headers: {
+                        "X-Campaign-ID": args.campaignId ? args.campaignId : "",
+                        "X-Recipient-ID": recipient.id,
+                    },
                     fromMailbox: args.fromMailbox,
                 });
 
