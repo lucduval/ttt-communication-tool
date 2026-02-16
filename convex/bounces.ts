@@ -65,11 +65,18 @@ export const processBounces = internalAction({
                     // Outlook often puts the original headers in the body of the bounce message
                     const bodyContent = message.body.content;
 
-                    // Regex to find X-Campaign-ID: ... and X-Recipient-ID: ...
-                    // These might be HTML encoded or plain text, so be careful.
-                    // Simple regex for likely plain text representation in the body dump
-                    const campaignMatch = bodyContent.match(/X-Campaign-ID:\s*([a-zA-Z0-9]+)/i);
-                    const recipientMatch = bodyContent.match(/X-Recipient-ID:\s*([a-zA-Z0-9-_]+)/i);
+                    // Strip HTML tags and decode common entities for reliable header extraction
+                    // NDR bodies are HTML, so headers may be wrapped in tags or entity-encoded
+                    const plainText = bodyContent
+                        .replace(/<[^>]*>/g, " ")
+                        .replace(/&nbsp;/gi, " ")
+                        .replace(/&#160;/g, " ")
+                        .replace(/&amp;/gi, "&")
+                        .replace(/&lt;/gi, "<")
+                        .replace(/&gt;/gi, ">");
+
+                    const campaignMatch = plainText.match(/X-Campaign-ID:\s*([a-zA-Z0-9]+)/i);
+                    const recipientMatch = plainText.match(/X-Recipient-ID:\s*([a-zA-Z0-9-_]+)/i);
 
                     if (campaignMatch && campaignMatch[1]) {
                         campaignId = campaignMatch[1];
@@ -88,8 +95,9 @@ export const processBounces = internalAction({
                         totalProcessedCount++;
                     } else {
                         console.log(`Could not find tracking headers in bounce message from ${sharedMailbox}: ${message.subject} (${message.id})`);
-                        // Optional: Mark as read anyway so we don't process it forever? 
-                        // For now, leave it unread so we can manually inspect if needed.
+                        // Mark as read to prevent re-processing every hour indefinitely.
+                        // The log above preserves enough info for manual debugging.
+                        await markMessageAsRead(token, sharedMailbox, message.id);
                     }
                 }
             } catch (error) {
@@ -124,15 +132,23 @@ export const processBounces = internalAction({
 });
 
 async function markMessageAsRead(token: string, mailbox: string, messageId: string) {
-    const url = `https://graph.microsoft.com/v1.0/users/${mailbox}/messages/${messageId}`;
-    await fetch(url, {
-        method: "PATCH",
-        headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ isRead: true }),
-    });
+    try {
+        const url = `https://graph.microsoft.com/v1.0/users/${mailbox}/messages/${messageId}`;
+        const response = await fetch(url, {
+            method: "PATCH",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ isRead: true }),
+        });
+
+        if (!response.ok) {
+            console.error(`Failed to mark message ${messageId} as read in ${mailbox}: ${response.status}`);
+        }
+    } catch (error) {
+        console.error(`Error marking message ${messageId} as read in ${mailbox}:`, error);
+    }
 }
 
 export const recordBounces = internalMutation({
@@ -173,16 +189,14 @@ export const recordBounces = internalMutation({
                     // Update campaign stats
                     const campaign = await ctx.db.get(campaignId);
                     if (campaign) {
-                        // We need to be careful not to double count if we run this multiple times
-                        // But we check message.status !== "failed" above, so it should be fine.
-                        // Also, if it was 'sent' or 'delivered' before, we might want to decrement those counts?
-                        // For simplicity, just increment failedCount.
-                        // Ideally we should decrement 'deliveredCount' if it was counted as delivered (which it shouldn't be for email usually, unless we track fake delivery)
-
-                        await ctx.db.patch(campaignId, {
+                        const statsUpdate: Record<string, number> = {
                             failedCount: (campaign.failedCount || 0) + 1,
-                            // precise accounting might require checking previous status
-                        });
+                        };
+                        // If previously counted as delivered, decrement to keep stats accurate
+                        if (message.status === "sent" || message.status === "delivered") {
+                            statsUpdate.deliveredCount = Math.max(0, (campaign.deliveredCount || 0) - 1);
+                        }
+                        await ctx.db.patch(campaignId, statsUpdate);
                     }
                 }
             } else {

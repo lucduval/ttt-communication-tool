@@ -132,12 +132,21 @@ export const sendBulkEmails = action({
             });
         }
 
+        const siteUrl = process.env.CONVEX_SITE_URL || "";
+
         // Process emails with rate limiting (10 per second)
         for (const recipient of args.recipients) {
             try {
+                // Build email body with link rewriting and open tracking
+                let emailBody = wrapEmail(args.htmlBody, args.subject);
+                if (siteUrl && args.campaignId) {
+                    const { rewriteEmailLinks } = await import("../lib/tracking_utils");
+                    emailBody = await rewriteEmailLinks(emailBody, siteUrl, args.campaignId, recipient.id);
+                }
+
                 const result = await sendEmail({
                     subject: args.subject,
-                    body: wrapEmail(args.htmlBody, args.subject),
+                    body: emailBody,
                     toRecipients: [{ email: recipient.email, name: recipient.name }],
                     attachments: args.attachments as EmailAttachment[] | undefined,
                     headers: {
@@ -185,12 +194,22 @@ export const sendBulkEmails = action({
                 // Rate limiting: 100ms between emails (10/sec)
                 await new Promise((resolve) => setTimeout(resolve, 100));
             } catch (err) {
+                const errorMessage = err instanceof Error ? err.message : "Unknown error";
                 results.push({
                     recipientId: recipient.id,
                     email: recipient.email,
                     success: false,
-                    error: err instanceof Error ? err.message : "Unknown error",
+                    error: errorMessage,
                 });
+                if (args.campaignId) {
+                    await ctx.runMutation(internal.messages.updateStatusByRecipient, {
+                        campaignId: args.campaignId,
+                        recipientId: recipient.id,
+                        status: "failed",
+                        sentAt: Date.now(),
+                        errorMessage: errorMessage,
+                    });
+                }
             }
         }
 

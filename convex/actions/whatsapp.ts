@@ -4,7 +4,8 @@ import { action } from "../_generated/server";
 import { api, internal } from "../_generated/api";
 import type { Doc, Id } from "../_generated/dataModel";
 
-import { getClickatellConfig, uploadClickatellMedia, ClickatellResponse } from "../lib/whatsapp";
+import { getClickatellConfig, uploadClickatellMedia, normalizePhoneNumber, ClickatellResponse } from "../lib/whatsapp";
+import { isRetryableHttpStatus } from "../lib/retry";
 
 // Send a single test WhatsApp message
 export const sendTestWhatsApp = action({
@@ -30,11 +31,7 @@ export const sendTestWhatsApp = action({
             throw new Error("Template not found");
         }
 
-        // Format phone number (remove + and spaces for Clickatell if needed, but usually E.164 is fine without + or with it. 
-        const toNumber = args.phoneNumber.replace(/\D/g, "");
-        if (toNumber.startsWith("0")) {
-            console.warn(`WARNING: Phone number ${toNumber} starts with 0. Clickatell requires international format (e.g., 27... or 44...). Messages may fail.`);
-        }
+        const toNumber = normalizePhoneNumber(args.phoneNumber);
 
         // Prepare Header (Upload if needed)
         // Clickatell requires uploading the media first to get a fileId
@@ -218,7 +215,7 @@ export const sendBulkWhatsApp = action({
                     if (!firstRecipientPhone) {
                         throw new Error("No recipients available to upload media");
                     }
-                    const toNumber = firstRecipientPhone.replace(/\D/g, "");
+                    const toNumber = normalizePhoneNumber(firstRecipientPhone);
                     const fileId = await uploadClickatellMedia(config.apiKey, template.headerUrl, toNumber, fileName, true);
 
                     headerPayload = {
@@ -259,10 +256,7 @@ export const sendBulkWhatsApp = action({
 
             // Construct messages array for this batch
             const messagesPayload = batchRecipients.map(recipient => {
-                const toNumber = recipient.phoneNumber.replace(/\D/g, "");
-                if (toNumber.startsWith("0")) {
-                    console.warn(`WARNING: Phone number ${toNumber} starts with 0. Clickatell requires international format. Messages may fail.`);
-                }
+                const toNumber = normalizePhoneNumber(recipient.phoneNumber);
 
                 // Auto-fill common variables and map to template parameters
                 const allVariables: Record<string, string> = {
@@ -298,54 +292,61 @@ export const sendBulkWhatsApp = action({
                 };
             });
 
-            console.log("CLICKATELL BULK PAYLOAD (Batch):", JSON.stringify({ messages: messagesPayload }, null, 2));
-
             try {
-                const response: Response = await fetch(
-                    "https://platform.clickatell.com/v1/message",
-                    {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            "Authorization": config.apiKey,
-                        },
-                        body: JSON.stringify({ messages: messagesPayload }),
-                    }
-                );
+                const maxAttempts = 3;
+                const baseDelayMs = 1000;
+                let result: ClickatellResponse | null = null;
 
-                if (!response.ok) {
+                for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                    const response: Response = await fetch(
+                        "https://platform.clickatell.com/v1/message",
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type": "application/json",
+                                "Authorization": config.apiKey,
+                            },
+                            body: JSON.stringify({ messages: messagesPayload }),
+                        }
+                    );
+
+                    if (response.ok) {
+                        result = (await response.json()) as ClickatellResponse;
+                        break;
+                    }
+
                     const errorText = await response.text();
 
-                    // Try to parse JSON error to check for specific codes
-                    try {
-                        const errorJson = JSON.parse(errorText);
-                        if (errorJson?.error?.code === 21) {
-                            throw new Error(`WhatsApp template not found or not approved in Clickatell. Please ensure the template '${template.name}' exists and is approved in your Clickatell dashboard.`);
+                    // Don't retry on client errors (4xx except 429)
+                    if (!isRetryableHttpStatus(response.status)) {
+                        try {
+                            const errorJson = JSON.parse(errorText);
+                            if (errorJson?.error?.code === 21) {
+                                throw new Error(`WhatsApp template not found or not approved in Clickatell. Please ensure the template '${template.name}' exists and is approved in your Clickatell dashboard.`);
+                            }
+                        } catch (e) {
+                            if (e instanceof Error && e.message.includes("WhatsApp template")) throw e;
                         }
-                    } catch (e) {
-                        if (e instanceof Error && e.message.includes("WhatsApp template")) throw e;
+                        throw new Error(`Clickatell API Batch Error: ${response.statusText} - ${errorText}`);
                     }
 
-                    // If batch fails, mark all as failed
-                    // Or parse individual errors if partial success is returned (depends on API)
-                    // Usually 202 Accepted is returned with a list of results.
-                    throw new Error(`Clickatell API Batch Error: ${response.statusText} - ${errorText}`);
+                    if (attempt === maxAttempts) {
+                        throw new Error(`Clickatell API Batch Error after ${maxAttempts} attempts: ${response.status} - ${errorText}`);
+                    }
+
+                    const delay = baseDelayMs * Math.pow(2, attempt - 1);
+                    await new Promise((resolve) => setTimeout(resolve, delay));
                 }
 
-                const result: ClickatellResponse = await response.json();
-                console.log("CLICKATELL BATCH RESPONSE:", JSON.stringify(result, null, 2));
+                if (!result) {
+                    throw new Error("Clickatell API did not return a result");
+                }
 
-                // Map results back to recipients
-                // Assuming result.messages order matches request messages order OR we use clientMessageId
-                // Clickatell returns `apiMessageId`, `accepted`, `to`, `clientMessageId` (if sent)
+                const finalResult = result;
+                console.log("CLICKATELL BATCH RESPONSE:", JSON.stringify(finalResult, null, 2));
 
-                // Create a map of clientMessageId to result for easy lookup
-                const resultMap = new Map(result.messages.map(msg => [msg.apiMessageId /* Note: Clickatell might not return clientMessageId in response msg object immediately, need to check docs. Assuming order is preserved or simple match for now. */, msg]));
-
-                // Actually, Clickatell "accepted" response is usually an array matching the input.
-                // Let's assume order matches for now, as it's standard for batch APIs.
-
-                result.messages.forEach((msg, index) => {
+                // Map results back to recipients (order matches request)
+                finalResult.messages.forEach((msg, index) => {
                     const recipient = batchRecipients[index];
                     // Ideally we match by 'to' number if order isn't guaranteed, but sanitization makes it tricky.
                     // Let's trust index mapping for this implementation or just iterate.
@@ -386,18 +387,18 @@ export const sendBulkWhatsApp = action({
             }
         }
 
-        // Update individual message statuses if campaignId is present
-        if (args.campaignId) {
-            for (const detail of results.details) {
-                await ctx.runMutation(internal.messages.updateStatusByRecipient, {
-                    campaignId: args.campaignId,
-                    recipientId: detail.recipientId,
-                    status: detail.success ? "sent" : "failed",
+        // Batch update message statuses if campaignId is present
+        if (args.campaignId && results.details.length > 0) {
+            await ctx.runMutation(internal.messages.updateStatusBatch, {
+                campaignId: args.campaignId,
+                updates: results.details.map((d) => ({
+                    recipientId: d.recipientId,
+                    status: d.success ? "sent" : "failed",
                     sentAt: Date.now(),
-                    errorMessage: detail.error,
-                    externalMessageId: detail.messageSid,
-                });
-            }
+                    errorMessage: d.error,
+                    externalMessageId: d.messageSid,
+                })),
+            });
         }
 
         return {

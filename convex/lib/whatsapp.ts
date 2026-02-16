@@ -1,3 +1,19 @@
+import { isRetryableHttpStatus } from "./retry";
+
+/**
+ * Normalize phone number to E.164 international format for Clickatell.
+ * Converts numbers starting with 0 to international format (e.g. 0821234567 -> 27821234567).
+ * @param phoneNumber - Raw phone number (may include spaces, dashes, or leading 0)
+ * @param defaultCountryCode - Country code to prepend when number starts with 0 (default: 27 for South Africa)
+ */
+export function normalizePhoneNumber(phoneNumber: string, defaultCountryCode: string = "27"): string {
+    const digitsOnly = phoneNumber.replace(/\D/g, "");
+    if (digitsOnly.startsWith("0")) {
+        return defaultCountryCode + digitsOnly.slice(1);
+    }
+    return digitsOnly;
+}
+
 export interface ClickatellMessageResult {
     apiMessageId: string;
     accepted: boolean;

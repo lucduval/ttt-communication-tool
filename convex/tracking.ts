@@ -31,8 +31,9 @@ export const logClick = internalMutation({
         // Ideally we want unique clicks for the count on the dashboard.
         const existingClick = await ctx.db
             .query("clicks")
-            .withIndex("by_recipient", (q) => q.eq("recipientId", args.recipientId))
-            .filter((q) => q.eq(q.field("campaignId"), campaignId))
+            .withIndex("by_campaign_recipient", (q) =>
+                q.eq("campaignId", campaignId).eq("recipientId", args.recipientId)
+            )
             .first();
 
         await ctx.db.insert("clicks", {
@@ -78,8 +79,9 @@ export const logOpen = internalMutation({
 
         const existingOpen = await ctx.db
             .query("opens")
-            .withIndex("by_recipient", (q) => q.eq("recipientId", args.recipientId))
-            .filter((q) => q.eq(q.field("campaignId"), campaignId))
+            .withIndex("by_campaign_recipient", (q) =>
+                q.eq("campaignId", campaignId).eq("recipientId", args.recipientId)
+            )
             .first();
 
         await ctx.db.insert("opens", {

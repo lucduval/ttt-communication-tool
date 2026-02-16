@@ -4,7 +4,8 @@ import { v } from "convex/values";
 import { action, internalAction } from "./_generated/server";
 import { internal, api } from "./_generated/api";
 import type { ShimmedContact, CampaignFilters } from "./lib/dynamics_util";
-import { getClickatellConfig, uploadClickatellMedia } from "./lib/whatsapp";
+import { getClickatellConfig, uploadClickatellMedia, normalizePhoneNumber } from "./lib/whatsapp";
+import { isRetryableHttpStatus } from "./lib/retry";
 import { logEmailActivity, logWhatsAppActivity } from "./lib/dynamics_logging";
 
 /**
@@ -86,10 +87,15 @@ export const processEmailBatch = internalAction({
             return;
         }
 
-        // Mark batch as processing
-        await ctx.runMutation(internal.campaignBatches.markBatchProcessing, {
+        // Mark batch as processing (with idempotency guard)
+        const { acquired } = await ctx.runMutation(internal.campaignBatches.markBatchProcessing, {
             batchId: batch._id,
         });
+
+        if (!acquired) {
+            // Batch was already picked up by another action invocation, skip
+            return;
+        }
 
         let successCount = 0;
         let failedCount = 0;
@@ -247,10 +253,17 @@ export const processEmailBatch = internalAction({
             }
         } catch (err) {
             console.error("Batch processing error:", err);
-            await ctx.runMutation(internal.campaignBatches.markBatchFailed, {
+            const { hasMoreBatches } = await ctx.runMutation(internal.campaignBatches.markBatchFailed, {
                 batchId: batch._id,
                 errorMessage: err instanceof Error ? err.message : "Unknown error",
             });
+
+            // Continue processing remaining batches even after a failure
+            if (hasMoreBatches) {
+                await ctx.scheduler.runAfter(500, internal.campaignQueue.processEmailBatch, {
+                    campaignId: args.campaignId,
+                });
+            }
         }
     },
 });
@@ -291,10 +304,15 @@ export const processWhatsAppBatch = internalAction({
             return;
         }
 
-        // Mark batch as processing
-        await ctx.runMutation(internal.campaignBatches.markBatchProcessing, {
+        // Mark batch as processing (with idempotency guard)
+        const { acquired } = await ctx.runMutation(internal.campaignBatches.markBatchProcessing, {
             batchId: batch._id,
         });
+
+        if (!acquired) {
+            // Batch was already picked up by another action invocation, skip
+            return;
+        }
 
         let successCount = 0;
         let failedCount = 0;
@@ -318,11 +336,8 @@ export const processWhatsAppBatch = internalAction({
                         const fileName = template.headerUrl.split('/').pop() || "media_file";
 
                         // Use the first recipient's phone number from the batch for the upload
-                        // or a dummy number if needed, but real number is safer for Clickatell validation
-                        const firstRecipientPhone = batch.recipients[0]?.phone || "";
-                        // If no phone in first recipient, we might have an issue, but we'll try to find one
-                        const phoneForUpload = batch.recipients.find((r: any) => r.phone)?.phone || "1234567890";
-                        const toNumber = phoneForUpload.replace(/\D/g, "");
+                        const phoneForUpload = batch.recipients.find((r: { phone?: string }) => r.phone)?.phone || "27123456789";
+                        const toNumber = normalizePhoneNumber(phoneForUpload);
 
                         const fileId = await uploadClickatellMedia(config.apiKey, template.headerUrl, toNumber, fileName, true);
 
@@ -348,13 +363,15 @@ export const processWhatsAppBatch = internalAction({
 
                 // Build messages payload
                 const messagesPayload = subBatch.map((recipient: { id: string; phone?: string; name: string; variables?: string }) => {
-                    const toNumber = (recipient.phone || "").replace(/\D/g, "");
-                    if (toNumber.startsWith("0")) {
-                        console.warn(`WARNING: Phone number ${toNumber} starts with 0. Clickatell requires international format. Messages may fail.`);
+                    const toNumber = normalizePhoneNumber(recipient.phone || "");
+                    let recipientVars: Record<string, string> = {};
+                    if (recipient.variables) {
+                        try {
+                            recipientVars = JSON.parse(recipient.variables);
+                        } catch {
+                            console.warn(`Invalid JSON in recipient variables for ${recipient.id}, using empty object`);
+                        }
                     }
-                    const recipientVars = recipient.variables
-                        ? JSON.parse(recipient.variables)
-                        : {};
 
 
                     const allVariables: Record<string, string> = {
@@ -394,28 +411,46 @@ export const processWhatsAppBatch = internalAction({
                 });
 
                 try {
-                    const response = await fetch(
-                        "https://platform.clickatell.com/v1/message",
-                        {
-                            method: "POST",
-                            headers: {
-                                "Content-Type": "application/json",
-                                Authorization: config.apiKey,
-                            },
-                            body: JSON.stringify({ messages: messagesPayload }),
-                        }
-                    );
+                    const maxAttempts = 3;
+                    const baseDelayMs = 1000;
+                    let result: { messages: Array<{ accepted?: boolean; apiMessageId?: string; error?: unknown }> } | null = null;
 
-                    if (!response.ok) {
+                    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                        const response = await fetch(
+                            "https://platform.clickatell.com/v1/message",
+                            {
+                                method: "POST",
+                                headers: {
+                                    "Content-Type": "application/json",
+                                    Authorization: config.apiKey,
+                                },
+                                body: JSON.stringify({ messages: messagesPayload }),
+                            }
+                        );
+
+                        if (response.ok) {
+                            result = await response.json();
+                            break;
+                        }
+
                         const errorText = await response.text();
-                        throw new Error(`Clickatell API error: ${response.status} - ${errorText}`);
+
+                        if (!isRetryableHttpStatus(response.status) || attempt === maxAttempts) {
+                            throw new Error(`Clickatell API error: ${response.status} - ${errorText}`);
+                        }
+
+                        const delay = baseDelayMs * Math.pow(2, attempt - 1);
+                        await new Promise((resolve) => setTimeout(resolve, delay));
                     }
 
-                    const result = await response.json();
-                    console.log("CLICKATELL QUEUE BATCH RESPONSE:", JSON.stringify(result, null, 2));
+                    if (!result) {
+                        throw new Error("Clickatell API did not return a result");
+                    }
+                    const finalResult = result;
+                    console.log("CLICKATELL QUEUE BATCH RESPONSE:", JSON.stringify(finalResult, null, 2));
 
-                    for (let idx = 0; idx < result.messages.length; idx++) {
-                        const msg = result.messages[idx] as { accepted?: boolean; apiMessageId?: string; error?: unknown };
+                    for (let idx = 0; idx < finalResult.messages.length; idx++) {
+                        const msg = finalResult.messages[idx];
                         const recipient = subBatch[idx];
                         if (msg.accepted) {
                             successCount++;
@@ -494,10 +529,17 @@ export const processWhatsAppBatch = internalAction({
             }
         } catch (err) {
             console.error("Batch processing error:", err);
-            await ctx.runMutation(internal.campaignBatches.markBatchFailed, {
+            const { hasMoreBatches } = await ctx.runMutation(internal.campaignBatches.markBatchFailed, {
                 batchId: batch._id,
                 errorMessage: err instanceof Error ? err.message : "Unknown error",
             });
+
+            // Continue processing remaining batches even after a failure
+            if (hasMoreBatches) {
+                await ctx.scheduler.runAfter(500, internal.campaignQueue.processWhatsAppBatch, {
+                    campaignId: args.campaignId,
+                });
+            }
         }
     },
 });
@@ -579,7 +621,23 @@ export const processCampaignFilters = internalAction({
 
         } catch (error) {
             console.error("Error processing campaign filters:", error);
-            // We should probably mark the campaign as failed here if it hasn't started
+
+            // Mark the campaign as failed and notify the user
+            await ctx.runMutation(internal.campaigns.updateStatus, {
+                campaignId,
+                status: "failed",
+            });
+
+            const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, { campaignId });
+            if (campaign) {
+                await ctx.runMutation(internal.notifications.create, {
+                    userId: campaign.createdBy,
+                    title: "Campaign Failed",
+                    message: `Failed to fetch contacts for campaign "${campaign.name}": ${error instanceof Error ? error.message : "Unknown error"}`,
+                    type: "error",
+                    link: `/campaigns/${campaignId}`,
+                });
+            }
         }
     }
 });

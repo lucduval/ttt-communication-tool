@@ -158,7 +158,8 @@ export default defineSchema({
         userAgent: v.optional(v.string()),
     })
         .index("by_campaign", ["campaignId"])
-        .index("by_recipient", ["recipientId"]),
+        .index("by_recipient", ["recipientId"])
+        .index("by_campaign_recipient", ["campaignId", "recipientId"]),
 
     opens: defineTable({
         campaignId: v.id("campaigns"),
@@ -167,7 +168,8 @@ export default defineSchema({
         userAgent: v.optional(v.string()),
     })
         .index("by_campaign", ["campaignId"])
-        .index("by_recipient", ["recipientId"]),
+        .index("by_recipient", ["recipientId"])
+        .index("by_campaign_recipient", ["campaignId", "recipientId"]),
 
     // Email Templates
     emailTemplates: defineTable({

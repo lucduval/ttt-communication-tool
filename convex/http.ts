@@ -33,19 +33,23 @@ http.route({
             return new Response("Invalid signature", { status: 403 });
         }
 
-        // Log the click asynchronously
-        try {
-            await ctx.runMutation(internal.tracking.logClick, {
-                campaignId: campaignId as Id<"campaigns">,
-                recipientId: recipientId,
-                url: targetUrl,
-                userAgent: request.headers.get("user-agent") || undefined,
-            });
-        } catch (error) {
-            console.error("Failed to log click:", error);
+        const userAgent = request.headers.get("user-agent");
+
+        // Filter out bots and email security scanners to prevent inflated click counts
+        if (!isBot(userAgent)) {
+            try {
+                await ctx.runMutation(internal.tracking.logClick, {
+                    campaignId: campaignId as Id<"campaigns">,
+                    recipientId: recipientId,
+                    url: targetUrl,
+                    userAgent: userAgent || undefined,
+                });
+            } catch (error) {
+                console.error("Failed to log click:", error);
+            }
         }
 
-        // Redirect to the target URL
+        // Always redirect to the target URL (even for bots/scanners)
         return new Response(null, {
             status: 302,
             headers: { Location: targetUrl },
@@ -65,12 +69,12 @@ http.route({
         const campaignId = url.searchParams.get("c");
         const recipientId = url.searchParams.get("r");
 
-        if (campaignId && recipientId) {
+        // Only log the open if params are present, signature is valid, and not a bot
+        if (campaignId && recipientId && await verifyUrlSignature(request.url)) {
             const userAgent = request.headers.get("user-agent");
 
             // Ignore bots and scanners to prevent premature opens
             if (!isBot(userAgent)) {
-                // Log the open asynchronously
                 try {
                     await ctx.runMutation(internal.tracking.logOpen, {
                         campaignId: campaignId as Id<"campaigns">,
@@ -80,8 +84,6 @@ http.route({
                 } catch (error) {
                     console.error("Failed to log open:", error);
                 }
-            } else {
-                console.log(`Ignored bot open from UA: ${userAgent}`);
             }
         }
 

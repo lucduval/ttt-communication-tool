@@ -11,4 +11,12 @@ crons.interval(
     { limit: 50 }
 );
 
+// Recover batches stuck in "processing" state (e.g. after action crash/timeout)
+crons.interval(
+    "recover-stuck-batches",
+    { minutes: 5 },
+    internal.campaignBatches.recoverStuckBatches,
+    {}
+);
+
 export default crons;

@@ -5,7 +5,7 @@ import type { Id } from "./_generated/dataModel";
 import { checkAccessHelper } from "./users";
 
 // Constants for batch sizing
-export const EMAIL_BATCH_SIZE = 500;
+export const EMAIL_BATCH_SIZE = 250;
 export const WHATSAPP_BATCH_SIZE = 1000;
 
 /**
@@ -25,16 +25,26 @@ export const createBatches = internalMutation({
     },
     handler: async (ctx, args) => {
         const batchSize = args.channel === "email" ? EMAIL_BATCH_SIZE : WHATSAPP_BATCH_SIZE;
-        const totalBatches = Math.ceil(args.recipients.length / batchSize);
 
-        for (let i = 0; i < totalBatches; i++) {
+        // Count existing batches to continue numbering correctly
+        // (for filter-based campaigns where createBatches is called multiple times)
+        const existingBatches = await ctx.db
+            .query("campaignBatches")
+            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
+            .collect();
+        const existingBatchCount = existingBatches.length;
+
+        const newBatchCount = Math.ceil(args.recipients.length / batchSize);
+        const totalBatches = existingBatchCount + newBatchCount;
+
+        for (let i = 0; i < newBatchCount; i++) {
             const start = i * batchSize;
             const end = Math.min(start + batchSize, args.recipients.length);
             const batchRecipients = args.recipients.slice(start, end);
 
             await ctx.db.insert("campaignBatches", {
                 campaignId: args.campaignId,
-                batchNumber: i + 1,
+                batchNumber: existingBatchCount + i + 1,
                 totalBatches,
                 status: "pending",
                 recipients: batchRecipients,
@@ -44,11 +54,15 @@ export const createBatches = internalMutation({
             });
         }
 
-        await ctx.db.patch(args.campaignId, {
+        // Only reset currentBatch on the first call
+        const patchData: Record<string, unknown> = {
             totalBatches,
-            currentBatch: 0,
             status: "queued",
-        });
+        };
+        if (existingBatchCount === 0) {
+            patchData.currentBatch = 0;
+        }
+        await ctx.db.patch(args.campaignId, patchData);
 
         return { totalBatches };
     },
@@ -95,7 +109,12 @@ export const markBatchProcessing = internalMutation({
     args: { batchId: v.id("campaignBatches") },
     handler: async (ctx, args) => {
         const batch = await ctx.db.get(args.batchId);
-        if (!batch) return;
+        if (!batch) return { acquired: false };
+
+        // Idempotency guard: only transition from "pending" to "processing"
+        if (batch.status !== "pending") {
+            return { acquired: false };
+        }
 
         await ctx.db.patch(args.batchId, {
             status: "processing",
@@ -126,6 +145,8 @@ export const markBatchProcessing = internalMutation({
                 });
             }
         }
+
+        return { acquired: true };
     },
 });
 
@@ -202,30 +223,65 @@ export const markBatchFailed = internalMutation({
     },
     handler: async (ctx, args) => {
         const batch = await ctx.db.get(args.batchId);
-        if (!batch) return;
+        if (!batch) return { hasMoreBatches: false };
 
         await ctx.db.patch(args.batchId, {
             status: "failed",
             completedAt: Date.now(),
             errorMessage: args.errorMessage,
-        });
-
-        await ctx.db.patch(batch.campaignId, {
+            processedCount: batch.recipients.length,
             failedCount: batch.recipients.length,
-            status: "failed",
         });
 
-        // Notify user
         const campaign = await ctx.db.get(batch.campaignId);
         if (campaign) {
+            // Increment failedCount properly (not overwrite)
+            await ctx.db.patch(batch.campaignId, {
+                failedCount: (campaign.failedCount || 0) + batch.recipients.length,
+                sentCount: (campaign.sentCount || 0) + batch.recipients.length,
+            });
+        }
+
+        // Check if there are remaining pending batches
+        const pendingBatch = await ctx.db
+            .query("campaignBatches")
+            .withIndex("by_campaign_status", (q) =>
+                q.eq("campaignId", batch.campaignId).eq("status", "pending")
+            )
+            .first();
+
+        const processingBatch = await ctx.db
+            .query("campaignBatches")
+            .withIndex("by_campaign_status", (q) =>
+                q.eq("campaignId", batch.campaignId).eq("status", "processing")
+            )
+            .first();
+
+        if (!pendingBatch && !processingBatch) {
+            // All batches done — mark campaign as completed (with errors)
+            await ctx.db.patch(batch.campaignId, { status: "completed" });
+
+            if (campaign) {
+                await ctx.runMutation(internal.notifications.create, {
+                    userId: campaign.createdBy,
+                    title: "Campaign Completed with Errors",
+                    message: `Your campaign "${campaign.name}" has finished, but some batches failed. Error: ${args.errorMessage}`,
+                    type: "warning",
+                    link: `/campaigns/${batch.campaignId}`,
+                });
+            }
+        } else if (campaign) {
+            // More batches to process — notify about batch failure but continue
             await ctx.runMutation(internal.notifications.create, {
                 userId: campaign.createdBy,
-                title: "Campaign Failed",
-                message: `Batch processing failed for campaign "${campaign.name}". Error: ${args.errorMessage}`,
-                type: "error",
+                title: "Batch Failed - Continuing",
+                message: `A batch failed for campaign "${campaign.name}": ${args.errorMessage}. Continuing with remaining batches.`,
+                type: "warning",
                 link: `/campaigns/${batch.campaignId}`,
             });
         }
+
+        return { hasMoreBatches: !!pendingBatch };
     },
 });
 
@@ -342,5 +398,56 @@ export const updateTotalRecipients = internalMutation({
         await ctx.db.patch(args.campaignId, {
             totalRecipients: args.count,
         });
+    },
+});
+
+/**
+ * Recover batches stuck in "processing" state (e.g. after an action crash/timeout).
+ * Resets them to "pending" so they can be retried, and re-schedules batch processing.
+ */
+export const recoverStuckBatches = internalMutation({
+    args: {},
+    handler: async (ctx) => {
+        const stuckThreshold = Date.now() - 15 * 60 * 1000; // 15 minutes
+
+        const processingBatches = await ctx.db
+            .query("campaignBatches")
+            .withIndex("by_status", (q) => q.eq("status", "processing"))
+            .collect();
+
+        const recoveredCampaignIds = new Set<Id<"campaigns">>();
+
+        for (const batch of processingBatches) {
+            if (batch.startedAt && batch.startedAt < stuckThreshold) {
+                await ctx.db.patch(batch._id, {
+                    status: "pending",
+                    startedAt: undefined,
+                });
+                recoveredCampaignIds.add(batch.campaignId);
+                console.log(`Recovered stuck batch ${batch._id} for campaign ${batch.campaignId}`);
+            }
+        }
+
+        // Re-schedule batch processing for each affected campaign
+        for (const campaignId of recoveredCampaignIds) {
+            const campaign = await ctx.db.get(campaignId);
+            if (campaign && (campaign.status === "processing" || campaign.status === "queued")) {
+                if (campaign.channel === "email") {
+                    await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
+                        campaignId,
+                    });
+                } else {
+                    await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
+                        campaignId,
+                    });
+                }
+            }
+        }
+
+        if (recoveredCampaignIds.size > 0) {
+            console.log(`Recovered ${recoveredCampaignIds.size} stuck campaign(s)`);
+        }
+
+        return { recovered: recoveredCampaignIds.size };
     },
 });

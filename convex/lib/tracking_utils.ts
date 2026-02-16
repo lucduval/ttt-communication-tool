@@ -75,8 +75,9 @@ export async function rewriteEmailLinks(
     // Append remaining text
     builtBody += htmlBody.substring(lastIndex);
 
-    // Add open tracking pixel
-    const openTrackingUrl = `${siteUrl}/open?c=${campaignId}&r=${recipientId}`;
+    // Add open tracking pixel (signed to prevent forged open events)
+    const rawOpenUrl = `${siteUrl}/open?c=${campaignId}&r=${recipientId}`;
+    const openTrackingUrl = await signUrl(rawOpenUrl);
     const trackingPixel = `<img src="${openTrackingUrl}" width="1" height="1" alt="" style="display:none;" />`;
 
     // Insert pixel before </body> if it exists, otherwise append
@@ -89,14 +90,25 @@ export async function rewriteEmailLinks(
     return builtBody;
 }
 
-// Secret for signing URLs - strict fallback to complex string if env var missing
-const TRACKING_SECRET = process.env.TRACKING_SECRET || "fallback_secret_change_me_in_prod_12345";
+/**
+ * Get the tracking secret, throwing a clear error if not configured.
+ */
+function getTrackingSecret(): string {
+    const secret = process.env.TRACKING_SECRET;
+    if (!secret) {
+        throw new Error(
+            "TRACKING_SECRET environment variable is required for email tracking. " +
+            "Generate one with: openssl rand -hex 32"
+        );
+    }
+    return secret;
+}
 
 async function generateSignature(data: string): Promise<string> {
     const encoder = new TextEncoder();
     const key = await crypto.subtle.importKey(
         "raw",
-        encoder.encode(TRACKING_SECRET),
+        encoder.encode(getTrackingSecret()),
         { name: "HMAC", hash: "SHA-256" },
         false,
         ["sign"]
@@ -174,7 +186,17 @@ export function isBot(userAgent?: string | null): boolean {
         "sogou",
         "exabot",
         "facebot",
-        "ia_archiver"
+        "ia_archiver",
+        // Email security scanners (pre-click links to check for malware)
+        "safelinks",
+        "barracuda",
+        "proofpoint",
+        "mimecast",
+        "fortiguard",
+        "symantec",
+        "fireeye",
+        "microsoft office",
+        "ms-office",
     ];
 
     return botKeywords.some(keyword => lower.includes(keyword));

@@ -28,6 +28,7 @@ import type * as lib_dynamics_logging from "../lib/dynamics_logging.js";
 import type * as lib_dynamics_util from "../lib/dynamics_util.js";
 import type * as lib_emailLayout from "../lib/emailLayout.js";
 import type * as lib_graph_client from "../lib/graph_client.js";
+import type * as lib_retry from "../lib/retry.js";
 import type * as lib_tracking_utils from "../lib/tracking_utils.js";
 import type * as lib_whatsapp from "../lib/whatsapp.js";
 import type * as messages from "../messages.js";
@@ -63,6 +64,7 @@ declare const fullApi: ApiFromModules<{
   "lib/dynamics_util": typeof lib_dynamics_util;
   "lib/emailLayout": typeof lib_emailLayout;
   "lib/graph_client": typeof lib_graph_client;
+  "lib/retry": typeof lib_retry;
   "lib/tracking_utils": typeof lib_tracking_utils;
   "lib/whatsapp": typeof lib_whatsapp;
   messages: typeof messages;

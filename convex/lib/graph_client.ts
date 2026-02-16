@@ -3,6 +3,8 @@
  * Uses client credentials flow (service principal)
  */
 
+import { isRetryableHttpStatus } from "./retry";
+
 interface TokenResponse {
     access_token: string;
     expires_in: number;
@@ -145,30 +147,49 @@ export async function sendEmail(message: EmailMessage): Promise<{ success: boole
         }));
     }
 
-    // Send email from shared mailbox
+    // Send email from shared mailbox with retries for transient failures
     const url = `https://graph.microsoft.com/v1.0/users/${sharedMailbox}/sendMail`;
+    const maxAttempts = 3;
+    const baseDelayMs = 1000;
 
-    const response = await fetch(url, {
-        method: "POST",
-        headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-        },
-        body: JSON.stringify(emailPayload),
-    });
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify(emailPayload),
+        });
 
-    if (!response.ok) {
+        if (response.ok) {
+            return { success: true };
+        }
+
         const errorText = await response.text();
-        console.error("Graph API error:", response.status, errorText);
-        return {
-            success: false,
-            error: `Failed to send email: ${response.status} - ${errorText}`,
-        };
+
+        // Don't retry on client errors (4xx except 429)
+        if (!isRetryableHttpStatus(response.status)) {
+            console.error("Graph API error:", response.status, errorText);
+            return {
+                success: false,
+                error: `Failed to send email: ${response.status} - ${errorText}`,
+            };
+        }
+
+        if (attempt === maxAttempts) {
+            console.error("Graph API error (max retries):", response.status, errorText);
+            return {
+                success: false,
+                error: `Failed to send email after ${maxAttempts} attempts: ${response.status} - ${errorText}`,
+            };
+        }
+
+        const delay = baseDelayMs * Math.pow(2, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
     }
 
-    return {
-        success: true,
-    };
+    return { success: true };
 }
 
 /**
