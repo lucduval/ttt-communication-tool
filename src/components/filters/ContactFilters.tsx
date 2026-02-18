@@ -80,7 +80,7 @@ export function ContactFilters({
                 setSourceCodeOptions(sources.options);
 
                 // Owners (Consultants)
-                const owners = await getOwnerOptions();
+                const owners = await getOwnerOptions({});
                 setOwnerOptions(owners.map(o => ({ value: o.id, label: o.name })));
 
                 // Industries
