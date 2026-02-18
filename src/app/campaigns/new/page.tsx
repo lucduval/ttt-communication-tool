@@ -517,7 +517,7 @@ export default function NewCampaignPage() {
                 attachments: backendAttachments,
                 whatsappTemplateId: campaignChannel === "whatsapp" ? selectedTemplate?._id : undefined,
                 variableValues: campaignChannel === "whatsapp" ? JSON.stringify(variableValues) : undefined,
-                createDynamicsActivity: true, // Always create activity for now
+                createDynamicsActivity: audience === "clients",
                 fromMailbox: campaignChannel === "email" ? selectedMailbox || undefined : undefined,
             });
 
