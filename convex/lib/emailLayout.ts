@@ -19,7 +19,7 @@ export const wrapEmail = (content: string, title: string = "Notification"): stri
   <style>
     table, td, div, h1, p { font-family: Arial, sans-serif; }
     body { margin: 0; padding: 0; background-color: #f4f4f4; }
-    .email-container { max-width: 800px; margin: 0 auto; background-color: #ffffff; padding: 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    .email-container { max-width: 800px; margin: 0 auto; background-color: #ffffff; padding: 0; }
     img { max-width: 100%; width: 100%; height: auto; display: block; }
     a { color: #007bff; text-decoration: none; }
     /* Force tables to expand to full width of container */
@@ -35,9 +35,9 @@ export const wrapEmail = (content: string, title: string = "Notification"): stri
       <tr>
         <td align="center">
           <!-- Main Container -->
-          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:800px;margin:0 auto;background-color:#ffffff;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+          <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:800px;margin:0 auto;background-color:#ffffff;">
             <tr>
-              <td style="padding:0;font-family:Arial,sans-serif;font-size:18px;line-height:1.5;color:#333333;">
+              <td style="padding:20px 30px;font-family:Arial,sans-serif;font-size:18px;line-height:1.5;color:#333333;">
                 ${content}
               </td>
             </tr>
