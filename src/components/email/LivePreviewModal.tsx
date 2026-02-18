@@ -115,14 +115,15 @@ export function LivePreviewModal({
                                 )}
                             </div>
 
-                            {/* Email Body */}
+                            {/* Email Body — matches wrapEmail's <td> styles */}
                             <div
-                                className="p-8 min-h-[400px] bg-white"
+                                className="min-h-[400px] bg-white"
                                 style={{
-                                    fontFamily: "inherit",
-                                    fontSize: "16px",
-                                    lineHeight: "1.6",
-                                    color: "#333"
+                                    padding: "20px 24px",
+                                    fontFamily: "Arial, Helvetica, sans-serif",
+                                    fontSize: "15px",
+                                    lineHeight: "1.45",
+                                    color: "#333333",
                                 }}
                                 dangerouslySetInnerHTML={{
                                     __html: htmlContent || "<p style='color: #9ca3af; font-style: italic;'>Start typing in the editor to see your email content here...</p>"

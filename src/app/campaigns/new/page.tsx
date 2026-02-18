@@ -17,6 +17,8 @@ import {
     ContactFilters,
     buildODataFilter,
     type FilterState,
+    EmployeeFilters,
+    type EmployeeFilterState,
 } from "@/components/filters";
 import { ContactList, type Contact } from "@/components/recipients";
 import {
@@ -86,6 +88,12 @@ export default function NewCampaignPage() {
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [selectedContacts, setSelectedContacts] = useState<Contact[]>([]);
     const [audience, setAudience] = useState<"clients" | "employees">("clients");
+    const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
+        emailDomains: [],
+        status: "all",
+    });
+    const [allEmployees, setAllEmployees] = useState<Contact[]>([]);
+    const [availableDomains, setAvailableDomains] = useState<string[]>([]);
 
     // Email state
     const [subject, setSubject] = useState("");
@@ -157,7 +165,8 @@ export default function NewCampaignPage() {
             setIsLoadingContacts(true);
 
             if (audience === "employees") {
-                const employees = await fetchEmployees({});
+                const needDisabled = employeeFilters.status === "all" || employeeFilters.status === "inactive";
+                const employees = await fetchEmployees({ includeDisabled: needDisabled });
                 const mappedEmployees: Contact[] = employees.map(emp => ({
                     id: emp.id,
                     fullName: emp.name,
@@ -165,25 +174,54 @@ export default function NewCampaignPage() {
                     lastName: null,
                     email: emp.email || null,
                     phone: emp.phone || null,
-                    internationalPhone: emp.phone || null, // Assuming phone is mobile
-                    isActive: true, // System users are filtered to be active
+                    internationalPhone: emp.phone || null,
+                    isActive: !emp.isDisabled,
                     clientType: "employee",
                     marketingPreferences: { tax: false, accounting: false, insurance: false },
-                    whatsappOptIn: true, // Internal users assumed opted in? Or check field? Plan says no filters.
+                    whatsappOptIn: true,
                     emailNotifications: true,
                     smsNotifications: true,
                     createdOn: new Date().toISOString(),
                     modifiedOn: new Date().toISOString(),
                 }));
 
+                // Extract unique domains for the filter dropdown
+                const domains = new Set<string>();
+                mappedEmployees.forEach(emp => {
+                    if (emp.email) {
+                        const domain = emp.email.split("@")[1];
+                        if (domain) domains.add(domain);
+                    }
+                });
+                const sortedDomains = Array.from(domains).sort();
+                setAvailableDomains(sortedDomains);
+                setAllEmployees(mappedEmployees);
+
+                // Apply client-side filters
+                let filtered = mappedEmployees;
+
+                if (employeeFilters.status === "active") {
+                    filtered = filtered.filter(e => e.isActive);
+                } else if (employeeFilters.status === "inactive") {
+                    filtered = filtered.filter(e => !e.isActive);
+                }
+
+                if (employeeFilters.emailDomains.length > 0) {
+                    filtered = filtered.filter(e => {
+                        if (!e.email) return false;
+                        const domain = e.email.split("@")[1];
+                        return domain && employeeFilters.emailDomains.includes(domain);
+                    });
+                }
+
                 // Filter by channel capability
-                const filteredEmployees = mappedEmployees.filter(e => {
+                filtered = filtered.filter(e => {
                     if (campaignChannel === "email") return !!e.email;
                     return !!e.phone;
                 });
 
-                setContacts(filteredEmployees);
-                setTotalCount(filteredEmployees.length);
+                setContacts(filtered);
+                setTotalCount(filtered.length);
             } else {
                 const channelFilter = getChannelFilter();
 
@@ -225,7 +263,7 @@ export default function NewCampaignPage() {
         } finally {
             setIsLoadingContacts(false);
         }
-    }, [fetchContacts, getContactCount, filters, getChannelFilter, audience, fetchEmployees, campaignChannel]);
+    }, [fetchContacts, getContactCount, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -238,7 +276,7 @@ export default function NewCampaignPage() {
             const timer = setTimeout(() => loadContacts(), 300);
             return () => clearTimeout(timer);
         }
-    }, [currentStep, filters, loadContacts, audience]);
+    }, [currentStep, filters, loadContacts, audience, employeeFilters]);
 
     // Update selected contacts when moving forward from recipients
     useEffect(() => {
@@ -322,7 +360,7 @@ export default function NewCampaignPage() {
         );
 
         if (wrapWithStyle && campaignChannel === "email") {
-            return `<div style="font-size: ${fontSize}; font-family: Arial, sans-serif; color: #333; line-height: 1.6; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%;">${processed}</div>`;
+            return `<div style="font-size: ${fontSize}; font-family: Arial, sans-serif; color: #333; line-height: 1.45; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%;">${processed}</div>`;
         }
         return processed;
     };
@@ -790,6 +828,7 @@ export default function NewCampaignPage() {
                                         <button
                                             onClick={() => {
                                                 setAudience("employees");
+                                                setEmployeeFilters({ emailDomains: [], status: "all" });
                                                 handleClearSelection();
                                             }}
                                             className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${audience === "employees"
@@ -805,6 +844,15 @@ export default function NewCampaignPage() {
                                         <ContactFilters
                                             filters={filters}
                                             onFiltersChange={setFilters}
+                                            totalCount={totalCount}
+                                        />
+                                    )}
+
+                                    {audience === "employees" && (
+                                        <EmployeeFilters
+                                            filters={employeeFilters}
+                                            onFiltersChange={setEmployeeFilters}
+                                            availableDomains={availableDomains}
                                             totalCount={totalCount}
                                         />
                                     )}

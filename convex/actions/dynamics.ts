@@ -611,17 +611,27 @@ export const getGlobalOptionSet = action({
  * Fetch system users (consultants) from Dynamics
  */
 export const fetchUsers = action({
-    args: {},
-    handler: async (ctx) => {
-        // Fetch active users, excluding system accounts (starting with #)
-        // Note: # must be encoded as %23 to avoid being interpreted as a URL fragment
-        const endpoint = `systemusers?$select=systemuserid,fullname,internalemailaddress,mobilephone&$filter=isdisabled eq false and not startswith(fullname,'%23')&$orderby=fullname asc`;
+    args: {
+        includeDisabled: v.optional(v.boolean()),
+    },
+    handler: async (ctx, args) => {
+        const filterParts: string[] = [];
+
+        if (!args.includeDisabled) {
+            filterParts.push("isdisabled eq false");
+        }
+
+        filterParts.push("not startswith(fullname,'%23')");
+
+        const filterExpr = filterParts.join(" and ");
+        const endpoint = `systemusers?$select=systemuserid,fullname,internalemailaddress,mobilephone,isdisabled&$filter=${filterExpr}&$orderby=fullname asc`;
 
         interface DynamicsUser {
             systemuserid: string;
             fullname: string;
             internalemailaddress?: string;
             mobilephone?: string;
+            isdisabled: boolean;
         }
 
         interface UsersResponse {
@@ -635,6 +645,7 @@ export const fetchUsers = action({
             name: user.fullname,
             email: user.internalemailaddress,
             phone: user.mobilephone,
+            isDisabled: user.isdisabled,
         }));
     },
 });

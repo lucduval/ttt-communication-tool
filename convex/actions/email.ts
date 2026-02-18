@@ -65,7 +65,7 @@ export const sendTestEmail = action({
         const result = await sendEmail({
             subject: `[TEST] ${args.subject}`,
             body: wrapEmail(`
-        <div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 16px; margin-bottom: 20px; border-radius: 8px;">
+        <div style="background-color: #fff3cd; border: 1px solid #ffc107; padding: 12px 16px; margin-bottom: 12px; border-radius: 8px;">
           <strong>⚠️ This is a test email</strong><br/>
           <small>This email was sent as a test before launching the campaign.</small>
         </div>

@@ -102,13 +102,15 @@ export function EmailPreview({
                         </div>
                     </div>
 
-                    {/* Email Body */}
+                    {/* Email Body — matches wrapEmail's <td> styles */}
                     <div
-                        className="p-6 min-h-[300px] email-preview-content"
+                        className="min-h-[300px] email-preview-content"
                         style={{
-                            fontFamily: "inherit",
+                            padding: "20px 24px",
+                            fontFamily: "Arial, Helvetica, sans-serif",
                             fontSize: fontSize,
-                            lineHeight: "1.6",
+                            lineHeight: "1.45",
+                            color: "#333333",
                         }}
                         dangerouslySetInnerHTML={{
                             __html: htmlContent || "<p style='color: #9ca3af;'>Email content will appear here...</p>",

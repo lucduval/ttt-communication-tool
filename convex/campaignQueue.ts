@@ -647,11 +647,11 @@ export const processCampaignFilters = internalAction({
  */
 function getUnsubscribeFooter(unsubscribeUrl: string): string {
     return `
-    <div style="margin-top: 40px; padding-top: 20px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #718096; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+    <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #718096; font-family: Arial, Helvetica, sans-serif;">
         <p style="margin: 4px 0;">You are receiving this email because you are a client of TTT.</p>
         <p style="margin: 4px 0;">
             If you no longer wish to receive these emails, you can
-            <a href="${unsubscribeUrl}" style="color: #4299e1; text-decoration: underline;">unsubscribe here</a>.
+            <a href="${unsubscribeUrl}" style="color: #1a73e8; text-decoration: underline;">unsubscribe here</a>.
         </p>
     </div>`;
 }
