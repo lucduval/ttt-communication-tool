@@ -21,14 +21,11 @@ export const queueCampaignBatches = action({
             name: v.string(),
             variables: v.optional(v.string()),
         }))),
-        channel: v.union(v.literal("email"), v.literal("whatsapp")),
-        filters: v.optional(v.string()), // New: Pass filters instead of recipients
+        channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
+        filters: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
-        // If filters are provided, we need to fetch contacts and create batches asynchronously
         if (args.filters) {
-            // Schedule the background job to fetch contacts and create batches
-            // We use a new internal action for this to avoid timeout limits on the initial call
             await ctx.scheduler.runAfter(0, internal.campaignQueue.processCampaignFilters, {
                 campaignId: args.campaignId,
                 filters: args.filters,
@@ -37,7 +34,6 @@ export const queueCampaignBatches = action({
             return { success: true };
         }
 
-        // Standard flow: create batches from provided recipients
         if (args.recipients && args.recipients.length > 0) {
             await ctx.runMutation(internal.campaignBatches.createBatches, {
                 campaignId: args.campaignId,
@@ -45,8 +41,11 @@ export const queueCampaignBatches = action({
                 channel: args.channel,
             });
 
-            // Schedule first batch processing
-            if (args.channel === "email") {
+            if (args.channel === "personalised") {
+                await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
+                    campaignId: args.campaignId,
+                });
+            } else if (args.channel === "email") {
                 await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
                     campaignId: args.campaignId,
                 });
@@ -551,7 +550,7 @@ export const processCampaignFilters = internalAction({
     args: {
         campaignId: v.id("campaigns"),
         filters: v.string(), // JSON stringified filters
-        channel: v.union(v.literal("email"), v.literal("whatsapp")),
+        channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
     },
     handler: async (ctx, args) => {
         const { filters, campaignId, channel } = args;
@@ -609,7 +608,11 @@ export const processCampaignFilters = internalAction({
             });
 
             // Start processing the first batch
-            if (channel === "email") {
+            if (channel === "personalised") {
+                await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
+                    campaignId,
+                });
+            } else if (channel === "email") {
                 await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
                     campaignId,
                 });
@@ -640,6 +643,218 @@ export const processCampaignFilters = internalAction({
             }
         }
     }
+});
+
+/**
+ * Process one personalised email batch and schedule next.
+ * Each recipient: fetch tax data -> calculate options -> generate AI copy -> build template -> send.
+ */
+export const processPersonalisedBatch = internalAction({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (ctx, args) => {
+        const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, {
+            campaignId: args.campaignId,
+        });
+
+        if (!campaign) {
+            console.error("Campaign not found:", args.campaignId);
+            return;
+        }
+
+        const batch = await ctx.runQuery(internal.campaignBatches.getNextPendingBatchInternal, {
+            campaignId: args.campaignId,
+        });
+
+        if (!batch) {
+            console.log("No more batches to process for personalised campaign:", args.campaignId);
+            return;
+        }
+
+        const { acquired } = await ctx.runMutation(internal.campaignBatches.markBatchProcessing, {
+            batchId: batch._id,
+        });
+
+        if (!acquired) return;
+
+        let successCount = 0;
+        let failedCount = 0;
+        const results: Array<{ recipientId: string; success: boolean; error?: string }> = [];
+
+        const DEFAULT_SYS_PROMPT = "You are a friendly and professional tax advisor at TTT Group. Write warm but concise emails. Do NOT invent or change any numbers.";
+
+        try {
+            const { dynamicsRequest } = await import("./lib/dynamics_auth");
+            const { calculateOptions, parseAgeFromIdNumber } = await import("./lib/taxCalculator");
+            const { generatePersonalisedCopy } = await import("./lib/gemini");
+            const { buildPersonalisedEmail } = await import("./lib/emailTemplatePersonalised");
+            const { sendEmail } = await import("./lib/graph_client");
+
+            const ITA34_SEL = "riivo_ita34id,riivo_yearofassessment,riivo_income,riivo_taxableincomeassessedloss,riivo_retirementannuityfundcontributions,riivo_retirementfundcontributions,riivo_providendfundcontributions,riivo_medicalschemefeestaxcredit,riivo_medicalrebatebelow65withnodisability,riivo_dateofassessment,riivo_referencenumber";
+            const IRP5_SEL = "riivo_irp5id,riivo_assessmentyearint,riivo_incomepaye,riivo_grosstaxableincome,riivo_totaldeductionscontributions,riivo_racontributions,riivo_providentfundcontributionpaye,riivo_totalprovidentfundcontributions,riivo_medicalaidcontributions,riivo_medicalschemetaxcredit,riivo_taxabletravelremuneration,riivo_employertradingothername,riivo_taxperiodstartdate,riivo_taxperiodenddate";
+
+            for (const recipient of batch.recipients) {
+                try {
+                    // 1. Fetch tax data
+                    const [ita34Res, irp5Res, contactRes] = await Promise.all([
+                        dynamicsRequest<{ value: any[] }>(
+                            `riivo_ita34s?$select=${ITA34_SEL}&$filter=_riivo_taxpayercontact_value eq '${recipient.id}'&$orderby=riivo_yearofassessment desc&$top=1`
+                        ),
+                        dynamicsRequest<{ value: any[] }>(
+                            `riivo_irp5s?$select=${IRP5_SEL}&$filter=_riivo_client_value eq '${recipient.id}'&$orderby=riivo_assessmentyearint desc&$top=1`
+                        ),
+                        dynamicsRequest<{ fullname: string; firstname: string | null; ttt_idnumber: string | null; riivo_age: number | null }>(
+                            `contacts(${recipient.id})?$select=fullname,firstname,ttt_idnumber,riivo_age`
+                        ),
+                    ]);
+
+                    const ita34 = ita34Res.value[0];
+                    if (!ita34) {
+                        failedCount++;
+                        results.push({ recipientId: recipient.id, success: false, error: "No ITA34 data" });
+                        continue;
+                    }
+
+                    const taxProfile = {
+                        contactId: recipient.id,
+                        ita34: {
+                            yearOfAssessment: ita34.riivo_yearofassessment ?? 0,
+                            income: ita34.riivo_income ?? 0,
+                            taxableIncome: ita34.riivo_taxableincomeassessedloss ?? 0,
+                            raContributions: ita34.riivo_retirementannuityfundcontributions ?? 0,
+                            retirementFundContributions: ita34.riivo_retirementfundcontributions ?? 0,
+                            providentFundContributions: ita34.riivo_providendfundcontributions ?? 0,
+                            medicalSchemeTaxCredit: ita34.riivo_medicalschemefeestaxcredit ?? 0,
+                            medicalRebate: ita34.riivo_medicalrebatebelow65withnodisability ?? 0,
+                            dateOfAssessment: ita34.riivo_dateofassessment ?? null,
+                            referenceNumber: ita34.riivo_referencenumber ?? null,
+                        },
+                        irp5: irp5Res.value[0] ? {
+                            assessmentYear: irp5Res.value[0].riivo_assessmentyearint ?? 0,
+                            incomePaye: irp5Res.value[0].riivo_incomepaye ?? 0,
+                            grossTaxableIncome: irp5Res.value[0].riivo_grosstaxableincome ?? 0,
+                            totalDeductions: irp5Res.value[0].riivo_totaldeductionscontributions ?? 0,
+                            raContributions: irp5Res.value[0].riivo_racontributions ?? null,
+                            providentFundContribution: irp5Res.value[0].riivo_providentfundcontributionpaye ?? 0,
+                            totalProvidentFund: irp5Res.value[0].riivo_totalprovidentfundcontributions ?? 0,
+                            medicalAidContributions: irp5Res.value[0].riivo_medicalaidcontributions ?? 0,
+                            medicalSchemeTaxCredit: irp5Res.value[0].riivo_medicalschemetaxcredit ?? 0,
+                            taxableTravel: irp5Res.value[0].riivo_taxabletravelremuneration ?? 0,
+                            employerName: irp5Res.value[0].riivo_employertradingothername ?? null,
+                            taxPeriodStart: irp5Res.value[0].riivo_taxperiodstartdate ?? null,
+                            taxPeriodEnd: irp5Res.value[0].riivo_taxperiodenddate ?? null,
+                        } : null,
+                    };
+
+                    // 2. Calculate tax scenarios (with age from ID number for retirement projection)
+                    const age = (contactRes.ttt_idnumber ? parseAgeFromIdNumber(contactRes.ttt_idnumber) : null) ?? contactRes.riivo_age;
+                    const scenarios = calculateOptions(taxProfile, age);
+                    const recipientFirstName = contactRes.firstname || contactRes.fullname || recipient.name;
+
+                    // 3. Generate AI copy
+                    const copy = await generatePersonalisedCopy({
+                        systemPrompt: campaign.aiSystemPrompt || DEFAULT_SYS_PROMPT,
+                        userPrompt: campaign.aiPrompt || "",
+                        scenarios: {
+                            recipientName: recipientFirstName,
+                            yearOfAssessment: scenarios.yearOfAssessment,
+                            currentIncome: scenarios.currentSituation.income,
+                            currentTaxableIncome: scenarios.currentSituation.taxableIncome,
+                            currentRaContribution: scenarios.currentSituation.currentRa,
+                            maxAllowableRa: scenarios.currentSituation.maxAllowableRa,
+                            currentTaxLiability: scenarios.currentSituation.taxLiability,
+                            optionA: { additionalRa: scenarios.optionA.additionalRaContribution, monthlyRa: scenarios.optionA.monthlyAdditionalRa, taxSaving: scenarios.optionA.taxSaving, newTaxLiability: scenarios.optionA.taxAfter },
+                            optionB: { additionalRa: scenarios.optionB.additionalRaContribution, monthlyRa: scenarios.optionB.monthlyAdditionalRa, taxSaving: scenarios.optionB.taxSaving, newTaxLiability: scenarios.optionB.taxAfter },
+                            optionC: { additionalRa: scenarios.optionC.additionalRaContribution, monthlyRa: scenarios.optionC.monthlyAdditionalRa, taxSaving: scenarios.optionC.taxSaving, newTaxLiability: scenarios.optionC.taxAfter },
+                            retirementProjection: scenarios.retirementProjection ?? undefined,
+                        },
+                    });
+
+                    // 4. Build final HTML
+                    let emailBody = buildPersonalisedEmail({
+                        copy,
+                        scenarios,
+                        recipientName: recipientFirstName,
+                        yearOfAssessment: scenarios.yearOfAssessment,
+                    });
+
+                    // 5. Add tracking
+                    const siteUrl = process.env.CONVEX_SITE_URL || "";
+                    if (siteUrl) {
+                        const { rewriteEmailLinks } = await import("./lib/tracking_utils");
+                        emailBody = (await rewriteEmailLinks(emailBody, siteUrl, args.campaignId, recipient.id)) as string;
+                    }
+
+                    // 6. Build subject
+                    const subjectTemplate = campaign.subject || "{firstName}, your personalised RA plan";
+                    const emailSubject = subjectTemplate.replace(/\{firstName\}/g, recipientFirstName);
+
+                    // 7. Send
+                    const result = await sendEmail({
+                        subject: emailSubject,
+                        body: emailBody,
+                        toRecipients: [{ email: recipient.email!, name: recipient.name }],
+                        attachments: [],
+                        fromMailbox: campaign.fromMailbox,
+                        headers: {
+                            "X-Campaign-ID": args.campaignId,
+                            "X-Recipient-ID": recipient.id,
+                        },
+                    });
+
+                    if (result.success) {
+                        successCount++;
+                        results.push({ recipientId: recipient.id, success: true });
+                    } else {
+                        failedCount++;
+                        results.push({ recipientId: recipient.id, success: false, error: result.error });
+                    }
+
+                    await new Promise((resolve) => setTimeout(resolve, 200));
+                } catch (err) {
+                    failedCount++;
+                    results.push({
+                        recipientId: recipient.id,
+                        success: false,
+                        error: err instanceof Error ? err.message : "Unknown error",
+                    });
+                }
+            }
+
+            // Batch update message statuses
+            await ctx.runMutation(internal.messages.updateStatusBatch, {
+                campaignId: args.campaignId,
+                updates: results.map((r) => ({
+                    recipientId: r.recipientId,
+                    status: r.success ? "sent" : "failed",
+                    sentAt: r.success ? Date.now() : undefined,
+                    errorMessage: r.error,
+                })),
+            });
+
+            const { hasMoreBatches } = await ctx.runMutation(
+                internal.campaignBatches.markBatchComplete,
+                { batchId: batch._id, successCount, failedCount }
+            );
+
+            if (hasMoreBatches) {
+                await ctx.scheduler.runAfter(500, internal.campaignQueue.processPersonalisedBatch, {
+                    campaignId: args.campaignId,
+                });
+            }
+        } catch (err) {
+            console.error("Personalised batch processing error:", err);
+            const { hasMoreBatches } = await ctx.runMutation(internal.campaignBatches.markBatchFailed, {
+                batchId: batch._id,
+                errorMessage: err instanceof Error ? err.message : "Unknown error",
+            });
+
+            if (hasMoreBatches) {
+                await ctx.scheduler.runAfter(500, internal.campaignQueue.processPersonalisedBatch, {
+                    campaignId: args.campaignId,
+                });
+            }
+        }
+    },
 });
 
 /**

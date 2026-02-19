@@ -1,13 +1,16 @@
 "use client";
 
-import { Mail, MessageSquare } from "lucide-react";
+import { Mail, MessageSquare, Sparkles } from "lucide-react";
+
+type CampaignChannel = "email" | "whatsapp" | "personalised";
 
 interface ChannelSelectorProps {
-    selectedChannel: "email" | "whatsapp";
-    onChannelChange: (channel: "email" | "whatsapp") => void;
+    selectedChannel: CampaignChannel;
+    onChannelChange: (channel: CampaignChannel) => void;
     campaignTitle: string;
     onTitleChange: (title: string) => void;
     showTitleError?: boolean;
+    showPersonalised?: boolean;
 }
 
 export function ChannelSelector({
@@ -16,6 +19,7 @@ export function ChannelSelector({
     campaignTitle,
     onTitleChange,
     showTitleError = false,
+    showPersonalised = false,
 }: ChannelSelectorProps) {
     return (
         <div className="space-y-6">
@@ -50,7 +54,7 @@ export function ChannelSelector({
                     Select the best way to reach your clients for this campaign
                 </p>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4">
+                <div className={`grid grid-cols-1 ${showPersonalised ? "md:grid-cols-3" : "md:grid-cols-2"} gap-4 pt-4`}>
                     {/* Email Option */}
                     <div
                         onClick={() => onChannelChange("email")}
@@ -86,6 +90,26 @@ export function ChannelSelector({
                             quick updates.
                         </p>
                     </div>
+
+                    {/* Personalised Option */}
+                    {showPersonalised && (
+                        <div
+                            onClick={() => onChannelChange("personalised")}
+                            className={`p-6 border-2 rounded-xl cursor-pointer transition-all ${selectedChannel === "personalised"
+                                ? "border-[#1E3A5F] bg-[#1E3A5F]/5 shadow-md"
+                                : "border-gray-100 hover:border-gray-200"
+                                }`}
+                        >
+                            <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-lg flex items-center justify-center mb-4">
+                                <Sparkles size={24} />
+                            </div>
+                            <h4 className="font-bold text-lg mb-1">Personalised Campaign</h4>
+                            <p className="text-sm text-gray-500">
+                                AI-personalised tax advisory emails with RA optimisation options
+                                tailored to each client&apos;s profile.
+                            </p>
+                        </div>
+                    )}
                 </div>
             </div>
         </div>

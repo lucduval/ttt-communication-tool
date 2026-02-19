@@ -23,6 +23,10 @@ export interface FilterState {
     ageMax: number | null;
     ownerId: string | null;
     industryId: string | null;
+    incomeMin: number | null;
+    incomeMax: number | null;
+    retirementFundMin: number | null;
+    retirementFundMax: number | null;
 }
 
 interface Option {
@@ -34,12 +38,14 @@ interface ContactFiltersProps {
     filters: FilterState;
     onFiltersChange: (filters: FilterState) => void;
     totalCount?: number | null;
+    isPersonalised?: boolean;
 }
 
 export function ContactFilters({
     filters,
     onFiltersChange,
     totalCount,
+    isPersonalised = false,
 }: ContactFiltersProps) {
     const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -118,6 +124,10 @@ export function ContactFilters({
             ageMax: null,
             ownerId: null,
             industryId: null,
+            incomeMin: null,
+            incomeMax: null,
+            retirementFundMin: null,
+            retirementFundMax: null,
         });
     };
 
@@ -133,7 +143,11 @@ export function ContactFilters({
         filters.ageMin !== null ||
         filters.ageMax !== null ||
         filters.ownerId !== null ||
-        filters.industryId !== null;
+        filters.industryId !== null ||
+        filters.incomeMin !== null ||
+        filters.incomeMax !== null ||
+        filters.retirementFundMin !== null ||
+        filters.retirementFundMax !== null;
 
     return (
         <div className="space-y-4">
@@ -405,6 +419,62 @@ export function ContactFilters({
                         </div>
                     </div>
 
+                    {isPersonalised && (
+                        <div className="mt-4 pt-4 border-t border-amber-200 bg-amber-50/50 -mx-4 px-4 pb-2 rounded-b-lg">
+                            <h4 className="font-semibold text-sm text-amber-800 mb-3 flex items-center gap-1.5">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
+                                ITA34 Tax Data Filters
+                            </h4>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                        Income (ITA34)
+                                    </label>
+                                    <div className="flex gap-2 items-center">
+                                        <input
+                                            type="number"
+                                            placeholder="Min"
+                                            value={filters.incomeMin ?? ""}
+                                            onChange={(e) => updateFilter("incomeMin", e.target.value ? Number(e.target.value) : null)}
+                                            className="w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                        />
+                                        <span className="text-gray-400">-</span>
+                                        <input
+                                            type="number"
+                                            placeholder="Max"
+                                            value={filters.incomeMax ?? ""}
+                                            onChange={(e) => updateFilter("incomeMax", e.target.value ? Number(e.target.value) : null)}
+                                            className="w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                        Retirement Fund Contributions (ITA34)
+                                    </label>
+                                    <div className="flex gap-2 items-center">
+                                        <input
+                                            type="number"
+                                            placeholder="Min"
+                                            value={filters.retirementFundMin ?? ""}
+                                            onChange={(e) => updateFilter("retirementFundMin", e.target.value ? Number(e.target.value) : null)}
+                                            className="w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                        />
+                                        <span className="text-gray-400">-</span>
+                                        <input
+                                            type="number"
+                                            placeholder="Max"
+                                            value={filters.retirementFundMax ?? ""}
+                                            onChange={(e) => updateFilter("retirementFundMax", e.target.value ? Number(e.target.value) : null)}
+                                            className="w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     {/* Active Filters Display */}
                     {hasActiveFilters && (
                         <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-200">
@@ -453,6 +523,16 @@ export function ContactFilters({
                                     {filters.marketingType.charAt(0).toUpperCase() +
                                         filters.marketingType.slice(1)}{" "}
                                     Marketing
+                                </Badge>
+                            )}
+                            {(filters.incomeMin !== null || filters.incomeMax !== null) && (
+                                <Badge status="warning">
+                                    Income: R{filters.incomeMin?.toLocaleString() || "0"} - R{filters.incomeMax?.toLocaleString() || "∞"}
+                                </Badge>
+                            )}
+                            {(filters.retirementFundMin !== null || filters.retirementFundMax !== null) && (
+                                <Badge status="warning">
+                                    Retirement Fund: R{filters.retirementFundMin?.toLocaleString() || "0"} - R{filters.retirementFundMax?.toLocaleString() || "∞"}
                                 </Badge>
                             )}
                         </div>

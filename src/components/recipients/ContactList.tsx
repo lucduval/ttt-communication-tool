@@ -23,6 +23,9 @@ export interface Contact {
     smsNotifications: boolean;
     createdOn: string;
     modifiedOn: string;
+    ita34Income?: number | null;
+    ita34RetirementFund?: number | null;
+    ita34Year?: number | null;
 }
 
 interface ContactListProps {
@@ -31,7 +34,13 @@ interface ContactListProps {
     selectedIds?: Set<string>;
     onSelectionChange?: (selectedIds: Set<string>) => void;
     showSelection?: boolean;
+    showITA34Columns?: boolean;
 }
+
+const formatCurrency = (value: number | null | undefined) => {
+    if (value == null) return "—";
+    return `R ${value.toLocaleString("en-ZA", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+};
 
 export function ContactList({
     contacts,
@@ -39,6 +48,7 @@ export function ContactList({
     selectedIds = new Set(),
     onSelectionChange,
     showSelection = false,
+    showITA34Columns = false,
 }: ContactListProps) {
     const toggleSelection = (id: string) => {
         if (!onSelectionChange) return;
@@ -102,6 +112,12 @@ export function ContactList({
                         <th className="px-4 py-4">Name</th>
                         <th className="px-4 py-4">Contact</th>
                         <th className="px-4 py-4">Type</th>
+                        {showITA34Columns && (
+                            <>
+                                <th className="px-4 py-4">Income</th>
+                                <th className="px-4 py-4">Ret. Fund</th>
+                            </>
+                        )}
                         <th className="px-4 py-4">Channels</th>
                         <th className="px-4 py-4 w-12"></th>
                     </tr>
@@ -161,6 +177,16 @@ export function ContactList({
                                             : "Individual"}
                                 </Badge>
                             </td>
+                            {showITA34Columns && (
+                                <>
+                                    <td className="px-4 py-4 text-sm text-gray-700 font-medium tabular-nums">
+                                        {formatCurrency(contact.ita34Income)}
+                                    </td>
+                                    <td className="px-4 py-4 text-sm text-gray-700 font-medium tabular-nums">
+                                        {formatCurrency(contact.ita34RetirementFund)}
+                                    </td>
+                                </>
+                            )}
                             <td className="px-4 py-4">
                                 <div className="flex gap-1">
                                     {contact.emailNotifications && contact.email && (

@@ -4,7 +4,7 @@ import { v } from "convex/values";
 export default defineSchema({
     campaigns: defineTable({
         name: v.string(),
-        channel: v.union(v.literal("email"), v.literal("whatsapp")),
+        channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
         status: v.string(), // draft, queued, processing, completed, paused, failed
         subject: v.optional(v.string()),
         content: v.optional(v.string()),
@@ -38,6 +38,9 @@ export default defineSchema({
         // Tracking stats
         clicksCount: v.optional(v.number()),
         opensCount: v.optional(v.number()),
+        // Personalised campaign fields
+        aiPrompt: v.optional(v.string()),
+        aiSystemPrompt: v.optional(v.string()),
     })
         .index("by_status", ["status"])
         .index("by_user", ["createdBy"])
@@ -76,7 +79,7 @@ export default defineSchema({
         recipientPhone: v.optional(v.string()),
         recipientName: v.string(),
         status: v.string(), // pending, queued, sent, delivered, failed
-        channel: v.union(v.literal("email"), v.literal("whatsapp")),
+        channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
         errorMessage: v.optional(v.string()),
         dynamicsActivityId: v.optional(v.string()),
         externalMessageId: v.optional(v.string()), // Graph/Twilio ID
@@ -117,6 +120,7 @@ export default defineSchema({
         invitedBy: v.optional(v.string()), // ID of user who invited
         joinedAt: v.optional(v.number()),
         lastLoginAt: v.optional(v.number()),
+        canAccessPersonalised: v.optional(v.boolean()),
     })
         .index("by_clerk_id", ["clerkId"])
         .index("by_email", ["email"]),

@@ -7,6 +7,7 @@ import { checkAccessHelper } from "./users";
 // Constants for batch sizing
 export const EMAIL_BATCH_SIZE = 250;
 export const WHATSAPP_BATCH_SIZE = 1000;
+export const PERSONALISED_BATCH_SIZE = 50;
 
 /**
  * Create batches for a campaign and queue them for processing
@@ -21,10 +22,14 @@ export const createBatches = internalMutation({
             name: v.string(),
             variables: v.optional(v.string()),
         })),
-        channel: v.union(v.literal("email"), v.literal("whatsapp")),
+        channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
     },
     handler: async (ctx, args) => {
-        const batchSize = args.channel === "email" ? EMAIL_BATCH_SIZE : WHATSAPP_BATCH_SIZE;
+        const batchSize = args.channel === "personalised"
+            ? PERSONALISED_BATCH_SIZE
+            : args.channel === "email"
+                ? EMAIL_BATCH_SIZE
+                : WHATSAPP_BATCH_SIZE;
 
         // Count existing batches to continue numbering correctly
         // (for filter-based campaigns where createBatches is called multiple times)
@@ -291,7 +296,7 @@ export const markBatchFailed = internalMutation({
 export const startCampaign = mutation({
     args: {
         name: v.string(),
-        channel: v.union(v.literal("email"), v.literal("whatsapp")),
+        channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
         recipients: v.optional(v.array(v.object({
             id: v.string(),
             email: v.optional(v.string()),
@@ -299,13 +304,13 @@ export const startCampaign = mutation({
             name: v.string(),
             variables: v.optional(v.string()),
         }))),
-        filters: v.optional(v.string()), // New: Pass filters instead of recipients
+        filters: v.optional(v.string()),
         subject: v.optional(v.string()),
         htmlBody: v.optional(v.string()),
         attachments: v.optional(v.array(v.object({
             name: v.string(),
             contentType: v.string(),
-            contentBase64: v.optional(v.string()), // Optional now, as we might use storageId
+            contentBase64: v.optional(v.string()),
             storageId: v.optional(v.id("_storage")),
             isInline: v.optional(v.boolean()),
         }))),
@@ -313,6 +318,8 @@ export const startCampaign = mutation({
         variableValues: v.optional(v.string()),
         createDynamicsActivity: v.optional(v.boolean()),
         fromMailbox: v.optional(v.string()),
+        aiPrompt: v.optional(v.string()),
+        aiSystemPrompt: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const identity = await ctx.auth.getUserIdentity();
@@ -326,7 +333,7 @@ export const startCampaign = mutation({
             name: args.name,
             channel: args.channel,
             status: "queued",
-            totalRecipients: recipients.length, // Will be updated later if filters are used
+            totalRecipients: recipients.length,
             sentCount: 0,
             deliveredCount: 0,
             failedCount: 0,
@@ -339,6 +346,8 @@ export const startCampaign = mutation({
             createDynamicsActivity: args.createDynamicsActivity,
             fromMailbox: args.fromMailbox,
             filters: args.filters,
+            aiPrompt: args.aiPrompt,
+            aiSystemPrompt: args.aiSystemPrompt,
         });
 
         // If recipients are provided directly, create message records immediately
@@ -432,7 +441,11 @@ export const recoverStuckBatches = internalMutation({
         for (const campaignId of recoveredCampaignIds) {
             const campaign = await ctx.db.get(campaignId);
             if (campaign && (campaign.status === "processing" || campaign.status === "queued")) {
-                if (campaign.channel === "email") {
+                if (campaign.channel === "personalised") {
+                    await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
+                        campaignId,
+                    });
+                } else if (campaign.channel === "email") {
                     await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
                         campaignId,
                     });

@@ -679,3 +679,306 @@ export const fetchIndustries = action({
         }));
     },
 });
+
+// ---- ITA34 / IRP5 Tax Data ----
+
+const ITA34_SELECT_FIELDS = [
+    "riivo_ita34id",
+    "riivo_yearofassessment",
+    "riivo_income",
+    "riivo_taxableincomeassessedloss",
+    "riivo_retirementannuityfundcontributions",
+    "riivo_retirementfundcontributions",
+    "riivo_providendfundcontributions",
+    "riivo_medicalschemefeestaxcredit",
+    "riivo_medicalrebatebelow65withnodisability",
+    "riivo_dateofassessment",
+    "riivo_referencenumber",
+    "riivo_taxpayername",
+    "_riivo_taxpayercontact_value",
+].join(",");
+
+const IRP5_SELECT_FIELDS = [
+    "riivo_irp5id",
+    "riivo_assessmentyearint",
+    "riivo_name",
+    "riivo_incomepaye",
+    "riivo_grosstaxableincome",
+    "riivo_totaldeductionscontributions",
+    "riivo_racontributions",
+    "riivo_providentfundcontributionpaye",
+    "riivo_totalprovidentfundcontributions",
+    "riivo_medicalaidcontributions",
+    "riivo_medicalschemetaxcredit",
+    "riivo_taxabletravelremuneration",
+    "riivo_uifcontribution",
+    "riivo_sdlcontribution",
+    "riivo_totaltaxsdlanduif",
+    "riivo_employertradingothername",
+    "riivo_taxperiodstartdate",
+    "riivo_taxperiodenddate",
+    "_riivo_client_value",
+].join(",");
+
+export interface TaxProfileData {
+    contactId: string;
+    ita34: {
+        yearOfAssessment: number;
+        income: number;
+        taxableIncome: number;
+        raContributions: number;
+        retirementFundContributions: number;
+        providentFundContributions: number;
+        medicalSchemeTaxCredit: number;
+        medicalRebate: number;
+        dateOfAssessment: string | null;
+        referenceNumber: string | null;
+    } | null;
+    irp5: {
+        assessmentYear: number;
+        incomePaye: number;
+        grossTaxableIncome: number;
+        totalDeductions: number;
+        raContributions: number | null;
+        providentFundContribution: number;
+        totalProvidentFund: number;
+        medicalAidContributions: number;
+        medicalSchemeTaxCredit: number;
+        taxableTravel: number;
+        employerName: string | null;
+        taxPeriodStart: string | null;
+        taxPeriodEnd: string | null;
+    } | null;
+}
+
+export const fetchContactTaxData = action({
+    args: {
+        contactId: v.string(),
+    },
+    handler: async (ctx, args): Promise<TaxProfileData> => {
+        const ita34Endpoint = `riivo_ita34s?$select=${ITA34_SELECT_FIELDS}&$filter=_riivo_taxpayercontact_value eq '${args.contactId}'&$orderby=riivo_yearofassessment desc&$top=1`;
+        const irp5Endpoint = `riivo_irp5s?$select=${IRP5_SELECT_FIELDS}&$filter=_riivo_client_value eq '${args.contactId}'&$orderby=riivo_assessmentyearint desc&$top=1`;
+
+        const [ita34Response, irp5Response] = await Promise.all([
+            dynamicsRequest<{ value: any[] }>(ita34Endpoint),
+            dynamicsRequest<{ value: any[] }>(irp5Endpoint),
+        ]);
+
+        const ita34 = ita34Response.value[0] || null;
+        const irp5 = irp5Response.value[0] || null;
+
+        return {
+            contactId: args.contactId,
+            ita34: ita34
+                ? {
+                      yearOfAssessment: ita34.riivo_yearofassessment ?? 0,
+                      income: ita34.riivo_income ?? 0,
+                      taxableIncome: ita34.riivo_taxableincomeassessedloss ?? 0,
+                      raContributions: ita34.riivo_retirementannuityfundcontributions ?? 0,
+                      retirementFundContributions: ita34.riivo_retirementfundcontributions ?? 0,
+                      providentFundContributions: ita34.riivo_providendfundcontributions ?? 0,
+                      medicalSchemeTaxCredit: ita34.riivo_medicalschemefeestaxcredit ?? 0,
+                      medicalRebate: ita34.riivo_medicalrebatebelow65withnodisability ?? 0,
+                      dateOfAssessment: ita34.riivo_dateofassessment ?? null,
+                      referenceNumber: ita34.riivo_referencenumber ?? null,
+                  }
+                : null,
+            irp5: irp5
+                ? {
+                      assessmentYear: irp5.riivo_assessmentyearint ?? 0,
+                      incomePaye: irp5.riivo_incomepaye ?? 0,
+                      grossTaxableIncome: irp5.riivo_grosstaxableincome ?? 0,
+                      totalDeductions: irp5.riivo_totaldeductionscontributions ?? 0,
+                      raContributions: irp5.riivo_racontributions ?? null,
+                      providentFundContribution: irp5.riivo_providentfundcontributionpaye ?? 0,
+                      totalProvidentFund: irp5.riivo_totalprovidentfundcontributions ?? 0,
+                      medicalAidContributions: irp5.riivo_medicalaidcontributions ?? 0,
+                      medicalSchemeTaxCredit: irp5.riivo_medicalschemetaxcredit ?? 0,
+                      taxableTravel: irp5.riivo_taxabletravelremuneration ?? 0,
+                      employerName: irp5.riivo_employertradingothername ?? null,
+                      taxPeriodStart: irp5.riivo_taxperiodstartdate ?? null,
+                      taxPeriodEnd: irp5.riivo_taxperiodenddate ?? null,
+                  }
+                : null,
+        };
+    },
+});
+
+/**
+ * Fetch contacts that have ITA34 records, with optional income/RA filters.
+ * Two-step approach: query ITA34s first, then resolve linked contacts.
+ */
+export const fetchContactsWithITA34 = action({
+    args: {
+        incomeMin: v.optional(v.number()),
+        incomeMax: v.optional(v.number()),
+        retirementFundMin: v.optional(v.number()),
+        retirementFundMax: v.optional(v.number()),
+        taxYear: v.optional(v.number()),
+        filter: v.optional(v.string()),
+        search: v.optional(v.string()),
+        clientType: v.optional(v.string()),
+        entityType: v.optional(v.number()),
+        bank: v.optional(v.number()),
+        sourceCode: v.optional(v.array(v.number())),
+        province: v.optional(v.string()),
+        ageMin: v.optional(v.number()),
+        ageMax: v.optional(v.number()),
+        ownerId: v.optional(v.string()),
+        industryId: v.optional(v.string()),
+    },
+    handler: async (ctx, args) => {
+        let ita34Filter = "statecode eq 0 and _riivo_taxpayercontact_value ne null";
+
+        if (args.taxYear) {
+            ita34Filter += ` and riivo_yearofassessment eq ${args.taxYear}`;
+        }
+        if (args.incomeMin !== undefined) {
+            ita34Filter += ` and riivo_income ge ${args.incomeMin}`;
+        }
+        if (args.incomeMax !== undefined) {
+            ita34Filter += ` and riivo_income le ${args.incomeMax}`;
+        }
+        if (args.retirementFundMin !== undefined) {
+            ita34Filter += ` and riivo_retirementfundcontributions ge ${args.retirementFundMin}`;
+        }
+        if (args.retirementFundMax !== undefined) {
+            ita34Filter += ` and riivo_retirementfundcontributions le ${args.retirementFundMax}`;
+        }
+
+        const ita34Endpoint = `riivo_ita34s?$select=_riivo_taxpayercontact_value,riivo_income,riivo_retirementfundcontributions,riivo_yearofassessment&$filter=${ita34Filter}&$orderby=riivo_yearofassessment desc`;
+
+        interface ITA34Row {
+            _riivo_taxpayercontact_value: string;
+            riivo_income: number | null;
+            riivo_retirementfundcontributions: number | null;
+            riivo_yearofassessment: number | null;
+        }
+
+        let allIta34s: ITA34Row[] = [];
+        let nextLink: string | null = ita34Endpoint;
+        let pageCount = 0;
+
+        while (nextLink && pageCount < 100) {
+            pageCount++;
+            const endpoint: string = nextLink.startsWith("http")
+                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
+                : nextLink;
+            const response = await dynamicsRequest<{ value: ITA34Row[]; "@odata.nextLink"?: string }>(endpoint);
+            if (response.value?.length) {
+                allIta34s.push(...response.value);
+            }
+            nextLink = response["@odata.nextLink"] ?? null;
+        }
+
+        const contactMap = new Map<string, ITA34Row>();
+        for (const row of allIta34s) {
+            const cid = row._riivo_taxpayercontact_value;
+            if (!cid) continue;
+            const existing = contactMap.get(cid);
+            if (!existing || (row.riivo_yearofassessment ?? 0) > (existing.riivo_yearofassessment ?? 0)) {
+                contactMap.set(cid, row);
+            }
+        }
+
+        const contactIds = Array.from(contactMap.keys());
+        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
+
+        // Build additional contact-level filter conditions
+        let extraFilter = "";
+        if (args.filter) {
+            extraFilter += ` and (${args.filter})`;
+        }
+        if (args.search) {
+            const s = args.search.replace(/'/g, "''");
+            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
+        }
+        if (args.clientType) {
+            extraFilter += ` and riivo_clienttypenew eq ${args.clientType}`;
+        }
+        if (args.entityType !== undefined) {
+            extraFilter += ` and riivo_clienttypeindbus eq ${args.entityType}`;
+        }
+        if (args.bank !== undefined) {
+            extraFilter += ` and ttt_bank eq ${args.bank}`;
+        }
+        if (args.sourceCode && args.sourceCode.length > 0) {
+            const values = args.sourceCode.map(String).join("','");
+            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
+        }
+        if (args.province) {
+            const prov = args.province.replace(/'/g, "''");
+            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
+        }
+        if (args.ageMin !== undefined) {
+            extraFilter += ` and riivo_age ge ${args.ageMin}`;
+        }
+        if (args.ageMax !== undefined) {
+            extraFilter += ` and riivo_age le ${args.ageMax}`;
+        }
+        if (args.ownerId) {
+            extraFilter += ` and _ownerid_value eq '${args.ownerId}'`;
+        }
+        if (args.industryId) {
+            extraFilter += ` and _riivo_industryid_value eq '${args.industryId}'`;
+        }
+
+        const contacts: Array<{
+            id: string;
+            fullName: string;
+            firstName: string | null;
+            lastName: string | null;
+            email: string | null;
+            phone: string | null;
+            internationalPhone: string | null;
+            isActive: boolean;
+            clientType: string | null;
+            marketingPreferences: { tax: boolean; accounting: boolean; insurance: boolean };
+            whatsappOptIn: boolean;
+            emailNotifications: boolean;
+            smsNotifications: boolean;
+            createdOn: string;
+            modifiedOn: string;
+            ita34Income: number | null;
+            ita34RetirementFund: number | null;
+            ita34Year: number | null;
+        }> = [];
+
+        for (let i = 0; i < contactIds.length; i += 50) {
+            const batch = contactIds.slice(i, i + 50);
+            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
+            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
+            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
+
+            for (const c of contactResponse.value) {
+                const ita34Row = contactMap.get(c.contactid);
+                contacts.push({
+                    id: c.contactid,
+                    fullName: c.fullname,
+                    firstName: c.firstname,
+                    lastName: c.lastname,
+                    email: c.emailaddress1,
+                    phone: c.mobilephone,
+                    internationalPhone: c.icon_formattedmobilenumber,
+                    isActive: c.statecode === 0,
+                    clientType: c.riivo_clienttypenew,
+                    marketingPreferences: {
+                        tax: c.riivo_taxmarketing,
+                        accounting: c.riivo_accountingmarketing,
+                        insurance: c.riivo_insurancemarketing,
+                    },
+                    whatsappOptIn: c.riivo_whatsappoptinout,
+                    emailNotifications: c.icon_sendemailclientnotifications,
+                    smsNotifications: c.icon_sendclientssmsnotifications,
+                    createdOn: c.createdon,
+                    modifiedOn: c.modifiedon,
+                    ita34Income: ita34Row?.riivo_income ?? null,
+                    ita34RetirementFund: ita34Row?.riivo_retirementfundcontributions ?? null,
+                    ita34Year: ita34Row?.riivo_yearofassessment ?? null,
+                });
+            }
+        }
+
+        return { contacts, totalCount: contacts.length };
+    },
+});

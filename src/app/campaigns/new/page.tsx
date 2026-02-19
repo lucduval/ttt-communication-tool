@@ -6,7 +6,8 @@ import { ConvexError } from "convex/values";
 import { api } from "@/../convex/_generated/api";
 import { Header } from "@/components/layout";
 import { Button, Card, Badge, ConfirmationModal } from "@/components/ui";
-import { EmailComposer, EmailPreview, TestEmailModal, MailboxSelector, LivePreviewModal } from "@/components/email";
+import { EmailComposer, EmailPreview, TestEmailModal, MailboxSelector, LivePreviewModal, PersonalisedComposer, PersonalisedPreview } from "@/components/email";
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, DEFAULT_SUBJECT as DEFAULT_PERSONALISED_SUBJECT } from "@/components/email/PersonalisedComposer";
 import {
     ChannelSelector,
     TemplateSelector,
@@ -35,10 +36,11 @@ import {
     Zap,
     AlertTriangle,
     DollarSign,
+    Sparkles,
 } from "lucide-react";
 import type { Doc, Id } from "@/../convex/_generated/dataModel";
 
-type CampaignChannel = "email" | "whatsapp";
+type CampaignChannel = "email" | "whatsapp" | "personalised";
 type WizardStep = "channel" | "recipients" | "compose" | "preview" | "send";
 
 const STEPS: { id: WizardStep; label: string; icon: React.ElementType }[] = [
@@ -63,6 +65,10 @@ const INITIAL_FILTERS: FilterState = {
     ageMax: null,
     ownerId: null,
     industryId: null,
+    incomeMin: null,
+    incomeMax: null,
+    retirementFundMin: null,
+    retirementFundMax: null,
 };
 
 interface UploadedImage {
@@ -107,6 +113,11 @@ export default function NewCampaignPage() {
     const [selectedTemplate, setSelectedTemplate] = useState<Doc<"whatsappTemplates"> | null>(null);
     const [variableValues, setVariableValues] = useState<Record<string, string>>({});
 
+    // Personalised campaign state
+    const [aiSystemPrompt, setAiSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
+    const [aiUserPrompt, setAiUserPrompt] = useState(DEFAULT_USER_PROMPT);
+    const [previewsGenerated, setPreviewsGenerated] = useState(false);
+
     // Test email state
     const [showTestModal, setShowTestModal] = useState(false);
     const [showWhatsAppTestModal, setShowWhatsAppTestModal] = useState(false);
@@ -130,10 +141,13 @@ export default function NewCampaignPage() {
 
     // Queries
     const whatsappTemplates = useQuery(api.whatsappTemplates.list, {});
+    const access = useQuery(api.users.checkAccess);
+    const canAccessPersonalised = access?.user?.canAccessPersonalised === true;
 
     // Actions
     const fetchContacts = useAction(api.actions.dynamics.fetchContacts);
     const getContactCount = useAction(api.actions.dynamics.getContactCount);
+    const fetchContactsWithITA34 = useAction(api.actions.dynamics.fetchContactsWithITA34);
     const sendTestEmail = useAction(api.actions.email.sendTestEmail);
     const sendBulkEmails = useAction(api.actions.email.sendBulkEmails);
     const sendTestWhatsApp = useAction(api.actions.whatsapp.sendTestWhatsApp);
@@ -145,10 +159,9 @@ export default function NewCampaignPage() {
         const odataFilter = buildODataFilter(filters);
         let channelFilter: string;
 
-        if (campaignChannel === "email") {
+        if (campaignChannel === "email" || campaignChannel === "personalised") {
             channelFilter = "emailaddress1 ne null";
         } else {
-            // WhatsApp: require phone number and opt-in. Check both mobilephone and international format field
             channelFilter = "(mobilephone ne null or icon_formattedmobilenumber ne null) and riivo_whatsappoptinout eq true";
         }
 
@@ -159,6 +172,9 @@ export default function NewCampaignPage() {
     }, [filters, campaignChannel]);
 
 
+
+    const hasITA34Filters = filters.incomeMin !== null || filters.incomeMax !== null ||
+        filters.retirementFundMin !== null || filters.retirementFundMax !== null;
 
     const loadContacts = useCallback(async () => {
         try {
@@ -222,6 +238,29 @@ export default function NewCampaignPage() {
 
                 setContacts(filtered);
                 setTotalCount(filtered.length);
+            } else if (campaignChannel === "personalised" && hasITA34Filters) {
+                const channelFilter = getChannelFilter();
+
+                const result = await fetchContactsWithITA34({
+                    filter: channelFilter,
+                    search: filters.search || undefined,
+                    clientType: filters.clientType || undefined,
+                    entityType: filters.entityType ?? undefined,
+                    bank: filters.bank ?? undefined,
+                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                    province: filters.province || undefined,
+                    ageMin: filters.ageMin ?? undefined,
+                    ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
+                    incomeMin: filters.incomeMin ?? undefined,
+                    incomeMax: filters.incomeMax ?? undefined,
+                    retirementFundMin: filters.retirementFundMin ?? undefined,
+                    retirementFundMax: filters.retirementFundMax ?? undefined,
+                });
+
+                setContacts(result.contacts as Contact[]);
+                setTotalCount(result.totalCount);
             } else {
                 const channelFilter = getChannelFilter();
 
@@ -263,7 +302,7 @@ export default function NewCampaignPage() {
         } finally {
             setIsLoadingContacts(false);
         }
-    }, [fetchContacts, getContactCount, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters]);
+    }, [fetchContacts, getContactCount, fetchContactsWithITA34, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -348,12 +387,12 @@ export default function NewCampaignPage() {
 
     const convertBase64ToCid = (html: string, wrapWithStyle: boolean = false): string => {
         const processed = html.replace(
-            /<img([^>]*)\s+src="data:image\/[^"]+"/gi,
-            (match, attrs) => {
-                const contentIdMatch = attrs.match(/data-content-id="([^"]+)"/i);
+            /<img\s[^>]*src="data:image\/[^"]+"/gi,
+            (match) => {
+                const contentIdMatch = match.match(/data-content-id="([^"]+)"/i);
                 if (contentIdMatch) {
                     const contentId = contentIdMatch[1];
-                    return `<img${attrs} src="cid:${contentId}"`;
+                    return match.replace(/src="data:image\/[^"]+"/, `src="cid:${contentId}"`);
                 }
                 return match;
             }
@@ -454,16 +493,16 @@ export default function NewCampaignPage() {
                     industryId: filters.industryId || undefined,
                 });
             } else {
-                // Standard mode: send selected recipients
-                recipients = campaignChannel === "email"
-                    ? selectedContacts
+                if (campaignChannel === "email" || campaignChannel === "personalised") {
+                    recipients = selectedContacts
                         .filter((c) => c.email)
                         .map((c) => ({
                             id: c.id,
                             email: c.email!,
                             name: c.fullName,
-                        }))
-                    : selectedContacts
+                        }));
+                } else {
+                    recipients = selectedContacts
                         .filter((c) => c.internationalPhone || c.phone)
                         .map((c) => ({
                             id: c.id,
@@ -471,9 +510,9 @@ export default function NewCampaignPage() {
                             name: c.fullName,
                             variables: JSON.stringify(variableValues),
                         }));
+                }
             }
 
-            // Bake font size into HTML for bulk email
             const processedHtml = campaignChannel === "email" ? convertBase64ToCid(htmlContent, true) : undefined;
 
             // 1. Process attachments: upload files to Storage if present
@@ -506,19 +545,20 @@ export default function NewCampaignPage() {
                 backendAttachments.push(...inlineImages);
             }
 
-            // Create campaign and message records
             const campaignId = await startCampaign({
                 name: campaignTitle || `${channelLabel} Campaign - ${new Date().toLocaleDateString()}`,
                 channel: campaignChannel,
                 recipients: isSelectAllActive ? undefined : recipients,
-                filters: filtersJson, // Pass JSON stringified filters
-                subject: campaignChannel === "email" ? subject : undefined,
+                filters: filtersJson,
+                subject: (campaignChannel === "email" || campaignChannel === "personalised") ? subject : undefined,
                 htmlBody: processedHtml,
                 attachments: backendAttachments,
                 whatsappTemplateId: campaignChannel === "whatsapp" ? selectedTemplate?._id : undefined,
                 variableValues: campaignChannel === "whatsapp" ? JSON.stringify(variableValues) : undefined,
                 createDynamicsActivity: audience === "clients",
-                fromMailbox: campaignChannel === "email" ? selectedMailbox || undefined : undefined,
+                fromMailbox: (campaignChannel === "email" || campaignChannel === "personalised") ? selectedMailbox || undefined : undefined,
+                aiPrompt: campaignChannel === "personalised" ? aiUserPrompt : undefined,
+                aiSystemPrompt: campaignChannel === "personalised" ? aiSystemPrompt : undefined,
             });
 
             // Queue batches and start processing (async - returns immediately)
@@ -546,11 +586,17 @@ export default function NewCampaignPage() {
             case "recipients":
                 return selectedIds.size > 0 || isSelectAllActive;
             case "compose":
+                if (campaignChannel === "personalised") {
+                    return aiUserPrompt.trim() !== "" && subject.trim() !== "";
+                }
                 if (campaignChannel === "email") {
                     return subject.trim() !== "" && htmlContent.trim() !== "";
                 }
                 return selectedTemplate !== null;
             case "preview":
+                if (campaignChannel === "personalised") {
+                    return previewsGenerated;
+                }
                 return true;
             case "send":
                 return false;
@@ -638,7 +684,7 @@ export default function NewCampaignPage() {
         setVirtualTotalCount(null);
     };
 
-    const channelLabel = campaignChannel === "email" ? "Email" : "WhatsApp";
+    const channelLabel = campaignChannel === "personalised" ? "Personalised" : campaignChannel === "email" ? "Email" : "WhatsApp";
 
     // Estimated WhatsApp cost
     const whatsappRecipientCount = isSelectAllActive
@@ -709,8 +755,8 @@ export default function NewCampaignPage() {
 
                     {currentStep === "channel" && (
                         <div className="space-y-6">
-                            {/* Mailbox selector for email channel - shown first */}
-                            {campaignChannel === "email" && (
+                            {/* Mailbox selector for email/personalised channel */}
+                            {(campaignChannel === "email" || campaignChannel === "personalised") && (
                                 <Card>
                                     <div className="space-y-4">
                                         <div>
@@ -732,10 +778,16 @@ export default function NewCampaignPage() {
                             <Card>
                                 <ChannelSelector
                                     selectedChannel={campaignChannel}
-                                    onChannelChange={setCampaignChannel}
+                                    onChannelChange={(ch) => {
+                                        setCampaignChannel(ch);
+                                        if (ch === "personalised" && !subject) {
+                                            setSubject(DEFAULT_PERSONALISED_SUBJECT);
+                                        }
+                                    }}
                                     campaignTitle={campaignTitle}
                                     onTitleChange={setCampaignTitle}
                                     showTitleError={showValidationErrors}
+                                    showPersonalised={canAccessPersonalised}
                                 />
                             </Card>
                         </div>
@@ -845,6 +897,7 @@ export default function NewCampaignPage() {
                                             filters={filters}
                                             onFiltersChange={setFilters}
                                             totalCount={totalCount}
+                                            isPersonalised={campaignChannel === "personalised"}
                                         />
                                     )}
 
@@ -865,13 +918,27 @@ export default function NewCampaignPage() {
                                 selectedIds={selectedIds}
                                 onSelectionChange={setSelectedIds}
                                 showSelection={true}
+                                showITA34Columns={campaignChannel === "personalised"}
                             />
                         </div>
                     )}
 
                     {currentStep === "compose" && (
                         <>
-                            {campaignChannel === "email" ? (
+                            {campaignChannel === "personalised" ? (
+                                <div className="space-y-6">
+                                    <Card title="Personalised Email Configuration">
+                                        <PersonalisedComposer
+                                            systemPrompt={aiSystemPrompt}
+                                            onSystemPromptChange={setAiSystemPrompt}
+                                            userPrompt={aiUserPrompt}
+                                            onUserPromptChange={setAiUserPrompt}
+                                            subject={subject}
+                                            onSubjectChange={setSubject}
+                                        />
+                                    </Card>
+                                </div>
+                            ) : campaignChannel === "email" ? (
                                 <div className="space-y-6">
                                     <Card title="Email Content">
                                         <EmailComposer
@@ -892,7 +959,7 @@ export default function NewCampaignPage() {
                                         isOpen={showLivePreview}
                                         onClose={() => setShowLivePreview(false)}
                                         subject={subject}
-                                        htmlContent={convertBase64ToCid(htmlContent, true)} // Preview with styles
+                                        htmlContent={convertBase64ToCid(htmlContent, true)}
                                         senderEmail={selectedMailbox || undefined}
                                         recipientName={selectedContacts[0]?.fullName || "Recipient Name"}
                                         recipientEmail={selectedContacts[0]?.email || "recipient@example.com"}
@@ -930,7 +997,7 @@ export default function NewCampaignPage() {
                                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                                     <div className="p-4 bg-blue-50 rounded-lg">
                                         <div className="text-3xl font-bold text-[#1E3A5F]">
-                                            {campaignChannel === "email"
+                                            {campaignChannel === "email" || campaignChannel === "personalised"
                                                 ? selectedContacts.filter((c) => c.email).length
                                                 : whatsappRecipientCount}
                                         </div>
@@ -938,11 +1005,27 @@ export default function NewCampaignPage() {
                                     </div>
                                     <div className="p-4 bg-purple-50 rounded-lg">
                                         <div className="text-lg font-semibold text-purple-700 capitalize">
-                                            {campaignChannel}
+                                            {campaignChannel === "personalised" ? "AI Personalised" : campaignChannel}
                                         </div>
                                         <div className="text-sm text-gray-600">Channel</div>
                                     </div>
-                                    {campaignChannel === "email" ? (
+                                    {campaignChannel === "personalised" ? (
+                                        <>
+                                            <div className="p-4 bg-green-50 rounded-lg">
+                                                <div className="text-lg font-semibold text-green-700 truncate">
+                                                    {subject || "(No subject)"}
+                                                </div>
+                                                <div className="text-sm text-gray-600">Subject Template</div>
+                                            </div>
+                                            <div className="p-4 bg-amber-50 rounded-lg">
+                                                <div className="text-lg font-semibold text-amber-700">
+                                                    <Sparkles size={18} className="inline mr-1" />
+                                                    AI + Tax Engine
+                                                </div>
+                                                <div className="text-sm text-gray-600">Generation Method</div>
+                                            </div>
+                                        </>
+                                    ) : campaignChannel === "email" ? (
                                         <>
                                             <div className="p-4 bg-green-50 rounded-lg">
                                                 <div className="text-lg font-semibold text-green-700 truncate">
@@ -980,6 +1063,18 @@ export default function NewCampaignPage() {
                                 </div>
                             </Card>
 
+                            {campaignChannel === "personalised" ? (
+                                <Card title="AI Email Previews">
+                                    <PersonalisedPreview
+                                        selectedContacts={selectedContacts}
+                                        aiSystemPrompt={aiSystemPrompt}
+                                        aiUserPrompt={aiUserPrompt}
+                                        subject={subject}
+                                        onPreviewsGenerated={setPreviewsGenerated}
+                                    />
+                                </Card>
+                            ) : (
+                            <>
                             <Card title="Final Preview">
                                 {campaignChannel === "email" ? (
                                     <EmailPreview
@@ -1040,6 +1135,8 @@ export default function NewCampaignPage() {
                                     </div>
                                 </Card>
                             )}
+                            </>
+                            )}
                         </div>
                     )}
 
@@ -1048,8 +1145,8 @@ export default function NewCampaignPage() {
                             {!sendComplete ? (
                                 <Card>
                                     <div className="text-center py-8 space-y-6">
-                                        <div className={`w-16 h-16 ${campaignChannel === "email" ? "bg-[#1E3A5F]" : "bg-green-600"} text-white rounded-full flex items-center justify-center mx-auto`}>
-                                            {campaignChannel === "email" ? <Mail size={32} /> : <MessageSquare size={32} />}
+                                        <div className={`w-16 h-16 ${campaignChannel === "personalised" ? "bg-amber-600" : campaignChannel === "email" ? "bg-[#1E3A5F]" : "bg-green-600"} text-white rounded-full flex items-center justify-center mx-auto`}>
+                                            {campaignChannel === "personalised" ? <Sparkles size={32} /> : campaignChannel === "email" ? <Mail size={32} /> : <MessageSquare size={32} />}
                                         </div>
                                         <div>
                                             <h2 className="text-2xl font-bold text-gray-900">
@@ -1060,7 +1157,7 @@ export default function NewCampaignPage() {
                                                 <strong>
                                                     {isSelectAllActive
                                                         ? virtualTotalCount
-                                                        : campaignChannel === "email"
+                                                        : (campaignChannel === "email" || campaignChannel === "personalised")
                                                             ? selectedContacts.filter((c) => c.email).length
                                                             : whatsappRecipientCount}
                                                 </strong>{" "}
@@ -1155,7 +1252,7 @@ export default function NewCampaignPage() {
                 onClose={() => setShowConfirmation(false)}
                 onConfirm={confirmSend}
                 title="Send Campaign?"
-                description={`Are you sure you want to send this ${channelLabel.toLowerCase()} campaign to ${isSelectAllActive ? virtualTotalCount : (campaignChannel === "email" ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients? This action cannot be undone once processing starts.`}
+                description={`Are you sure you want to send this ${channelLabel.toLowerCase()} campaign to ${isSelectAllActive ? virtualTotalCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients? This action cannot be undone once processing starts.`}
                 confirmLabel="Yes, Send Campaign"
                 cancelLabel="Cancel"
                 isLoading={isSending}
