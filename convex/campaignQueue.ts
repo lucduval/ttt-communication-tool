@@ -809,7 +809,8 @@ export const processPersonalisedBatch = internalAction({
                         results.push({ recipientId: recipient.id, success: false, error: result.error });
                     }
 
-                    await new Promise((resolve) => setTimeout(resolve, 200));
+                    // 1.5s between recipients — keeps Gemini well under 40 RPM
+                    await new Promise((resolve) => setTimeout(resolve, 1500));
                 } catch (err) {
                     failedCount++;
                     results.push({

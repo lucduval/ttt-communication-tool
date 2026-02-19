@@ -96,8 +96,13 @@ export function PersonalisedPreview({
         setIsGeneratingAll(true);
         setPreviews(new Map());
 
-        const promises = sampleContacts.map((c) => generateOne(c));
-        await Promise.allSettled(promises);
+        // Sequential with delay to avoid Gemini rate limits
+        for (let i = 0; i < sampleContacts.length; i++) {
+            await generateOne(sampleContacts[i]);
+            if (i < sampleContacts.length - 1) {
+                await new Promise((resolve) => setTimeout(resolve, 800));
+            }
+        }
 
         setIsGeneratingAll(false);
         onPreviewsGenerated(true);

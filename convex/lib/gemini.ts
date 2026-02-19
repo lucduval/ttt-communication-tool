@@ -105,7 +105,7 @@ export async function generatePersonalisedCopy(params: {
     const prompt = buildPrompt(params.systemPrompt, params.userPrompt, params.scenarios);
 
     let lastError: Error | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
         try {
             const result = await model.generateContent(prompt);
             const text = result.response.text();
@@ -120,11 +120,20 @@ export async function generatePersonalisedCopy(params: {
             return parsed;
         } catch (err) {
             lastError = err instanceof Error ? err : new Error(String(err));
-            if (attempt < 2) {
-                await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));
+            if (attempt < 3) {
+                const isRateLimit =
+                    lastError.message.toLowerCase().includes("429") ||
+                    lastError.message.toLowerCase().includes("quota") ||
+                    lastError.message.toLowerCase().includes("rate limit") ||
+                    lastError.message.toLowerCase().includes("resource exhausted");
+                // Rate limit: wait much longer (15s, 30s, 60s). Other errors: standard backoff (2s, 4s, 8s).
+                const delayMs = isRateLimit
+                    ? 15000 * Math.pow(2, attempt)
+                    : 2000 * Math.pow(2, attempt);
+                await new Promise((r) => setTimeout(r, delayMs));
             }
         }
     }
 
-    throw new Error(`Gemini generation failed after 3 attempts: ${lastError?.message}`);
+    throw new Error(`Gemini generation failed after 4 attempts: ${lastError?.message}`);
 }
