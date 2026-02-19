@@ -27,6 +27,10 @@ const INITIAL_FILTERS: FilterState = {
     ageMax: null,
     ownerId: null,
     industryId: null,
+    incomeMin: null,
+    incomeMax: null,
+    retirementFundMin: null,
+    retirementFundMax: null,
 };
 
 const ITEMS_PER_PAGE = 50;
