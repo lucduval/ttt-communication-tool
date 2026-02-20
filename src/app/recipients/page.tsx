@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useAction } from "convex/react";
+import { useAction, useQuery } from "convex/react";
 import { api } from "@/../convex/_generated/api";
 import { Header } from "@/components/layout";
 import { Button, Card, Pagination } from "@/components/ui";
@@ -13,29 +13,37 @@ import {
 import { ContactList, type Contact } from "@/components/recipients";
 import { Plus, RefreshCw } from "lucide-react";
 
-const INITIAL_FILTERS: FilterState = {
-    search: "",
-    clientType: null,
-    entityType: null,
-    marketingType: "all",
-    whatsappOptIn: null,
-    emailEnabled: null,
-    bank: null,
-    sourceCode: [],
-    province: null,
-    ageMin: null,
-    ageMax: null,
-    ownerId: null,
-    industryId: null,
-    incomeMin: null,
-    incomeMax: null,
-    retirementFundMin: null,
-    retirementFundMax: null,
-};
-
 const ITEMS_PER_PAGE = 50;
 
 export default function RecipientsPage() {
+    const currentUser = useQuery(api.users.getCurrentUser);
+
+    // Determine if this user is locked to their own consultant scope
+    const lockedConsultantId =
+        currentUser && currentUser.role !== "admin" && currentUser.dynamicsUserId
+            ? currentUser.dynamicsUserId
+            : undefined;
+
+    const INITIAL_FILTERS: FilterState = {
+        search: "",
+        clientType: null,
+        entityType: null,
+        marketingType: "all",
+        whatsappOptIn: null,
+        emailEnabled: null,
+        bank: null,
+        sourceCode: [],
+        province: null,
+        ageMin: null,
+        ageMax: null,
+        ownerId: lockedConsultantId ?? null,
+        industryId: null,
+        incomeMin: null,
+        incomeMax: null,
+        retirementFundMin: null,
+        retirementFundMax: null,
+    };
+
     const [contacts, setContacts] = useState<Contact[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
@@ -43,6 +51,13 @@ export default function RecipientsPage() {
     const [totalCount, setTotalCount] = useState<number | null>(null);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [currentPage, setCurrentPage] = useState(1);
+
+    // When the locked consultant ID resolves (after currentUser loads), seed the filter
+    useEffect(() => {
+        if (lockedConsultantId && filters.ownerId !== lockedConsultantId) {
+            setFilters((prev) => ({ ...prev, ownerId: lockedConsultantId }));
+        }
+    }, [lockedConsultantId]);
 
     const fetchContacts = useAction(api.actions.dynamics.fetchContacts);
     const getContactCount = useAction(api.actions.dynamics.getContactCount);
@@ -174,6 +189,7 @@ export default function RecipientsPage() {
                             filters={filters}
                             onFiltersChange={setFilters}
                             totalCount={totalCount}
+                            lockedConsultantId={lockedConsultantId}
                         />
                     </Card>
 

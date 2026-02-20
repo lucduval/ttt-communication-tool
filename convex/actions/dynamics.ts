@@ -3,7 +3,26 @@
 import { action } from "../_generated/server";
 import { v } from "convex/values";
 import { dynamicsRequest } from "../lib/dynamics_auth";
+import { api } from "../_generated/api";
 export { dynamicsRequest };
+
+/**
+ * Resolves the effective ownerId for a contact query.
+ * Non-admin users with a dynamicsUserId set are always restricted to their own contacts,
+ * regardless of what ownerId was passed in by the client.
+ */
+async function resolveEffectiveOwnerId(
+    ctx: { runQuery: (ref: any, args?: any) => Promise<any> },
+    requestedOwnerId?: string
+): Promise<string | undefined> {
+    const user = await ctx.runQuery(api.users.getCurrentUser);
+    // Admins and users without a dynamicsUserId retain full control
+    if (!user || user.role === "admin" || !user.dynamicsUserId) {
+        return requestedOwnerId;
+    }
+    // Non-admin with dynamicsUserId: always enforce their own scope
+    return user.dynamicsUserId;
+}
 
 /**
  * Contact fields we retrieve from Dynamics 365
@@ -102,10 +121,10 @@ export const fetchContacts = action({
             province,
             ageMin,
             ageMax,
-
-            ownerId,
             industryId
         } = args;
+
+        const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
         // Build OData query parameters
         const queryParts: string[] = [];
@@ -260,7 +279,6 @@ export const getContactCount = action({
     },
     handler: async (ctx, args) => {
         const {
-            ownerId,
             filter,
             search,
             clientType,
@@ -272,6 +290,8 @@ export const getContactCount = action({
             ageMax,
             industryId
         } = args;
+
+        const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
         // Build filter expression
         let filterExpression = "statecode eq 0";
@@ -358,7 +378,6 @@ export const fetchAllContactIds = action({
     },
     handler: async (ctx, args) => {
         const {
-            ownerId,
             filter,
             search,
             clientType,
@@ -370,6 +389,8 @@ export const fetchAllContactIds = action({
             ageMax,
             industryId
         } = args;
+
+        const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
         // Build filter expression
         let filterExpression = "statecode eq 0";
@@ -828,6 +849,10 @@ export const fetchContactsWithITA34 = action({
         industryId: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const effectiveOwnerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
+        // Replace args.ownerId with the enforced value for the rest of the handler
+        const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
+
         let ita34Filter = "statecode eq 0 and _riivo_taxpayercontact_value ne null";
 
         if (args.taxYear) {
@@ -886,41 +911,41 @@ export const fetchContactsWithITA34 = action({
 
         // Build additional contact-level filter conditions
         let extraFilter = "";
-        if (args.filter) {
-            extraFilter += ` and (${args.filter})`;
+        if (resolvedArgs.filter) {
+            extraFilter += ` and (${resolvedArgs.filter})`;
         }
-        if (args.search) {
-            const s = args.search.replace(/'/g, "''");
+        if (resolvedArgs.search) {
+            const s = resolvedArgs.search.replace(/'/g, "''");
             extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
         }
-        if (args.clientType) {
-            extraFilter += ` and riivo_clienttypenew eq ${args.clientType}`;
+        if (resolvedArgs.clientType) {
+            extraFilter += ` and riivo_clienttypenew eq ${resolvedArgs.clientType}`;
         }
-        if (args.entityType !== undefined) {
-            extraFilter += ` and riivo_clienttypeindbus eq ${args.entityType}`;
+        if (resolvedArgs.entityType !== undefined) {
+            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
         }
-        if (args.bank !== undefined) {
-            extraFilter += ` and ttt_bank eq ${args.bank}`;
+        if (resolvedArgs.bank !== undefined) {
+            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
         }
-        if (args.sourceCode && args.sourceCode.length > 0) {
-            const values = args.sourceCode.map(String).join("','");
+        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
+            const values = resolvedArgs.sourceCode.map(String).join("','");
             extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
         }
-        if (args.province) {
-            const prov = args.province.replace(/'/g, "''");
+        if (resolvedArgs.province) {
+            const prov = resolvedArgs.province.replace(/'/g, "''");
             extraFilter += ` and address1_stateorprovince eq '${prov}'`;
         }
-        if (args.ageMin !== undefined) {
-            extraFilter += ` and riivo_age ge ${args.ageMin}`;
+        if (resolvedArgs.ageMin !== undefined) {
+            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
         }
-        if (args.ageMax !== undefined) {
-            extraFilter += ` and riivo_age le ${args.ageMax}`;
+        if (resolvedArgs.ageMax !== undefined) {
+            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
         }
-        if (args.ownerId) {
-            extraFilter += ` and _ownerid_value eq '${args.ownerId}'`;
+        if (resolvedArgs.ownerId) {
+            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
         }
-        if (args.industryId) {
-            extraFilter += ` and _riivo_industryid_value eq '${args.industryId}'`;
+        if (resolvedArgs.industryId) {
+            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
         }
 
         const contacts: Array<{

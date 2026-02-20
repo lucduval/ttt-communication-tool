@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery, useMutation } from "convex/react";
+import { useQuery, useMutation, useAction } from "convex/react";
 import { api } from "@/../convex/_generated/api";
 import { Button, Card, Badge, Input } from "@/components/ui"; // Standard UI components
 import {
@@ -14,7 +14,11 @@ import {
     Shield,
     MoreVertical,
     Calendar,
-    Search
+    Search,
+    Link,
+    Pencil,
+    X,
+    Check
 } from "lucide-react";
 import type { Doc, Id } from "@/../convex/_generated/dataModel";
 
@@ -24,12 +28,18 @@ export function UserManagement() {
     const [inviteRole, setInviteRole] = useState<"user" | "admin">("user");
     const [isInviting, setIsInviting] = useState(false);
 
+    // Dynamics ID editing state: tracks which user is being edited and the pending value
+    const [editingDynamicsId, setEditingDynamicsId] = useState<{ userId: Id<"users">; value: string } | null>(null);
+    const [autoLinkingUserId, setAutoLinkingUserId] = useState<Id<"users"> | null>(null);
+
     const users = useQuery(api.users.list);
     const invitations = useQuery(api.users.listInvitations);
 
     const createInvitation = useMutation(api.users.createInvitation);
     const revokeInvitation = useMutation(api.users.revokeInvitation);
     const updateUser = useMutation(api.users.updateUser);
+    const updateDynamicsUserId = useMutation(api.users.updateDynamicsUserId);
+    const fetchDynamicsUsers = useAction(api.actions.dynamics.fetchUsers);
 
     const handleInvite = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -63,6 +73,41 @@ export function UserManagement() {
     const handleToggleRole = async (user: Doc<"users">) => {
         const newRole = user.role === "admin" ? "user" : "admin";
         await updateUser({ id: user._id, role: newRole });
+    };
+
+    const handleSaveDynamicsId = async () => {
+        if (!editingDynamicsId) return;
+        await updateDynamicsUserId({
+            id: editingDynamicsId.userId,
+            dynamicsUserId: editingDynamicsId.value.trim() || undefined,
+        });
+        setEditingDynamicsId(null);
+    };
+
+    const handleClearDynamicsId = async (userId: Id<"users">) => {
+        if (!confirm("Remove the Dynamics link for this user? They will see all contacts again.")) return;
+        await updateDynamicsUserId({ id: userId, dynamicsUserId: undefined });
+    };
+
+    const handleAutoLink = async (user: Doc<"users">) => {
+        if (!user.email) return;
+        setAutoLinkingUserId(user._id);
+        try {
+            const dynamicsUsers = await fetchDynamicsUsers({});
+            const match = dynamicsUsers.find(
+                (du) => du.email?.toLowerCase() === user.email.toLowerCase()
+            );
+            if (!match) {
+                alert(`No Dynamics systemuser found with email: ${user.email}`);
+                return;
+            }
+            await updateDynamicsUserId({ id: user._id, dynamicsUserId: match.id });
+            alert(`Linked to Dynamics user: ${match.name} (${match.id})`);
+        } catch (err) {
+            alert("Auto-link failed: " + (err as Error).message);
+        } finally {
+            setAutoLinkingUserId(null);
+        }
     };
 
     return (
@@ -132,6 +177,12 @@ export function UserManagement() {
                                 <th className="px-6 py-3 font-medium">User</th>
                                 <th className="px-6 py-3 font-medium">Role</th>
                                 <th className="px-6 py-3 font-medium">Status</th>
+                                <th className="px-6 py-3 font-medium">
+                                    <div className="flex items-center gap-1.5">
+                                        <Link size={13} />
+                                        Consultant Scope
+                                    </div>
+                                </th>
                                 <th className="px-6 py-3 font-medium">Joined</th>
                                 <th className="px-6 py-3 text-right">Actions</th>
                             </tr>
@@ -152,6 +203,80 @@ export function UserManagement() {
                                         <Badge status={user.status === "active" ? "success" : "error"}>
                                             {user.status}
                                         </Badge>
+                                    </td>
+                                    <td className="px-6 py-4 min-w-[260px]">
+                                        {editingDynamicsId?.userId === user._id ? (
+                                            <div className="flex items-center gap-1.5">
+                                                <input
+                                                    type="text"
+                                                    value={editingDynamicsId.value}
+                                                    onChange={(e) =>
+                                                        setEditingDynamicsId({ userId: user._id, value: e.target.value })
+                                                    }
+                                                    placeholder="Dynamics systemuser GUID"
+                                                    className="flex-1 text-xs border border-gray-300 rounded px-2 py-1 font-mono outline-none focus:ring-2 focus:ring-blue-500"
+                                                    onKeyDown={(e) => {
+                                                        if (e.key === "Enter") handleSaveDynamicsId();
+                                                        if (e.key === "Escape") setEditingDynamicsId(null);
+                                                    }}
+                                                    autoFocus
+                                                />
+                                                <button
+                                                    onClick={handleSaveDynamicsId}
+                                                    className="p-1 hover:bg-green-100 rounded text-green-600"
+                                                    title="Save"
+                                                >
+                                                    <Check size={14} />
+                                                </button>
+                                                <button
+                                                    onClick={() => setEditingDynamicsId(null)}
+                                                    className="p-1 hover:bg-gray-100 rounded text-gray-500"
+                                                    title="Cancel"
+                                                >
+                                                    <X size={14} />
+                                                </button>
+                                            </div>
+                                        ) : user.dynamicsUserId ? (
+                                            <div className="flex items-center gap-1.5 group">
+                                                <span className="text-xs font-mono bg-blue-50 text-blue-800 border border-blue-200 rounded px-1.5 py-0.5 truncate max-w-[140px]" title={user.dynamicsUserId}>
+                                                    {user.dynamicsUserId.substring(0, 8)}…
+                                                </span>
+                                                <button
+                                                    onClick={() => setEditingDynamicsId({ userId: user._id, value: user.dynamicsUserId! })}
+                                                    className="p-1 opacity-0 group-hover:opacity-100 hover:bg-gray-100 rounded text-gray-500 transition-opacity"
+                                                    title="Edit Dynamics ID"
+                                                >
+                                                    <Pencil size={12} />
+                                                </button>
+                                                <button
+                                                    onClick={() => handleClearDynamicsId(user._id)}
+                                                    className="p-1 opacity-0 group-hover:opacity-100 hover:bg-red-50 rounded text-red-400 transition-opacity"
+                                                    title="Remove link"
+                                                >
+                                                    <X size={12} />
+                                                </button>
+                                            </div>
+                                        ) : (
+                                            <div className="flex items-center gap-1.5">
+                                                <span className="text-xs text-gray-400 italic">Not linked</span>
+                                                <button
+                                                    onClick={() => setEditingDynamicsId({ userId: user._id, value: "" })}
+                                                    className="p-1 hover:bg-gray-100 rounded text-gray-400"
+                                                    title="Set Dynamics ID manually"
+                                                >
+                                                    <Pencil size={12} />
+                                                </button>
+                                                <button
+                                                    onClick={() => handleAutoLink(user)}
+                                                    disabled={autoLinkingUserId === user._id}
+                                                    className="flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 disabled:opacity-50"
+                                                    title="Auto-match by email from Dynamics"
+                                                >
+                                                    <Link size={11} />
+                                                    {autoLinkingUserId === user._id ? "Linking…" : "Auto-link"}
+                                                </button>
+                                            </div>
+                                        )}
                                     </td>
                                     <td className="px-6 py-4 text-gray-500">
                                         {user.joinedAt ? new Date(user.joinedAt).toLocaleDateString() : "-"}
@@ -176,7 +301,7 @@ export function UserManagement() {
                             ))}
                             {users?.length === 0 && (
                                 <tr>
-                                    <td colSpan={5} className="px-6 py-8 text-center text-gray-500">
+                                    <td colSpan={6} className="px-6 py-8 text-center text-gray-500">
                                         No users found.
                                     </td>
                                 </tr>

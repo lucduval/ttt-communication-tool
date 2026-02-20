@@ -93,6 +93,7 @@ export const generatePreviewEmail = action({
         aiPrompt: v.string(),
         aiSystemPrompt: v.string(),
         subject: v.string(),
+        siteUrl: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const [taxProfile, contactInfo] = await Promise.all([
@@ -107,10 +108,14 @@ export const generatePreviewEmail = action({
         const age = (contactInfo.idNumber ? parseAgeFromIdNumber(contactInfo.idNumber) : null) ?? contactInfo.dynamicsAge;
         const scenarios = calculateOptions(taxProfile, age);
         const recipientName = contactInfo.name;
+        const targetYear = new Date().getFullYear() + 1;
+        const convexSiteUrl = process.env.CONVEX_SITE_URL || args.siteUrl || "";
+        const logoUrl = convexSiteUrl ? `${convexSiteUrl}/logo` : undefined;
 
         const scenarioContext: TaxScenarioContext = {
             recipientName,
             yearOfAssessment: scenarios.yearOfAssessment,
+            targetYear,
             currentIncome: scenarios.currentSituation.income,
             currentTaxableIncome: scenarios.currentSituation.taxableIncome,
             currentRaContribution: scenarios.currentSituation.currentRa,
@@ -148,6 +153,8 @@ export const generatePreviewEmail = action({
             scenarios,
             recipientName,
             yearOfAssessment: scenarios.yearOfAssessment,
+            targetYear,
+            logoUrl,
         });
 
         return {

@@ -127,6 +127,52 @@ export const checkAccess = query({
 });
 
 /**
+ * Get the currently authenticated user's record
+ */
+export const getCurrentUser = query({
+    args: {},
+    handler: async (ctx) => {
+        const identity = await ctx.auth.getUserIdentity();
+        if (!identity) return null;
+
+        const user = await ctx.db
+            .query("users")
+            .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
+            .first();
+
+        if (user) return user;
+
+        // Fallback by email
+        if (identity.email) {
+            return await ctx.db
+                .query("users")
+                .withIndex("by_email", (q) => q.eq("email", identity.email!))
+                .first();
+        }
+
+        return null;
+    },
+});
+
+/**
+ * Admin: Link a user to their Dynamics 365 systemuser ID
+ */
+export const updateDynamicsUserId = mutation({
+    args: {
+        id: v.id("users"),
+        dynamicsUserId: v.optional(v.string()),
+    },
+    handler: async (ctx, args) => {
+        const access = await checkAdminAccess(ctx);
+        if (!access) throw new Error("Unauthorized");
+
+        await ctx.db.patch(args.id, {
+            dynamicsUserId: args.dynamicsUserId ?? undefined,
+        });
+    },
+});
+
+/**
  * Admin: List all users
  */
 export const list = query({

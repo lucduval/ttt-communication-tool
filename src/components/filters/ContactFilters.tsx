@@ -39,6 +39,8 @@ interface ContactFiltersProps {
     onFiltersChange: (filters: FilterState) => void;
     totalCount?: number | null;
     isPersonalised?: boolean;
+    /** When set, the consultant filter is locked to this Dynamics systemuser ID and cannot be changed */
+    lockedConsultantId?: string;
 }
 
 export function ContactFilters({
@@ -46,6 +48,7 @@ export function ContactFilters({
     onFiltersChange,
     totalCount,
     isPersonalised = false,
+    lockedConsultantId,
 }: ContactFiltersProps) {
     const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -122,7 +125,8 @@ export function ContactFilters({
             province: null,
             ageMin: null,
             ageMax: null,
-            ownerId: null,
+            // Preserve the locked consultant — cannot be cleared
+            ownerId: lockedConsultantId ?? null,
             industryId: null,
             incomeMin: null,
             incomeMax: null,
@@ -142,7 +146,8 @@ export function ContactFilters({
         filters.province !== null ||
         filters.ageMin !== null ||
         filters.ageMax !== null ||
-        filters.ownerId !== null ||
+        // Only count ownerId as an active filter when it's user-applied (not locked)
+        (filters.ownerId !== null && filters.ownerId !== lockedConsultantId) ||
         filters.industryId !== null ||
         filters.incomeMin !== null ||
         filters.incomeMax !== null ||
@@ -236,20 +241,31 @@ export function ContactFilters({
                             <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
                                 Consultant
                             </label>
-                            <select
-                                value={filters.ownerId || ""}
-                                onChange={(e) =>
-                                    updateFilter("ownerId", e.target.value || null)
-                                }
-                                className="w-full bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10"
-                            >
-                                <option value="">All Consultants</option>
-                                {ownerOptions.map((opt) => (
-                                    <option key={opt.value} value={opt.value}>
-                                        {opt.label}
-                                    </option>
-                                ))}
-                            </select>
+                            {lockedConsultantId ? (
+                                <div className="w-full bg-gray-100 border border-gray-200 p-2 rounded text-sm text-gray-700 flex items-center gap-2">
+                                    <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                    </svg>
+                                    <span className="truncate">
+                                        {ownerOptions.find(o => o.value === lockedConsultantId)?.label ?? "Your clients"}
+                                    </span>
+                                </div>
+                            ) : (
+                                <select
+                                    value={filters.ownerId || ""}
+                                    onChange={(e) =>
+                                        updateFilter("ownerId", e.target.value || null)
+                                    }
+                                    className="w-full bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10"
+                                >
+                                    <option value="">All Consultants</option>
+                                    {ownerOptions.map((opt) => (
+                                        <option key={opt.value} value={opt.value}>
+                                            {opt.label}
+                                        </option>
+                                    ))}
+                                </select>
+                            )}
                         </div>
 
                         {/* Industry */}

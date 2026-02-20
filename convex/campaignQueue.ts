@@ -751,12 +751,14 @@ export const processPersonalisedBatch = internalAction({
                     const recipientFirstName = contactRes.firstname || contactRes.fullname || recipient.name;
 
                     // 3. Generate AI copy
+                    const targetYear = new Date().getFullYear() + 1;
                     const copy = await generatePersonalisedCopy({
                         systemPrompt: campaign.aiSystemPrompt || DEFAULT_SYS_PROMPT,
                         userPrompt: campaign.aiPrompt || "",
                         scenarios: {
                             recipientName: recipientFirstName,
                             yearOfAssessment: scenarios.yearOfAssessment,
+                            targetYear,
                             currentIncome: scenarios.currentSituation.income,
                             currentTaxableIncome: scenarios.currentSituation.taxableIncome,
                             currentRaContribution: scenarios.currentSituation.currentRa,
@@ -770,11 +772,15 @@ export const processPersonalisedBatch = internalAction({
                     });
 
                     // 4. Build final HTML
+                    const queueSiteUrl = process.env.CONVEX_SITE_URL ?? "";
+                    const queueLogoUrl = queueSiteUrl ? `${queueSiteUrl}/logo` : undefined;
                     let emailBody = buildPersonalisedEmail({
                         copy,
                         scenarios,
                         recipientName: recipientFirstName,
                         yearOfAssessment: scenarios.yearOfAssessment,
+                        targetYear,
+                        logoUrl: queueLogoUrl,
                     });
 
                     // 5. Add tracking

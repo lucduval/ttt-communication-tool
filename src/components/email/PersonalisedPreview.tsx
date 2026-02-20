@@ -54,6 +54,7 @@ export function PersonalisedPreview({
                     aiPrompt: aiUserPrompt,
                     aiSystemPrompt: aiSystemPrompt || "",
                     subject,
+                    siteUrl: window.location.origin,
                 });
                 setPreviews((prev) => {
                     const next = new Map(prev);

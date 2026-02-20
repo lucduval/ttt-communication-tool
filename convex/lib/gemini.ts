@@ -2,16 +2,13 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export interface PersonalisedCopy {
     greeting: string;
-    introText: string;
-    optionACopy: string;
-    optionBCopy: string;
-    optionCCopy: string;
     closingText: string;
 }
 
 export interface TaxScenarioContext {
     recipientName: string;
     yearOfAssessment: number;
+    targetYear: number;
     currentIncome: number;
     currentTaxableIncome: number;
     currentRaContribution: number;
@@ -43,7 +40,17 @@ function buildPrompt(
     userPrompt: string,
     scenarios: TaxScenarioContext
 ): string {
-    const fmt = (n: number) => `R${Math.round(n).toLocaleString("en-ZA")}`;
+    const fmt = (n: number): string => {
+        const abs = Math.abs(n);
+        if (abs >= 1_000_000) {
+            const m = abs / 1_000_000;
+            const str = m >= 10 ? Math.round(m).toString() : m.toFixed(1).replace(".", ",");
+            return `R${str}m`;
+        }
+        if (abs >= 10_000) return `R${Math.round(abs / 1_000)}k`;
+        if (abs >= 1_000) return `R${(abs / 1_000).toFixed(1).replace(".", ",")}k`;
+        return `R${Math.round(abs / 100) * 100}`;
+    };
 
     const rp = scenarios.retirementProjection;
     const retirementBlock = rp
@@ -61,7 +68,8 @@ ${userPrompt}
 
 RECIPIENT CONTEXT (use these exact numbers — do NOT invent or change any figures):
 - Name: ${scenarios.recipientName}
-- Tax Year: ${scenarios.yearOfAssessment}
+- Tax Data Year (ITA34): ${scenarios.yearOfAssessment}
+- Target Year (the year they are preparing for): ${scenarios.targetYear}
 - Total Income: ${fmt(scenarios.currentIncome)}
 - Taxable Income: ${fmt(scenarios.currentTaxableIncome)}
 - Current RA Contribution: ${fmt(scenarios.currentRaContribution)}
@@ -85,12 +93,8 @@ IMPORTANT: For Options A and B, frame all RA contribution amounts in MONTHLY ter
 
 Respond ONLY with valid JSON matching this exact structure (no markdown, no code fences):
 {
-  "greeting": "personalised greeting using first name",
-  "introText": "Multi-paragraph HTML content for the email intro. Write 4-5 short paragraphs separated by <br><br>. Paragraph 1: reference the start of the new ${scenarios.yearOfAssessment} tax year as a full year of opportunity to structure finances strategically. Paragraph 2: mention that TTT Financial Group believes in proactive — not reactive — tax planning, and in using every available mechanism to legally minimise tax and accelerate long-term wealth creation. Paragraph 3: reference that the scenarios were prepared using figures from the client's most recent ITA34, then include a <ul style=\\"margin:12px 0 0 0;padding-left:20px;\\"> with three <li style=\\"margin-bottom:6px;\\"> items: (1) how much tax they could save this year, (2) what the real net cost would be after SARS effectively subsidises part of their contribution, (3) the long-term wealth impact of acting now rather than later. Paragraph 4: mention that for many clients the outcome is compelling — redirecting money that would have gone to tax into a growing retirement asset. Paragraph 5: a warm invitation to walk through the numbers and show exactly how this could work in their favour${rp ? ` — reference their ${rp.yearsToRetirement} years to retirement` : ""}. Do NOT use markdown or code fences — return only the HTML content string.",
-  "optionACopy": "2-3 sentences describing Option A — frame the RA contribution as a monthly amount, the tax saving as annual${rp ? ", and mention the projected extra at 65" : ""}",
-  "optionBCopy": "2-3 sentences describing Option B — frame the RA contribution as a monthly amount, the tax saving as annual${rp ? ", and mention the projected extra at 65" : ""}",
-  "optionCCopy": "1-2 sentences for Option C — do NOT mention any specific numbers, contributions, or tax savings. Instead, explain that TTT's advisors can create a personalised plan tailored to their unique financial situation to maximise their tax savings and retirement growth. Encourage them to call TTT.",
-  "closingText": "warm sign-off"
+  "greeting": "personalised greeting using first name only, e.g. 'Hi [Name],'",
+  "closingText": "warm, brief sign-off — 1-2 sentences encouraging them to reach out and speak with a TTT advisor"
 }`;
 }
 
@@ -113,7 +117,7 @@ export async function generatePersonalisedCopy(params: {
             const cleaned = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
             const parsed = JSON.parse(cleaned) as PersonalisedCopy;
 
-            if (!parsed.greeting || !parsed.introText || !parsed.optionACopy || !parsed.optionBCopy || !parsed.optionCCopy || !parsed.closingText) {
+            if (!parsed.greeting || !parsed.closingText) {
                 throw new Error("Gemini response missing required fields");
             }
 

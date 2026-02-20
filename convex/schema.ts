@@ -121,6 +121,7 @@ export default defineSchema({
         joinedAt: v.optional(v.number()),
         lastLoginAt: v.optional(v.number()),
         canAccessPersonalised: v.optional(v.boolean()),
+        dynamicsUserId: v.optional(v.string()), // Dynamics 365 systemuser GUID — when set, restricts contact visibility to this consultant's clients
     })
         .index("by_clerk_id", ["clerkId"])
         .index("by_email", ["email"]),

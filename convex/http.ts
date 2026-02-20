@@ -3,6 +3,7 @@ import { httpRouter } from "convex/server";
 import { httpAction } from "./_generated/server";
 import { unsubscribeContact } from "./lib/dynamics_logging";
 import { isBot, verifyUrlSignature } from "./lib/tracking_utils";
+import { TTT_LOGO_PNG_BASE64 } from "./lib/logoData";
 
 
 
@@ -11,6 +12,30 @@ import { internal } from "./_generated/api";
 import { Id } from "./_generated/dataModel";
 
 const http = httpRouter();
+
+/**
+ * GET /logo
+ * Serves the TTT Group logo PNG for use in emails.
+ */
+http.route({
+    path: "/logo",
+    method: "GET",
+    handler: httpAction(async (_ctx, _request) => {
+                const base64Png = TTT_LOGO_PNG_BASE64;
+        const binaryString = atob(base64Png);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return new Response(bytes, {
+            status: 200,
+            headers: {
+                "Content-Type": "image/png",
+                "Cache-Control": "public, max-age=86400",
+            },
+        });
+    }),
+});
 
 /**
  * GET /click?u=<url>&c=<campaignId>&r=<recipientId>&s=<signature>

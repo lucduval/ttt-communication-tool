@@ -176,10 +176,10 @@ export function calculateOptions(taxProfile: TaxProfileData, age?: number | null
     const remainingHeadroom = Math.max(0, maxAllowableRa - currentRa);
     const taxBefore = calculateTax(taxableIncome);
 
-    // Option A: 50% of remaining headroom
-    const optionAAdditional = Math.round(remainingHeadroom * 0.5);
-    // Option B: 80% of remaining headroom
-    const optionBAdditional = Math.round(remainingHeadroom * 0.8);
+    // Option A: 25% of remaining headroom (conservative entry point)
+    const optionAAdditional = Math.round(remainingHeadroom * 0.25);
+    // Option B: 50% of remaining headroom (moderate)
+    const optionBAdditional = Math.round(remainingHeadroom * 0.5);
     // Option C: 100% of remaining headroom
     const optionCAdditional = Math.round(remainingHeadroom);
 
