@@ -30,6 +30,26 @@ export const getCampaignStats = query({
     },
 });
 
+export const getEngagementRecipients = query({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (ctx, args) => {
+        const opens = await ctx.db
+            .query("opens")
+            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
+            .collect();
+
+        const clicks = await ctx.db
+            .query("clicks")
+            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
+            .collect();
+
+        const openedIds = [...new Set(opens.map((o) => o.recipientId))];
+        const clickedIds = [...new Set(clicks.map((c) => c.recipientId))];
+
+        return { openedIds, clickedIds };
+    },
+});
+
 export const getFailedMessages = query({
     args: { campaignId: v.id("campaigns") },
     handler: async (ctx, args) => {

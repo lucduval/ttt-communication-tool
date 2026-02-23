@@ -21,6 +21,7 @@ export default function CampaignDetailsPage() {
     const messages = useQuery(api.messages.listByCampaign, { campaignId });
     const batches = useQuery(api.campaignBatches.getBatches, { campaignId });
     const stats = useQuery(api.messages.getCampaignStats, { campaignId });
+    const engagement = useQuery(api.messages.getEngagementRecipients, { campaignId });
 
     if (!campaign || !messages) {
         return <div className="p-8 text-center">Loading...</div>;
@@ -42,11 +43,19 @@ export default function CampaignDetailsPage() {
         estimatedTimeRemaining = remainingMins > 1 ? `~${remainingMins} min remaining` : "Almost done...";
     }
 
-    // Filter messages based on status
+    const openedIdSet = new Set(engagement?.openedIds ?? []);
+    const clickedIdSet = new Set(engagement?.clickedIds ?? []);
+
+    // Filter messages based on status or engagement
     const filteredMessages = messages.filter((message) => {
         if (statusFilter === "all") return true;
+        if (statusFilter === "opened") return openedIdSet.has(message.recipientId);
+        if (statusFilter === "clicked") return clickedIdSet.has(message.recipientId);
         return message.status === statusFilter;
     });
+
+    const hasEngagementData = campaign.channel === "email" &&
+        (campaign.opensCount !== undefined || campaign.clicksCount !== undefined);
 
     return (
         <div className="container mx-auto py-8 px-8">
@@ -180,6 +189,25 @@ export default function CampaignDetailsPage() {
                             count={stats?.failed}
                             variant="danger"
                         />
+                        {hasEngagementData && (
+                            <>
+                                <div className="w-px bg-gray-200 mx-1" />
+                                <FilterButton
+                                    active={statusFilter === "opened"}
+                                    onClick={() => setStatusFilter("opened")}
+                                    label="Opened"
+                                    count={engagement?.openedIds.length}
+                                    variant="purple"
+                                />
+                                <FilterButton
+                                    active={statusFilter === "clicked"}
+                                    onClick={() => setStatusFilter("clicked")}
+                                    label="Clicked"
+                                    count={engagement?.clickedIds.length}
+                                    variant="indigo"
+                                />
+                            </>
+                        )}
                     </div>
                 </div>
                 <div className="overflow-x-auto">
@@ -292,12 +320,14 @@ function FilterButton({
     onClick: () => void;
     label: string;
     count?: number;
-    variant?: "default" | "danger";
+    variant?: "default" | "danger" | "purple" | "indigo";
 }) {
     const baseClasses = "px-3 py-1.5 text-sm font-medium rounded-md transition-colors";
-    const activeClasses = variant === "danger"
-        ? "bg-red-100 text-red-800 border border-red-200"
-        : "bg-blue-100 text-blue-800 border border-blue-200";
+    const activeClasses =
+        variant === "danger" ? "bg-red-100 text-red-800 border border-red-200" :
+        variant === "purple" ? "bg-purple-100 text-purple-800 border border-purple-200" :
+        variant === "indigo" ? "bg-indigo-100 text-indigo-800 border border-indigo-200" :
+        "bg-blue-100 text-blue-800 border border-blue-200";
     const inactiveClasses = "text-gray-600 hover:bg-gray-100 border border-transparent";
 
     return (
