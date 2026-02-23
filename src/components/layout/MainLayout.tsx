@@ -55,7 +55,7 @@ export function MainLayout({ children }: MainLayoutProps) {
                     <Sidebar onClose={() => setIsOpen(false)} />
                 </div>
 
-                <main className="flex-1 flex flex-col overflow-hidden w-full relative">
+                <main className="flex-1 flex flex-col overflow-y-auto w-full relative">
                     {children}
                 </main>
             </div>
