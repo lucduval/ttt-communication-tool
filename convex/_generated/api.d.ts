@@ -38,6 +38,7 @@ import type * as lib_tracking_utils from "../lib/tracking_utils.js";
 import type * as lib_whatsapp from "../lib/whatsapp.js";
 import type * as messages from "../messages.js";
 import type * as notifications from "../notifications.js";
+import type * as opportunities from "../opportunities.js";
 import type * as tracking from "../tracking.js";
 import type * as users from "../users.js";
 import type * as whatsappTemplates from "../whatsappTemplates.js";
@@ -79,6 +80,7 @@ declare const fullApi: ApiFromModules<{
   "lib/whatsapp": typeof lib_whatsapp;
   messages: typeof messages;
   notifications: typeof notifications;
+  opportunities: typeof opportunities;
   tracking: typeof tracking;
   users: typeof users;
   whatsappTemplates: typeof whatsappTemplates;

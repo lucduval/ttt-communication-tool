@@ -22,6 +22,7 @@ import {
     Paperclip,
     Eye,
     Type,
+    Tag,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/Input";
@@ -120,6 +121,10 @@ export function EmailComposer({
     const [selectedImage, setSelectedImage] = useState<HTMLImageElement | null>(null);
     const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
 
+    // Track which field was last focused so merge chip inserts into the right place
+    const [activeField, setActiveField] = useState<"subject" | "body">("body");
+    const subjectRef = useRef<HTMLInputElement>(null);
+
     // Link Popover State
     const [isLinkPopoverOpen, setIsLinkPopoverOpen] = useState(false);
     const [linkUrl, setLinkUrl] = useState("");
@@ -129,6 +134,38 @@ export function EmailComposer({
     const [isFontPopoverOpen, setIsFontPopoverOpen] = useState(false);
     const [currentFont, setCurrentFont] = useState("Arial");
     const [isFontSizePopoverOpen, setIsFontSizePopoverOpen] = useState(false);
+
+    // Available merge fields for personalisation
+    const MERGE_FIELDS = [
+        { label: "{firstName}", description: "Recipient's first name", example: "John" },
+        { label: "{fullName}", description: "Recipient's full name", example: "John Smith" },
+        { label: "{email}", description: "Recipient's email address", example: "john@email.com" },
+    ];
+
+    const insertMergeField = (field: string) => {
+        if (activeField === "subject") {
+            // Insert at cursor position in the subject input
+            const input = subjectRef.current;
+            if (input) {
+                const start = input.selectionStart ?? subject.length;
+                const end = input.selectionEnd ?? subject.length;
+                const newValue = subject.slice(0, start) + field + subject.slice(end);
+                onSubjectChange(newValue);
+                // Restore cursor after the inserted text
+                setTimeout(() => {
+                    input.focus();
+                    input.setSelectionRange(start + field.length, start + field.length);
+                }, 0);
+            } else {
+                onSubjectChange(subject + field);
+            }
+        } else {
+            // Insert into rich-text body at cursor position
+            editorRef.current?.focus();
+            document.execCommand("insertText", false, field);
+            updateContent();
+        }
+    };
 
     // Template Management
     const templates = useQuery(api.emailTemplates.list) || [];
@@ -539,12 +576,43 @@ export function EmailComposer({
                     Subject Line
                 </label>
                 <input
+                    ref={subjectRef}
                     type="text"
                     value={subject}
                     onChange={(e) => onSubjectChange(e.target.value)}
+                    onFocus={() => setActiveField("subject")}
                     placeholder="Enter email subject..."
                     className="w-full px-4 py-3 border border-gray-200 rounded-lg text-base outline-none focus:ring-2 focus:ring-[#1E3A5F]/20 focus:border-[#1E3A5F]"
                 />
+            </div>
+
+            {/* ── Merge Fields ── */}
+            <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                    <Tag size={15} className="text-blue-600 shrink-0" />
+                    <span className="text-sm font-semibold text-blue-800">Personalisation / Merge Fields</span>
+                </div>
+                <p className="text-xs text-blue-700 leading-relaxed">
+                    Click a field below to insert it at your cursor — in the subject line <em>or</em> the email body.
+                    Each placeholder is replaced with the recipient&apos;s real data when the email is sent.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                    {MERGE_FIELDS.map((f) => (
+                        <button
+                            key={f.label}
+                            type="button"
+                            title={`${f.description} — e.g. "${f.example}"`}
+                            onClick={() => insertMergeField(f.label)}
+                            className="group flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono bg-white text-blue-700 border border-blue-300 rounded-full hover:bg-blue-600 hover:text-white hover:border-blue-600 transition-colors shadow-sm"
+                        >
+                            <span>{f.label}</span>
+                            <span className="text-blue-400 group-hover:text-blue-200 font-sans not-italic">→ {f.example}</span>
+                        </button>
+                    ))}
+                </div>
+                <p className="text-xs text-blue-500">
+                    💡 <strong>Tip:</strong> Click inside the subject or body first, then click a field chip to insert it at your cursor.
+                </p>
             </div>
 
             {/* Template Actions */}
@@ -715,6 +783,7 @@ export function EmailComposer({
                         contentEditable
                         className="min-h-[600px] p-4 outline-none prose prose-sm max-w-none"
                         onInput={updateContent}
+                        onFocus={() => setActiveField("body")}
                         style={{
                             fontFamily: "Arial, sans-serif",
                             fontSize: fontSize,

@@ -69,6 +69,8 @@ const INITIAL_FILTERS: FilterState = {
     incomeMax: null,
     retirementFundMin: null,
     retirementFundMax: null,
+    taxReturnMin: null,
+    taxReturnYear: null,
 };
 
 interface UploadedImage {
@@ -117,6 +119,7 @@ export default function NewCampaignPage() {
     const [aiSystemPrompt, setAiSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
     const [aiUserPrompt, setAiUserPrompt] = useState(DEFAULT_USER_PROMPT);
     const [previewsGenerated, setPreviewsGenerated] = useState(false);
+    const [createOpportunities, setCreateOpportunities] = useState(false);
 
     // Test email state
     const [showTestModal, setShowTestModal] = useState(false);
@@ -148,6 +151,7 @@ export default function NewCampaignPage() {
     const fetchContacts = useAction(api.actions.dynamics.fetchContacts);
     const getContactCount = useAction(api.actions.dynamics.getContactCount);
     const fetchContactsWithITA34 = useAction(api.actions.dynamics.fetchContactsWithITA34);
+    const fetchContactsByTaxReturn = useAction(api.actions.dynamics.fetchContactsByTaxReturn);
     const sendTestEmail = useAction(api.actions.email.sendTestEmail);
     const sendBulkEmails = useAction(api.actions.email.sendBulkEmails);
     const sendTestWhatsApp = useAction(api.actions.whatsapp.sendTestWhatsApp);
@@ -175,6 +179,8 @@ export default function NewCampaignPage() {
 
     const hasITA34Filters = filters.incomeMin !== null || filters.incomeMax !== null ||
         filters.retirementFundMin !== null || filters.retirementFundMax !== null;
+
+    const hasTaxReturnFilters = filters.taxReturnMin !== null;
 
     const loadContacts = useCallback(async () => {
         try {
@@ -238,6 +244,27 @@ export default function NewCampaignPage() {
 
                 setContacts(filtered);
                 setTotalCount(filtered.length);
+            } else if (campaignChannel === "personalised" && hasTaxReturnFilters) {
+                const channelFilter = getChannelFilter();
+
+                const result = await fetchContactsByTaxReturn({
+                    taxReturnMin: filters.taxReturnMin!,
+                    taxReturnYear: filters.taxReturnYear ?? undefined,
+                    filter: channelFilter,
+                    search: filters.search || undefined,
+                    clientType: filters.clientType || undefined,
+                    entityType: filters.entityType ?? undefined,
+                    bank: filters.bank ?? undefined,
+                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                    province: filters.province || undefined,
+                    ageMin: filters.ageMin ?? undefined,
+                    ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
+                });
+
+                setContacts(result.contacts as Contact[]);
+                setTotalCount(result.totalCount);
             } else if (campaignChannel === "personalised" && hasITA34Filters) {
                 const channelFilter = getChannelFilter();
 
@@ -302,7 +329,7 @@ export default function NewCampaignPage() {
         } finally {
             setIsLoadingContacts(false);
         }
-    }, [fetchContacts, getContactCount, fetchContactsWithITA34, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters]);
+    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -559,6 +586,7 @@ export default function NewCampaignPage() {
                 fromMailbox: (campaignChannel === "email" || campaignChannel === "personalised") ? selectedMailbox || undefined : undefined,
                 aiPrompt: campaignChannel === "personalised" ? aiUserPrompt : undefined,
                 aiSystemPrompt: campaignChannel === "personalised" ? aiSystemPrompt : undefined,
+                createOpportunities: campaignChannel === "personalised" ? createOpportunities : undefined,
             });
 
             // Queue batches and start processing (async - returns immediately)
@@ -918,7 +946,8 @@ export default function NewCampaignPage() {
                                 selectedIds={selectedIds}
                                 onSelectionChange={setSelectedIds}
                                 showSelection={true}
-                                showITA34Columns={campaignChannel === "personalised"}
+                                showITA34Columns={campaignChannel === "personalised" && hasITA34Filters}
+                                showSarsColumn={campaignChannel === "personalised" && hasTaxReturnFilters}
                             />
                         </div>
                     )}
@@ -936,6 +965,41 @@ export default function NewCampaignPage() {
                                             subject={subject}
                                             onSubjectChange={setSubject}
                                         />
+                                    </Card>
+
+                                    <Card>
+                                        <div className="flex items-start gap-4">
+                                            <div className="flex-1">
+                                                <h3 className="text-base font-semibold text-gray-900">
+                                                    Create CRM Opportunities
+                                                </h3>
+                                                <p className="text-sm text-gray-500 mt-1">
+                                                    Automatically create a <strong>riivo_opportunity</strong> record in Dynamics for each recipient when the email is sent. Temperature updates to Warm on open and Hot on click.
+                                                </p>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                role="switch"
+                                                aria-checked={createOpportunities}
+                                                onClick={() => setCreateOpportunities(!createOpportunities)}
+                                                className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:ring-offset-2 ${
+                                                    createOpportunities ? "bg-[#1E3A5F]" : "bg-gray-200"
+                                                }`}
+                                            >
+                                                <span
+                                                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                                                        createOpportunities ? "translate-x-5" : "translate-x-0"
+                                                    }`}
+                                                />
+                                            </button>
+                                        </div>
+                                        {createOpportunities && (
+                                            <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                                                <p className="text-xs text-blue-700">
+                                                    One opportunity will be created per recipient with <strong>riivo_automatedopportunity = true</strong> and initial temperature <strong>Pending</strong>. Temperature auto-upgrades: <strong>Warm</strong> on email open, <strong>Hot</strong> on link click. Unengaged opportunities are marked <strong>Cold</strong> after 30 days.
+                                                </p>
+                                            </div>
+                                        )}
                                     </Card>
                                 </div>
                             ) : campaignChannel === "email" ? (
@@ -1024,6 +1088,14 @@ export default function NewCampaignPage() {
                                                 </div>
                                                 <div className="text-sm text-gray-600">Generation Method</div>
                                             </div>
+                                            {createOpportunities && (
+                                                <div className="p-4 bg-indigo-50 rounded-lg border border-indigo-200 col-span-full">
+                                                    <div className="text-sm font-semibold text-indigo-700">
+                                                        CRM opportunities will be created for each recipient
+                                                    </div>
+                                                    <div className="text-xs text-indigo-500 mt-0.5">Temperature: Pending → Warm (open) → Hot (click)</div>
+                                                </div>
+                                            )}
                                         </>
                                     ) : campaignChannel === "email" ? (
                                         <>

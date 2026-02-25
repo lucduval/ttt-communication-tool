@@ -41,6 +41,8 @@ export default defineSchema({
         // Personalised campaign fields
         aiPrompt: v.optional(v.string()),
         aiSystemPrompt: v.optional(v.string()),
+        // Opportunity creation
+        createOpportunities: v.optional(v.boolean()),
     })
         .index("by_status", ["status"])
         .index("by_user", ["createdBy"])
@@ -85,6 +87,8 @@ export default defineSchema({
         externalMessageId: v.optional(v.string()), // Graph/Twilio ID
         sentAt: v.optional(v.number()),
         deliveredAt: v.optional(v.number()),
+        // CRM opportunity linked to this message
+        opportunityId: v.optional(v.string()),
     })
         .index("by_campaign", ["campaignId"])
         .index("by_campaign_recipient", ["campaignId", "recipientId"])

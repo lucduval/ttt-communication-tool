@@ -27,6 +27,9 @@ export interface FilterState {
     incomeMax: number | null;
     retirementFundMin: number | null;
     retirementFundMax: number | null;
+    // Tax return (SARS reimbursement) filters
+    taxReturnMin: number | null;
+    taxReturnYear: number | null;
 }
 
 interface Option {
@@ -132,6 +135,8 @@ export function ContactFilters({
             incomeMax: null,
             retirementFundMin: null,
             retirementFundMax: null,
+            taxReturnMin: null,
+            taxReturnYear: null,
         });
     };
 
@@ -152,7 +157,9 @@ export function ContactFilters({
         filters.incomeMin !== null ||
         filters.incomeMax !== null ||
         filters.retirementFundMin !== null ||
-        filters.retirementFundMax !== null;
+        filters.retirementFundMax !== null ||
+        filters.taxReturnMin !== null ||
+        filters.taxReturnYear !== null;
 
     return (
         <div className="space-y-4">
@@ -488,6 +495,46 @@ export function ContactFilters({
                                     </div>
                                 </div>
                             </div>
+
+                            {/* Tax Return (SARS Reimbursement) Filters */}
+                            <div className="mt-4 pt-4 border-t border-amber-200">
+                                <h4 className="font-semibold text-sm text-amber-800 mb-3 flex items-center gap-1.5">
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                    SARS Tax Return Filter
+                                </h4>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                            Min SARS Reimbursement (R)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            placeholder="e.g. 5000"
+                                            value={filters.taxReturnMin ?? ""}
+                                            onChange={(e) => updateFilter("taxReturnMin", e.target.value ? Number(e.target.value) : null)}
+                                            className="w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                        />
+                                        <p className="text-xs text-amber-700 mt-1">
+                                            Filters contacts with a SARS refund above this amount
+                                        </p>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                            Tax Return Year
+                                        </label>
+                                        <input
+                                            type="number"
+                                            placeholder={`${new Date().getFullYear() - 1} (previous year)`}
+                                            value={filters.taxReturnYear ?? ""}
+                                            onChange={(e) => updateFilter("taxReturnYear", e.target.value ? Number(e.target.value) : null)}
+                                            className="w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                        />
+                                        <p className="text-xs text-amber-700 mt-1">
+                                            Leave blank to default to {new Date().getFullYear() - 1}
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     )}
 
@@ -549,6 +596,12 @@ export function ContactFilters({
                             {(filters.retirementFundMin !== null || filters.retirementFundMax !== null) && (
                                 <Badge status="warning">
                                     Retirement Fund: R{filters.retirementFundMin?.toLocaleString() || "0"} - R{filters.retirementFundMax?.toLocaleString() || "∞"}
+                                </Badge>
+                            )}
+                            {filters.taxReturnMin !== null && (
+                                <Badge status="warning">
+                                    SARS Refund: min R{filters.taxReturnMin.toLocaleString()}
+                                    {filters.taxReturnYear ? ` (${filters.taxReturnYear})` : ""}
                                 </Badge>
                             )}
                         </div>

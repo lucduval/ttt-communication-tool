@@ -26,6 +26,7 @@ export interface Contact {
     ita34Income?: number | null;
     ita34RetirementFund?: number | null;
     ita34Year?: number | null;
+    sarsReimbursement?: number | null;
 }
 
 interface ContactListProps {
@@ -35,6 +36,7 @@ interface ContactListProps {
     onSelectionChange?: (selectedIds: Set<string>) => void;
     showSelection?: boolean;
     showITA34Columns?: boolean;
+    showSarsColumn?: boolean;
 }
 
 const formatCurrency = (value: number | null | undefined) => {
@@ -49,6 +51,7 @@ export function ContactList({
     onSelectionChange,
     showSelection = false,
     showITA34Columns = false,
+    showSarsColumn = false,
 }: ContactListProps) {
     const toggleSelection = (id: string) => {
         if (!onSelectionChange) return;
@@ -118,6 +121,9 @@ export function ContactList({
                                 <th className="px-4 py-4">Ret. Fund</th>
                             </>
                         )}
+                        {showSarsColumn && (
+                            <th className="px-4 py-4">SARS Refund</th>
+                        )}
                         <th className="px-4 py-4">Channels</th>
                         <th className="px-4 py-4 w-12"></th>
                     </tr>
@@ -186,6 +192,13 @@ export function ContactList({
                                         {formatCurrency(contact.ita34RetirementFund)}
                                     </td>
                                 </>
+                            )}
+                            {showSarsColumn && (
+                                <td className="px-4 py-4 tabular-nums">
+                                    <span className={`text-sm font-semibold ${contact.sarsReimbursement ? "text-green-700" : "text-gray-400"}`}>
+                                        {formatCurrency(contact.sarsReimbursement)}
+                                    </span>
+                                </td>
                             )}
                             <td className="px-4 py-4">
                                 <div className="flex gap-1">

@@ -320,6 +320,7 @@ export const startCampaign = mutation({
         fromMailbox: v.optional(v.string()),
         aiPrompt: v.optional(v.string()),
         aiSystemPrompt: v.optional(v.string()),
+        createOpportunities: v.optional(v.boolean()),
     },
     handler: async (ctx, args) => {
         const identity = await ctx.auth.getUserIdentity();
@@ -348,6 +349,7 @@ export const startCampaign = mutation({
             filters: args.filters,
             aiPrompt: args.aiPrompt,
             aiSystemPrompt: args.aiSystemPrompt,
+            createOpportunities: args.createOpportunities,
         });
 
         // If recipients are provided directly, create message records immediately

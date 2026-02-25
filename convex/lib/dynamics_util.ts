@@ -30,6 +30,9 @@ export interface CampaignFilters {
     ageMax?: number;
     ownerId?: string;
     industryId?: string;
+    // Tax return filters (filters on new_invoiceses entity)
+    taxReturnMin?: number;  // minimum ttt_sarsreimbursement
+    taxReturnYear?: number; // filter invoices by year (createdon), defaults to previous year
 }
 
 /**

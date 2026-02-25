@@ -154,16 +154,30 @@ export const processEmailBatch = internalAction({
                         }
                     }
 
+                    // Resolve merge field values for this recipient
+                    const recipientFirstName = recipient.name?.split(" ")[0] || recipient.name || "";
+                    const recipientFullName = recipient.name || "";
+                    const recipientEmail = recipient.email || "";
+
+                    const applyMergeFields = (text: string) =>
+                        text
+                            .replace(/\{firstName\}/g, recipientFirstName)
+                            .replace(/\{fullName\}/g, recipientFullName)
+                            .replace(/\{email\}/g, recipientEmail);
+
                     // Append unsubscribe footer for marketing compliance
                     const siteUrl = process.env.CONVEX_SITE_URL || "";
                     const unsubscribeUrl = siteUrl
                         ? `${siteUrl}/unsubscribe?id=${recipient.id}`
                         : "";
 
+                    // Apply merge fields to body before wrapping
+                    const mergedHtmlBody = applyMergeFields(campaign.htmlBody || "");
+
                     // Generate full email HTML with wrapper
                     const { wrapEmail } = await import("./lib/emailLayout");
                     let emailBody = wrapEmail(
-                        (campaign.htmlBody || "") + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : ""),
+                        mergedHtmlBody + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : ""),
                         campaign.subject || "Notification"
                     );
 
@@ -173,8 +187,11 @@ export const processEmailBatch = internalAction({
                         emailBody = (await rewriteEmailLinks(emailBody, siteUrl, args.campaignId, recipient.id)) as string;
                     }
 
+                    // Apply merge fields to the subject too
+                    const mergedSubject = applyMergeFields(campaign.subject || "");
+
                     const result = await sendEmail({
-                        subject: campaign.subject || "",
+                        subject: mergedSubject,
                         body: emailBody,
                         toRecipients: [{ email: recipient.email, name: recipient.name }],
                         attachments: processedAttachments,
@@ -810,6 +827,31 @@ export const processPersonalisedBatch = internalAction({
                     if (result.success) {
                         successCount++;
                         results.push({ recipientId: recipient.id, success: true });
+
+                        // 8. Create CRM opportunity if enabled
+                        if (campaign.createOpportunities) {
+                            try {
+                                const opportunityId = await ctx.runAction(
+                                    api.actions.dynamics.createOpportunity,
+                                    {
+                                        contactId: recipient.id,
+                                        contactName: recipient.name,
+                                        campaignId: args.campaignId,
+                                        ownerId: undefined,
+                                    }
+                                );
+
+                                if (opportunityId) {
+                                    await ctx.runMutation(internal.messages.setOpportunityId, {
+                                        campaignId: args.campaignId,
+                                        recipientId: recipient.id,
+                                        opportunityId,
+                                    });
+                                }
+                            } catch (oppErr) {
+                                console.error(`Failed to create opportunity for ${recipient.id}:`, oppErr);
+                            }
+                        }
                     } else {
                         failedCount++;
                         results.push({ recipientId: recipient.id, success: false, error: result.error });

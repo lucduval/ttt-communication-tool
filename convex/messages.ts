@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { internalMutation, query } from "./_generated/server";
+import { internalMutation, internalQuery, query } from "./_generated/server";
 
 export const listByCampaign = query({
     args: { campaignId: v.id("campaigns") },
@@ -175,6 +175,96 @@ export const updateStatusByRecipient = internalMutation({
                 externalMessageId: args.externalMessageId,
             });
         }
+    },
+});
+
+/** Return messages that have a Dynamics opportunity linked, for a given campaign. */
+export const listOpportunityMessages = query({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (ctx, args) => {
+        const messages = await ctx.db
+            .query("messages")
+            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
+            .collect();
+
+        return messages
+            .filter((m) => !!m.opportunityId)
+            .map((m) => ({ recipientId: m.recipientId, opportunityId: m.opportunityId! }));
+    },
+});
+
+/** Store the Dynamics opportunity ID on a message record after creation. */
+export const setOpportunityId = internalMutation({
+    args: {
+        campaignId: v.id("campaigns"),
+        recipientId: v.string(),
+        opportunityId: v.string(),
+    },
+    handler: async (ctx, args) => {
+        const message = await ctx.db
+            .query("messages")
+            .withIndex("by_campaign_recipient", (q) =>
+                q.eq("campaignId", args.campaignId).eq("recipientId", args.recipientId)
+            )
+            .first();
+
+        if (message) {
+            await ctx.db.patch(message._id, { opportunityId: args.opportunityId });
+        }
+    },
+});
+
+/**
+ * List messages that have an opportunity linked, sent before a cutoff time,
+ * and with no open or click recorded. Used by the cold-status cron job.
+ */
+export const listUnengagedOpportunityMessages = internalQuery({
+    args: {
+        sentBefore: v.number(), // timestamp in ms
+        limit: v.number(),
+    },
+    handler: async (ctx, args) => {
+        const messages = await ctx.db
+            .query("messages")
+            .withIndex("by_status", (q) => q.eq("status", "sent"))
+            .filter((q) =>
+                q.and(
+                    q.neq(q.field("opportunityId"), undefined),
+                    q.lt(q.field("sentAt"), args.sentBefore)
+                )
+            )
+            .take(args.limit);
+
+        // Filter out messages that have been opened or clicked
+        const unengaged = [];
+        for (const msg of messages) {
+            if (!msg.opportunityId) continue;
+
+            const campaignId = msg.campaignId;
+            const recipientId = msg.recipientId;
+
+            const hasOpen = await ctx.db
+                .query("opens")
+                .withIndex("by_campaign_recipient", (q) =>
+                    q.eq("campaignId", campaignId).eq("recipientId", recipientId)
+                )
+                .first();
+
+            if (hasOpen) continue;
+
+            const hasClick = await ctx.db
+                .query("clicks")
+                .withIndex("by_campaign_recipient", (q) =>
+                    q.eq("campaignId", campaignId).eq("recipientId", recipientId)
+                )
+                .first();
+
+            if (hasClick) continue;
+
+            unengaged.push({ messageId: msg._id, opportunityId: msg.opportunityId });
+        }
+
+        return unengaged;
     },
 });
 

@@ -19,4 +19,12 @@ crons.interval(
     {}
 );
 
+// Mark unengaged opportunities as Cold after 30 days of no opens or clicks
+crons.daily(
+    "mark-cold-opportunities",
+    { hourUTC: 2, minuteUTC: 0 },
+    internal.opportunities.markStaleOpportunitiesCold,
+    {}
+);
+
 export default crons;

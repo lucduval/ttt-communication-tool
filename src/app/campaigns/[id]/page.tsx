@@ -43,6 +43,11 @@ export default function CampaignDetailsPage() {
         estimatedTimeRemaining = remainingMins > 1 ? `~${remainingMins} min remaining` : "Almost done...";
     }
 
+    const opportunityMessages = useQuery(api.messages.listOpportunityMessages, { campaignId });
+    const opportunityMap = new Map(
+        (opportunityMessages ?? []).map((m) => [m.recipientId, m.opportunityId])
+    );
+
     const openedIdSet = new Set(engagement?.openedIds ?? []);
     const clickedIdSet = new Set(engagement?.clickedIds ?? []);
 
@@ -56,6 +61,14 @@ export default function CampaignDetailsPage() {
 
     const hasEngagementData = campaign.channel === "email" &&
         (campaign.opensCount !== undefined || campaign.clicksCount !== undefined);
+    const hasOpportunities = (opportunityMessages ?? []).length > 0;
+
+    const getTemperatureLabel = (recipientId: string): { label: string; classes: string } | null => {
+        if (!opportunityMap.has(recipientId)) return null;
+        if (clickedIdSet.has(recipientId)) return { label: "Hot", classes: "bg-red-100 text-red-700" };
+        if (openedIdSet.has(recipientId)) return { label: "Warm", classes: "bg-orange-100 text-orange-700" };
+        return { label: "Pending", classes: "bg-gray-100 text-gray-600" };
+    };
 
     return (
         <div className="container mx-auto py-8 px-8">
@@ -223,6 +236,11 @@ export default function CampaignDetailsPage() {
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                     Status
                                 </th>
+                                {hasOpportunities && (
+                                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        Opportunity Temp.
+                                    </th>
+                                )}
                                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                     Details
                                 </th>
@@ -234,53 +252,67 @@ export default function CampaignDetailsPage() {
                         <tbody className="bg-white divide-y divide-gray-200">
                             {filteredMessages.length === 0 ? (
                                 <tr>
-                                    <td colSpan={5} className="px-6 py-4 text-center text-gray-500">
+                                    <td colSpan={hasOpportunities ? 6 : 5} className="px-6 py-4 text-center text-gray-500">
                                         No messages found matching filter.
                                     </td>
                                 </tr>
                             ) : (
-                                filteredMessages.map((message) => (
-                                    <tr key={message._id} className="hover:bg-gray-50">
-                                        <td className="px-6 py-4 whitespace-nowrap">
-                                            <div className="text-sm font-medium text-gray-900">
-                                                {message.recipientName}
-                                            </div>
-                                        </td>
-                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                            {message.channel === "email"
-                                                ? message.recipientEmail
-                                                : message.recipientPhone}
-                                        </td>
-                                        <td className="px-6 py-4 whitespace-nowrap">
-                                            <span
-                                                className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full capitalize ${message.status === "delivered"
-                                                    ? "bg-green-100 text-green-800"
-                                                    : message.status === "failed"
-                                                        ? "bg-red-100 text-red-800"
-                                                        : message.status === "sent"
-                                                            ? "bg-blue-100 text-blue-800"
-                                                            : "bg-gray-100 text-gray-800"
-                                                    }`}
-                                            >
-                                                {message.status}
-                                            </span>
-                                        </td>
-                                        <td className="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">
-                                            {message.errorMessage ? (
-                                                <span className="text-red-600" title={message.errorMessage}>
-                                                    Error: {message.errorMessage}
+                                filteredMessages.map((message) => {
+                                    const temp = getTemperatureLabel(message.recipientId);
+                                    return (
+                                        <tr key={message._id} className="hover:bg-gray-50">
+                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                <div className="text-sm font-medium text-gray-900">
+                                                    {message.recipientName}
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                {message.channel === "email"
+                                                    ? message.recipientEmail
+                                                    : message.recipientPhone}
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap">
+                                                <span
+                                                    className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full capitalize ${message.status === "delivered"
+                                                        ? "bg-green-100 text-green-800"
+                                                        : message.status === "failed"
+                                                            ? "bg-red-100 text-red-800"
+                                                            : message.status === "sent"
+                                                                ? "bg-blue-100 text-blue-800"
+                                                                : "bg-gray-100 text-gray-800"
+                                                        }`}
+                                                >
+                                                    {message.status}
                                                 </span>
-                                            ) : (
-                                                <span className="text-gray-400">-</span>
+                                            </td>
+                                            {hasOpportunities && (
+                                                <td className="px-6 py-4 whitespace-nowrap">
+                                                    {temp ? (
+                                                        <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${temp.classes}`}>
+                                                            {temp.label}
+                                                        </span>
+                                                    ) : (
+                                                        <span className="text-gray-300 text-xs">—</span>
+                                                    )}
+                                                </td>
                                             )}
-                                        </td>
-                                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                            {message.sentAt
-                                                ? format(new Date(message.sentAt), "MMM d, HH:mm:ss")
-                                                : "-"}
-                                        </td>
-                                    </tr>
-                                ))
+                                            <td className="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">
+                                                {message.errorMessage ? (
+                                                    <span className="text-red-600" title={message.errorMessage}>
+                                                        Error: {message.errorMessage}
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-gray-400">-</span>
+                                                )}
+                                            </td>
+                                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                                                {message.sentAt
+                                                    ? format(new Date(message.sentAt), "MMM d, HH:mm:ss")
+                                                    : "-"}
+                                            </td>
+                                        </tr>
+                                    );
+                                })
                             )}
                         </tbody>
                     </table>

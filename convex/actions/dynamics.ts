@@ -1007,3 +1007,259 @@ export const fetchContactsWithITA34 = action({
         return { contacts, totalCount: contacts.length };
     },
 });
+
+// ---- Tax Return (SARS Reimbursement) Contact Filtering ----
+
+/**
+ * Fetch contacts that received a SARS reimbursement above a minimum threshold
+ * from the new_invoiceses entity, then resolve linked contact records.
+ * Optionally scoped to a specific year (defaults to the previous calendar year).
+ */
+export const fetchContactsByTaxReturn = action({
+    args: {
+        taxReturnMin: v.number(),
+        taxReturnYear: v.optional(v.number()),
+        filter: v.optional(v.string()),
+        search: v.optional(v.string()),
+        clientType: v.optional(v.string()),
+        entityType: v.optional(v.number()),
+        bank: v.optional(v.number()),
+        sourceCode: v.optional(v.array(v.number())),
+        province: v.optional(v.string()),
+        ageMin: v.optional(v.number()),
+        ageMax: v.optional(v.number()),
+        ownerId: v.optional(v.string()),
+        industryId: v.optional(v.string()),
+    },
+    handler: async (ctx, args) => {
+        const effectiveOwnerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
+        const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
+
+        const targetYear = args.taxReturnYear ?? (new Date().getFullYear() - 1);
+        const yearStart = `${targetYear}-01-01T00:00:00Z`;
+        const yearEnd = `${targetYear + 1}-01-01T00:00:00Z`;
+
+        // Build invoice filter: reimbursement above threshold within the target year
+        let invoiceFilter = `ttt_sarsreimbursement ge ${args.taxReturnMin}`;
+        invoiceFilter += ` and createdon ge ${yearStart} and createdon lt ${yearEnd}`;
+        invoiceFilter += ` and _ttt_customer_value ne null`;
+        invoiceFilter += ` and statecode eq 1`; // Inactive/completed invoices
+
+        const invoiceEndpoint = `new_invoiceses?$select=_ttt_customer_value,ttt_sarsreimbursement,createdon&$filter=${invoiceFilter}&$orderby=ttt_sarsreimbursement desc`;
+
+        interface InvoiceRow {
+            _ttt_customer_value: string;
+            ttt_sarsreimbursement: number | null;
+            createdon: string;
+        }
+
+        let allInvoices: InvoiceRow[] = [];
+        let nextLink: string | null = invoiceEndpoint;
+        let pageCount = 0;
+
+        while (nextLink && pageCount < 100) {
+            pageCount++;
+            const endpoint: string = nextLink.startsWith("http")
+                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
+                : nextLink;
+            const response = await dynamicsRequest<{ value: InvoiceRow[]; "@odata.nextLink"?: string }>(endpoint);
+            if (response.value?.length) {
+                allInvoices.push(...response.value);
+            }
+            nextLink = response["@odata.nextLink"] ?? null;
+        }
+
+        // De-duplicate: keep the highest reimbursement per contact
+        const contactMap = new Map<string, InvoiceRow>();
+        for (const row of allInvoices) {
+            const cid = row._ttt_customer_value;
+            if (!cid) continue;
+            const existing = contactMap.get(cid);
+            if (!existing || (row.ttt_sarsreimbursement ?? 0) > (existing.ttt_sarsreimbursement ?? 0)) {
+                contactMap.set(cid, row);
+            }
+        }
+
+        const contactIds = Array.from(contactMap.keys());
+        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
+
+        // Build additional contact-level filter conditions
+        let extraFilter = "";
+        if (resolvedArgs.filter) {
+            extraFilter += ` and (${resolvedArgs.filter})`;
+        }
+        if (resolvedArgs.search) {
+            const s = resolvedArgs.search.replace(/'/g, "''");
+            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
+        }
+        if (resolvedArgs.clientType) {
+            extraFilter += ` and riivo_clienttypenew eq ${resolvedArgs.clientType}`;
+        }
+        if (resolvedArgs.entityType !== undefined) {
+            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
+        }
+        if (resolvedArgs.bank !== undefined) {
+            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
+        }
+        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
+            const values = resolvedArgs.sourceCode.map(String).join("','");
+            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
+        }
+        if (resolvedArgs.province) {
+            const prov = resolvedArgs.province.replace(/'/g, "''");
+            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
+        }
+        if (resolvedArgs.ageMin !== undefined) {
+            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
+        }
+        if (resolvedArgs.ageMax !== undefined) {
+            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
+        }
+        if (resolvedArgs.ownerId) {
+            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
+        }
+        if (resolvedArgs.industryId) {
+            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
+        }
+
+        const contacts: Array<{
+            id: string;
+            fullName: string;
+            firstName: string | null;
+            lastName: string | null;
+            email: string | null;
+            phone: string | null;
+            internationalPhone: string | null;
+            isActive: boolean;
+            clientType: string | null;
+            marketingPreferences: { tax: boolean; accounting: boolean; insurance: boolean };
+            whatsappOptIn: boolean;
+            emailNotifications: boolean;
+            smsNotifications: boolean;
+            createdOn: string;
+            modifiedOn: string;
+            sarsReimbursement: number | null;
+        }> = [];
+
+        for (let i = 0; i < contactIds.length; i += 50) {
+            const batch = contactIds.slice(i, i + 50);
+            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
+            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
+            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
+
+            for (const c of contactResponse.value) {
+                const invoiceRow = contactMap.get(c.contactid);
+                contacts.push({
+                    id: c.contactid,
+                    fullName: c.fullname,
+                    firstName: c.firstname,
+                    lastName: c.lastname,
+                    email: c.emailaddress1,
+                    phone: c.mobilephone,
+                    internationalPhone: c.icon_formattedmobilenumber,
+                    isActive: c.statecode === 0,
+                    clientType: c.riivo_clienttypenew,
+                    marketingPreferences: {
+                        tax: c.riivo_taxmarketing,
+                        accounting: c.riivo_accountingmarketing,
+                        insurance: c.riivo_insurancemarketing,
+                    },
+                    whatsappOptIn: c.riivo_whatsappoptinout,
+                    emailNotifications: c.icon_sendemailclientnotifications,
+                    smsNotifications: c.icon_sendclientssmsnotifications,
+                    createdOn: c.createdon,
+                    modifiedOn: c.modifiedon,
+                    sarsReimbursement: invoiceRow?.ttt_sarsreimbursement ?? null,
+                });
+            }
+        }
+
+        return { contacts, totalCount: contacts.length };
+    },
+});
+
+// ---- CRM Opportunity Management ----
+
+/** Temperature values for riivo_opportunitytemperature OptionSet */
+export const OPPORTUNITY_TEMPERATURE = {
+    PENDING: 0,
+    COLD: 1,
+    WARM: 2,
+    HOT: 3,
+} as const;
+
+/**
+ * Create a new opportunity in riivo_opportunities linked to a contact.
+ * Sets riivo_automatedopportunity = true and initial temperature = Pending (0).
+ * Returns the new riivo_opportunityid.
+ */
+export const createOpportunity = action({
+    args: {
+        contactId: v.string(),
+        contactName: v.string(),
+        campaignId: v.string(),
+        ownerId: v.optional(v.string()),
+    },
+    handler: async (_ctx, args): Promise<string | null> => {
+        try {
+            const opportunityName = `TAX-${new Date().getFullYear()}-${args.contactName.substring(0, 30).trim()}`;
+
+            const body: Record<string, unknown> = {
+                riivo_name: opportunityName,
+                "riivo_client@odata.bind": `/contacts(${args.contactId})`,
+                riivo_automatedopportunity: true,
+                riivo_notyetcontacted: true,
+                riivo_opportunitytemperature: OPPORTUNITY_TEMPERATURE.PENDING,
+            };
+
+            if (args.ownerId) {
+                body["ownerid@odata.bind"] = `/systemusers(${args.ownerId})`;
+            }
+
+            const response = await dynamicsRequest<{ riivo_opportunityid: string }>(
+                "riivo_opportunities",
+                {
+                    method: "POST",
+                    body: JSON.stringify(body),
+                }
+            );
+
+            return response.riivo_opportunityid ?? null;
+        } catch (err) {
+            console.error(`Failed to create opportunity for contact ${args.contactId}:`, err);
+            return null;
+        }
+    },
+});
+
+/**
+ * Update the temperature of an existing opportunity.
+ * Only upgrades temperature — will not overwrite Hot with Warm.
+ */
+export const updateOpportunityTemperature = action({
+    args: {
+        opportunityId: v.string(),
+        temperature: v.number(), // 0=Pending, 1=Cold, 2=Warm, 3=Hot
+    },
+    handler: async (_ctx, args): Promise<boolean> => {
+        try {
+            await dynamicsRequest(
+                `riivo_opportunities(${args.opportunityId})`,
+                {
+                    method: "PATCH",
+                    body: JSON.stringify({
+                        riivo_opportunitytemperature: args.temperature,
+                        // Mark as contacted when temperature goes above Pending
+                        ...(args.temperature > OPPORTUNITY_TEMPERATURE.PENDING
+                            ? { riivo_notyetcontacted: false, riivo_contacted: true }
+                            : {}),
+                    }),
+                }
+            );
+            return true;
+        } catch (err) {
+            console.error(`Failed to update opportunity temperature for ${args.opportunityId}:`, err);
+            return false;
+        }
+    },
+});

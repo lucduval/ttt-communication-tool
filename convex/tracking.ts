@@ -1,6 +1,9 @@
 import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
+import { internal } from "./_generated/api";
 import { Id, Doc } from "./_generated/dataModel";
+
+const OPPORTUNITY_TEMPERATURE = { PENDING: 0, COLD: 1, WARM: 2, HOT: 3 } as const;
 
 export const logClick = internalMutation({
     args: {
@@ -52,6 +55,21 @@ export const logClick = internalMutation({
                     clicksCount: (campaign.clicksCount || 0) + 1,
                 });
             }
+
+            // Schedule opportunity temperature upgrade to Hot
+            const message = await ctx.db
+                .query("messages")
+                .withIndex("by_campaign_recipient", (q) =>
+                    q.eq("campaignId", campaignId).eq("recipientId", args.recipientId)
+                )
+                .first();
+
+            if (message?.opportunityId) {
+                await ctx.scheduler.runAfter(0, internal.opportunities.updateTemperature, {
+                    opportunityId: message.opportunityId,
+                    temperature: OPPORTUNITY_TEMPERATURE.HOT,
+                });
+            }
         }
     },
 });
@@ -97,6 +115,21 @@ export const logOpen = internalMutation({
             if (campaign) {
                 await ctx.db.patch(campaignId, {
                     opensCount: (campaign.opensCount || 0) + 1,
+                });
+            }
+
+            // Schedule opportunity temperature upgrade to Warm
+            const message = await ctx.db
+                .query("messages")
+                .withIndex("by_campaign_recipient", (q) =>
+                    q.eq("campaignId", campaignId).eq("recipientId", args.recipientId)
+                )
+                .first();
+
+            if (message?.opportunityId) {
+                await ctx.scheduler.runAfter(0, internal.opportunities.updateTemperature, {
+                    opportunityId: message.opportunityId,
+                    temperature: OPPORTUNITY_TEMPERATURE.WARM,
                 });
             }
         }
