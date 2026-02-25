@@ -42,6 +42,8 @@ export default function RecipientsPage() {
         incomeMax: null,
         retirementFundMin: null,
         retirementFundMax: null,
+        taxReturnMin: null,
+        taxReturnYear: null,
     };
 
     const [contacts, setContacts] = useState<Contact[]>([]);
