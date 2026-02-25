@@ -22,6 +22,7 @@ export default function CampaignDetailsPage() {
     const batches = useQuery(api.campaignBatches.getBatches, { campaignId });
     const stats = useQuery(api.messages.getCampaignStats, { campaignId });
     const engagement = useQuery(api.messages.getEngagementRecipients, { campaignId });
+    const opportunityMessages = useQuery(api.messages.listOpportunityMessages, { campaignId });
 
     if (!campaign || !messages) {
         return <div className="p-8 text-center">Loading...</div>;
@@ -43,7 +44,6 @@ export default function CampaignDetailsPage() {
         estimatedTimeRemaining = remainingMins > 1 ? `~${remainingMins} min remaining` : "Almost done...";
     }
 
-    const opportunityMessages = useQuery(api.messages.listOpportunityMessages, { campaignId });
     const opportunityMap = new Map(
         (opportunityMessages ?? []).map((m) => [m.recipientId, m.opportunityId])
     );
@@ -357,9 +357,9 @@ function FilterButton({
     const baseClasses = "px-3 py-1.5 text-sm font-medium rounded-md transition-colors";
     const activeClasses =
         variant === "danger" ? "bg-red-100 text-red-800 border border-red-200" :
-        variant === "purple" ? "bg-purple-100 text-purple-800 border border-purple-200" :
-        variant === "indigo" ? "bg-indigo-100 text-indigo-800 border border-indigo-200" :
-        "bg-blue-100 text-blue-800 border border-blue-200";
+            variant === "purple" ? "bg-purple-100 text-purple-800 border border-purple-200" :
+                variant === "indigo" ? "bg-indigo-100 text-indigo-800 border border-indigo-200" :
+                    "bg-blue-100 text-blue-800 border border-blue-200";
     const inactiveClasses = "text-gray-600 hover:bg-gray-100 border border-transparent";
 
     return (
