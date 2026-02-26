@@ -3,7 +3,7 @@ import { dynamicsRequest } from "../actions/dynamics";
 
 interface SimpleContact {
     contactid: string;
-    fullname: string;
+    fullname: string | null;
     emailaddress1: string | null;
     mobilephone: string | null;
     riivo_referralcode: string | null;
@@ -134,7 +134,7 @@ export async function fetchMatchingContacts(
             if (response.value && response.value.length > 0) {
                 const chunk = response.value.map((contact) => ({
                     id: contact.contactid,
-                    fullName: contact.fullname,
+                    fullName: contact.fullname || "",
                     email: contact.emailaddress1,
                     phone: contact.mobilephone,
                     internationalPhone: (contact as any).icon_formattedmobilenumber || null,
