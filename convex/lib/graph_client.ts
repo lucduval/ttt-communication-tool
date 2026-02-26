@@ -70,6 +70,7 @@ export interface EmailAttachment {
     contentType: string;
     contentBase64: string; // Base64 encoded content
     isInline?: boolean;
+    contentId?: string; // Explicit content ID for inline images to ensure exact match
 }
 
 export interface EmailMessage {
@@ -143,7 +144,7 @@ export async function sendEmail(message: EmailMessage): Promise<{ success: boole
             contentType: att.contentType,
             contentBytes: att.contentBase64,
             isInline: att.isInline !== undefined ? att.isInline : att.contentType.startsWith("image/"),
-            contentId: att.name.replace(/\.[^.]+$/, ""), // Remove extension for contentId
+            contentId: att.contentId || att.name.replace(/\.[^.]+$/, ""), // Use explicit contentId or default fallback
         }));
     }
 

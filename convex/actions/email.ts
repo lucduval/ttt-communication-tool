@@ -25,6 +25,7 @@ export const sendSingleEmail = action({
                     contentType: v.string(),
                     contentBase64: v.string(),
                     isInline: v.optional(v.boolean()),
+                    contentId: v.optional(v.string()),
                 })
             )
         ),
@@ -56,6 +57,7 @@ export const sendTestEmail = action({
                     contentType: v.string(),
                     contentBase64: v.string(),
                     isInline: v.optional(v.boolean()),
+                    contentId: v.optional(v.string()), // Explicit contentId support
                 })
             )
         ),
@@ -102,6 +104,7 @@ export const sendBulkEmails = action({
                     contentType: v.string(),
                     contentBase64: v.string(),
                     isInline: v.optional(v.boolean()),
+                    contentId: v.optional(v.string()), // Explicit contentId support
                 })
             )
         ),

@@ -21,6 +21,18 @@ export const queueCampaignBatches = action({
             name: v.string(),
             variables: v.optional(v.string()),
         }))),
+        attachments: v.optional(
+            v.array(
+                v.object({
+                    name: v.string(),
+                    contentType: v.string(),
+                    storageId: v.optional(v.id("_storage")),
+                    contentBase64: v.optional(v.string()),
+                    isInline: v.optional(v.boolean()),
+                    contentId: v.optional(v.string()), // Explicit mapping
+                })
+            )
+        ),
         channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
         filters: v.optional(v.string()),
     },
@@ -30,6 +42,7 @@ export const queueCampaignBatches = action({
                 campaignId: args.campaignId,
                 filters: args.filters,
                 channel: args.channel,
+                attachments: args.attachments, // Pass attachments to processCampaignFilters
             });
             return { success: true };
         }
@@ -39,6 +52,8 @@ export const queueCampaignBatches = action({
                 campaignId: args.campaignId,
                 recipients: args.recipients,
                 channel: args.channel,
+                // @ts-ignore - The schema validator might need updating for createBatches but it's passed through
+                attachments: args.attachments,
             });
 
             if (args.channel === "personalised") {
@@ -148,7 +163,16 @@ export const processEmailBatch = internalAction({
                                     name: att.name,
                                     contentType: att.contentType,
                                     contentBase64: contentBase64,
-                                    isInline: att.isInline
+                                    isInline: att.isInline,
+                                    contentId: (att as any).contentId, // Explicit contentId
+                                });
+                            } else if (att.contentBase64) {
+                                processedAttachments.push({
+                                    name: att.name,
+                                    contentType: att.contentType,
+                                    contentBase64: att.contentBase64,
+                                    isInline: att.isInline,
+                                    contentId: (att as any).contentId, // Explicit contentId
                                 });
                             }
                         }
@@ -568,6 +592,18 @@ export const processCampaignFilters = internalAction({
         campaignId: v.id("campaigns"),
         filters: v.string(), // JSON stringified filters
         channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
+        attachments: v.optional(
+            v.array(
+                v.object({
+                    name: v.string(),
+                    contentType: v.string(),
+                    storageId: v.optional(v.id("_storage")), // Can originate from Storage
+                    contentBase64: v.optional(v.string()),  // Or raw base64 (for inline templates)
+                    isInline: v.optional(v.boolean()),
+                    contentId: v.optional(v.string()), // Added explicit contentId
+                })
+            )
+        ),
     },
     handler: async (ctx, args) => {
         const { filters, campaignId, channel } = args;

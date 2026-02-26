@@ -23,6 +23,18 @@ export const createBatches = internalMutation({
             variables: v.optional(v.string()),
         })),
         channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
+        attachments: v.optional(
+            v.array(
+                v.object({
+                    name: v.string(),
+                    contentType: v.string(),
+                    storageId: v.optional(v.id("_storage")),
+                    contentBase64: v.optional(v.string()),
+                    isInline: v.optional(v.boolean()),
+                    contentId: v.optional(v.string()), // Added explicit contentId
+                })
+            )
+        ),
     },
     handler: async (ctx, args) => {
         const batchSize = args.channel === "personalised"
@@ -307,13 +319,18 @@ export const startCampaign = mutation({
         filters: v.optional(v.string()),
         subject: v.optional(v.string()),
         htmlBody: v.optional(v.string()),
-        attachments: v.optional(v.array(v.object({
-            name: v.string(),
-            contentType: v.string(),
-            contentBase64: v.optional(v.string()),
-            storageId: v.optional(v.id("_storage")),
-            isInline: v.optional(v.boolean()),
-        }))),
+        attachments: v.optional(
+            v.array(
+                v.object({
+                    name: v.string(),
+                    contentType: v.string(),
+                    storageId: v.optional(v.id("_storage")),
+                    contentBase64: v.optional(v.string()),
+                    isInline: v.optional(v.boolean()),
+                    contentId: v.optional(v.string()), // Added for CID matching
+                })
+            )
+        ),
         whatsappTemplateId: v.optional(v.id("whatsappTemplates")),
         variableValues: v.optional(v.string()),
         createDynamicsActivity: v.optional(v.boolean()),

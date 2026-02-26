@@ -77,6 +77,7 @@ interface UploadedImage {
     name: string;
     contentType: string;
     contentBase64: string;
+    contentId?: string;
 }
 
 export default function NewCampaignPage() {
@@ -379,6 +380,7 @@ export default function NewCampaignPage() {
                         name: file.name,
                         contentType: file.type,
                         contentBase64: base64,
+                        contentId,
                     },
                 ]);
 
@@ -399,6 +401,7 @@ export default function NewCampaignPage() {
                         name: file.name,
                         contentType: file.type,
                         contentBase64: base64,
+                        contentId: file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9]/g, "_")
                     });
                 };
                 reader.onerror = reject;
@@ -412,36 +415,51 @@ export default function NewCampaignPage() {
         return processedAttachments;
     };
 
-    const convertBase64ToCid = (html: string, wrapWithStyle: boolean = false): string => {
-        const processed = html.replace(
-            /<img\s[^>]*src="data:image\/[^"]+"/gi,
-            (match) => {
+    const extractAndConvertBase64Images = (html: string, wrapWithStyle: boolean = false): { processedHtml: string, inlineAttachments: UploadedImage[] } => {
+        const extracted: UploadedImage[] = [];
+        let imageCounter = 0;
+
+        const processedHtml = html.replace(
+            /<img([^>]+)src="data:(image\/[^;]+);base64,([^"]+)"([^>]*)>/gi,
+            (match, beforeSrc, contentType, base64Data, afterSrc) => {
+                imageCounter++;
+
+                // Check if it already has a content-id, otherwise generate one
+                let contentId = `inline_image_${Date.now()}_${imageCounter}`;
                 const contentIdMatch = match.match(/data-content-id="([^"]+)"/i);
                 if (contentIdMatch) {
-                    const contentId = contentIdMatch[1];
-                    return match.replace(/src="data:image\/[^"]+"/, `src="cid:${contentId}"`);
+                    contentId = contentIdMatch[1];
                 }
-                return match;
+
+                extracted.push({
+                    name: `${contentId}.${contentType.split('/')[1] || 'png'}`,
+                    contentType: contentType,
+                    contentBase64: base64Data,
+                    contentId: contentId,
+                });
+
+                return `<img${beforeSrc}src="cid:${contentId}"${afterSrc}>`;
             }
         );
 
+        let finalHtml = processedHtml;
         if (wrapWithStyle && campaignChannel === "email") {
-            return `<div style="font-size: ${fontSize}; font-family: Arial, sans-serif; color: #333; line-height: 1.45; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%;">${processed}</div>`;
+            finalHtml = `<div style="font-size: ${fontSize}; font-family: Arial, sans-serif; color: #333; line-height: 1.45; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%;">${processedHtml}</div>`;
         }
-        return processed;
+
+        return { processedHtml: finalHtml, inlineAttachments: extracted };
     };
 
     const handleSendTest = async (email: string) => {
         setIsSendingTest(true);
         try {
-            // Bake font size into HTML for test email
-            const processedHtml = convertBase64ToCid(htmlContent, true);
+            // Bake font size into HTML and extract inline images for test email
+            const { processedHtml, inlineAttachments } = extractAndConvertBase64Images(htmlContent, true);
             const fileAttachments = await processAttachments();
 
             // Combine inline images and file attachments
-            // We need to cast to any or update UploadedImage type, but the action argument allows extra props
             const allAttachments = [
-                ...uploadedImages.map(img => ({ ...img, isInline: true })),
+                ...inlineAttachments.map(img => ({ ...img, isInline: true })),
                 ...fileAttachments.map(att => ({ ...att, isInline: false }))
             ];
 
@@ -540,7 +558,9 @@ export default function NewCampaignPage() {
                 }
             }
 
-            const processedHtml = campaignChannel === "email" ? convertBase64ToCid(htmlContent, true) : undefined;
+            const { processedHtml, inlineAttachments } = campaignChannel === "email"
+                ? extractAndConvertBase64Images(htmlContent, true)
+                : { processedHtml: undefined, inlineAttachments: [] };
 
             // 1. Process attachments: upload files to Storage if present
             const backendAttachments = [];
@@ -564,11 +584,11 @@ export default function NewCampaignPage() {
                     });
                 }
 
-                const inlineImages = uploadedImages.map(img => ({ ...img, isInline: true }));
+                const inlineImages = inlineAttachments.map(img => ({ ...img, isInline: true }));
                 backendAttachments.push(...inlineImages);
             } else if (campaignChannel === "email") {
                 // Just inline images
-                const inlineImages = uploadedImages.map(img => ({ ...img, isInline: true }));
+                const inlineImages = inlineAttachments.map(img => ({ ...img, isInline: true }));
                 backendAttachments.push(...inlineImages);
             }
 
@@ -982,14 +1002,12 @@ export default function NewCampaignPage() {
                                                 role="switch"
                                                 aria-checked={createOpportunities}
                                                 onClick={() => setCreateOpportunities(!createOpportunities)}
-                                                className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:ring-offset-2 ${
-                                                    createOpportunities ? "bg-[#1E3A5F]" : "bg-gray-200"
-                                                }`}
+                                                className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:ring-offset-2 ${createOpportunities ? "bg-[#1E3A5F]" : "bg-gray-200"
+                                                    }`}
                                             >
                                                 <span
-                                                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
-                                                        createOpportunities ? "translate-x-5" : "translate-x-0"
-                                                    }`}
+                                                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${createOpportunities ? "translate-x-5" : "translate-x-0"
+                                                        }`}
                                                 />
                                             </button>
                                         </div>
@@ -1023,7 +1041,7 @@ export default function NewCampaignPage() {
                                         isOpen={showLivePreview}
                                         onClose={() => setShowLivePreview(false)}
                                         subject={subject}
-                                        htmlContent={convertBase64ToCid(htmlContent, true)}
+                                        htmlContent={extractAndConvertBase64Images(htmlContent, true).processedHtml}
                                         senderEmail={selectedMailbox || undefined}
                                         recipientName={selectedContacts[0]?.fullName || "Recipient Name"}
                                         recipientEmail={selectedContacts[0]?.email || "recipient@example.com"}
@@ -1146,68 +1164,68 @@ export default function NewCampaignPage() {
                                     />
                                 </Card>
                             ) : (
-                            <>
-                            <Card title="Final Preview">
-                                {campaignChannel === "email" ? (
-                                    <EmailPreview
-                                        subject={subject}
-                                        htmlContent={htmlContent}
-                                        senderEmail={selectedMailbox || undefined}
-                                        recipientName={selectedContacts[0]?.fullName}
-                                        recipientEmail={selectedContacts[0]?.email || undefined}
-                                        attachments={attachments}
-                                    />
-                                ) : (
-                                    <WhatsAppPreview
-                                        template={selectedTemplate}
-                                        variableValues={variableValues}
-                                        recipientName={selectedContacts[0]?.fullName}
-                                        recipientPhone={selectedContacts[0]?.phone || undefined}
-                                    />
-                                )}
-                            </Card>
+                                <>
+                                    <Card title="Final Preview">
+                                        {campaignChannel === "email" ? (
+                                            <EmailPreview
+                                                subject={subject}
+                                                htmlContent={htmlContent}
+                                                senderEmail={selectedMailbox || undefined}
+                                                recipientName={selectedContacts[0]?.fullName}
+                                                recipientEmail={selectedContacts[0]?.email || undefined}
+                                                attachments={attachments}
+                                            />
+                                        ) : (
+                                            <WhatsAppPreview
+                                                template={selectedTemplate}
+                                                variableValues={variableValues}
+                                                recipientName={selectedContacts[0]?.fullName}
+                                                recipientPhone={selectedContacts[0]?.phone || undefined}
+                                            />
+                                        )}
+                                    </Card>
 
-                            {campaignChannel === "email" && (
-                                <Card className="border-amber-200 bg-amber-50">
-                                    <div className="flex items-center gap-3">
-                                        <TestTube className="text-amber-600" size={24} />
-                                        <div className="flex-1">
-                                            <h4 className="font-semibold text-amber-800">
-                                                Send a test email first
-                                            </h4>
-                                            <p className="text-sm text-amber-700">
-                                                We recommend testing before sending to all recipients
-                                            </p>
-                                        </div>
-                                        <Button variant="secondary" onClick={() => setShowTestModal(true)}>
-                                            <TestTube size={16} />
-                                            Send Test
-                                        </Button>
-                                    </div>
-                                </Card>
-                            )}
+                                    {campaignChannel === "email" && (
+                                        <Card className="border-amber-200 bg-amber-50">
+                                            <div className="flex items-center gap-3">
+                                                <TestTube className="text-amber-600" size={24} />
+                                                <div className="flex-1">
+                                                    <h4 className="font-semibold text-amber-800">
+                                                        Send a test email first
+                                                    </h4>
+                                                    <p className="text-sm text-amber-700">
+                                                        We recommend testing before sending to all recipients
+                                                    </p>
+                                                </div>
+                                                <Button variant="secondary" onClick={() => setShowTestModal(true)}>
+                                                    <TestTube size={16} />
+                                                    Send Test
+                                                </Button>
+                                            </div>
+                                        </Card>
+                                    )}
 
-                            {campaignChannel === "whatsapp" && (
-                                <Card className="border-amber-200 bg-amber-50">
-                                    <div className="flex items-center gap-3">
-                                        <AlertTriangle className="text-amber-600" size={24} />
-                                        <div className="flex-1">
-                                            <h4 className="font-semibold text-amber-800">
-                                                WhatsApp Message Costs
-                                            </h4>
-                                            <p className="text-sm text-amber-700">
-                                                Marketing messages may incur costs per message. Check your
-                                                Meta Business Suite for pricing details.
-                                            </p>
-                                        </div>
-                                        <Button variant="secondary" onClick={() => setShowWhatsAppTestModal(true)}>
-                                            <MessageSquare size={16} />
-                                            Send Test
-                                        </Button>
-                                    </div>
-                                </Card>
-                            )}
-                            </>
+                                    {campaignChannel === "whatsapp" && (
+                                        <Card className="border-amber-200 bg-amber-50">
+                                            <div className="flex items-center gap-3">
+                                                <AlertTriangle className="text-amber-600" size={24} />
+                                                <div className="flex-1">
+                                                    <h4 className="font-semibold text-amber-800">
+                                                        WhatsApp Message Costs
+                                                    </h4>
+                                                    <p className="text-sm text-amber-700">
+                                                        Marketing messages may incur costs per message. Check your
+                                                        Meta Business Suite for pricing details.
+                                                    </p>
+                                                </div>
+                                                <Button variant="secondary" onClick={() => setShowWhatsAppTestModal(true)}>
+                                                    <MessageSquare size={16} />
+                                                    Send Test
+                                                </Button>
+                                            </div>
+                                        </Card>
+                                    )}
+                                </>
                             )}
                         </div>
                     )}
