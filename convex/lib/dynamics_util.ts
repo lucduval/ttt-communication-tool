@@ -121,34 +121,55 @@ export async function fetchMatchingContacts(
     let nextLink: string | null = initialEndpoint;
     let pageCount = 0;
     const MAX_PAGES = 1000; // 50k contacts limit safe guard
+    const MAX_PAGE_RETRIES = 3;
 
     while (nextLink && pageCount < MAX_PAGES) {
         pageCount++;
-        if (nextLink.startsWith("http")) {
-            nextLink = nextLink.replace(/^.*\/api\/data\/v9\.2\//, "");
+        const currentLink: string = nextLink;
+        if (currentLink.startsWith("http")) {
+            nextLink = currentLink.replace(/^.*\/api\/data\/v9\.2\//, "");
+        } else {
+            nextLink = currentLink;
         }
 
-        try {
-            const response: SimpleContactsResponse = await dynamicsRequest<SimpleContactsResponse>(nextLink);
+        if (!nextLink) break;
 
-            if (response.value && response.value.length > 0) {
-                const chunk = response.value.map((contact) => ({
-                    id: contact.contactid,
-                    fullName: contact.fullname || "",
-                    email: contact.emailaddress1,
-                    phone: contact.mobilephone,
-                    internationalPhone: (contact as any).icon_formattedmobilenumber || null,
-                    referralCode: contact.riivo_referralcode || null,
-                }));
+        let pageSuccess = false;
+        let lastError: unknown;
 
-                await onChunk(chunk);
+        for (let attempt = 1; attempt <= MAX_PAGE_RETRIES; attempt++) {
+            try {
+                const response: SimpleContactsResponse = await dynamicsRequest<SimpleContactsResponse>(nextLink!);
+
+                if (response.value && response.value.length > 0) {
+                    const chunk = response.value.map((contact) => ({
+                        id: contact.contactid,
+                        fullName: contact.fullname || "",
+                        email: contact.emailaddress1,
+                        phone: contact.mobilephone,
+                        internationalPhone: (contact as any).icon_formattedmobilenumber || null,
+                        referralCode: contact.riivo_referralcode || null,
+                    }));
+
+                    await onChunk(chunk);
+                }
+
+                nextLink = response["@odata.nextLink"] || null;
+                pageSuccess = true;
+                break;
+            } catch (error) {
+                lastError = error;
+                console.warn(`Error fetching contacts page ${pageCount} (attempt ${attempt}/${MAX_PAGE_RETRIES}):`, error);
+                if (attempt < MAX_PAGE_RETRIES) {
+                    // Exponential backoff: 1s, 2s, 4s
+                    await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+                }
             }
+        }
 
-            nextLink = response["@odata.nextLink"] || null;
-        } catch (error) {
-            console.error(`Error fetching contacts page ${pageCount}:`, error);
-            // Decide whether to continue or abort. For now, we'll abort to avoid infinite loops or partial data states being unknown
-            throw error;
+        if (!pageSuccess) {
+            console.error(`Failed to fetch contacts page ${pageCount} after ${MAX_PAGE_RETRIES} attempts. Aborting.`, lastError);
+            throw lastError;
         }
     }
 }
