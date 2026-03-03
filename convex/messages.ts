@@ -10,25 +10,29 @@ const SERVER_FILTERABLE_STATUSES = ["pending", "sent", "delivered", "failed"];
 export const listByCampaign = query({
     args: {
         campaignId: v.id("campaigns"),
-        paginationOpts: paginationOptsValidator,
+        paginationOpts: v.optional(paginationOptsValidator),
         status: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
-        if (args.status && SERVER_FILTERABLE_STATUSES.includes(args.status)) {
-            return await ctx.db
+        const useStatusIndex = !!(args.status && SERVER_FILTERABLE_STATUSES.includes(args.status));
+        const baseQuery = useStatusIndex
+            ? ctx.db
                 .query("messages")
                 .withIndex("by_campaign_status", (q) =>
                     q.eq("campaignId", args.campaignId).eq("status", args.status!)
                 )
                 .order("desc")
-                .paginate(args.paginationOpts);
+            : ctx.db
+                .query("messages")
+                .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
+                .order("desc");
+
+        if (args.paginationOpts) {
+            return await baseQuery.paginate(args.paginationOpts);
         }
 
-        return await ctx.db
-            .query("messages")
-            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
-            .order("desc")
-            .paginate(args.paginationOpts);
+        // Fallback for older clients: cap at 500 to avoid the 8192 array limit
+        return await baseQuery.take(500);
     },
 });
 
