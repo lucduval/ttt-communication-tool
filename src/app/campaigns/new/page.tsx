@@ -1087,10 +1087,15 @@ export default function NewCampaignPage() {
                                     <div className="p-4 bg-blue-50 rounded-lg">
                                         <div className="text-3xl font-bold text-[#1E3A5F]">
                                             {campaignChannel === "email" || campaignChannel === "personalised"
-                                                ? selectedContacts.filter((c) => c.email).length
+                                                ? isSelectAllActive
+                                                    ? (virtualTotalCount || 0)
+                                                    : selectedContacts.filter((c) => c.email).length
                                                 : whatsappRecipientCount}
                                         </div>
                                         <div className="text-sm text-gray-600">Recipients</div>
+                                        {isSelectAllActive && virtualTotalCount === 5000 && (
+                                            <div className="text-xs text-amber-600 mt-1">5,000+ matching contacts</div>
+                                        )}
                                     </div>
                                     <div className="p-4 bg-purple-50 rounded-lg">
                                         <div className="text-lg font-semibold text-purple-700 capitalize">
