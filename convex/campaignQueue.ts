@@ -121,12 +121,16 @@ export const processEmailBatch = internalAction({
 
             // Process each recipient in the batch
             for (const recipient of batch.recipients) {
-                if (!recipient.email) {
+                // Strip whitespace and Unicode space characters (e.g. \u00a0 from Dynamics CRM)
+                // that pass a truthiness check but are rejected by the Graph API.
+                const cleanEmail = recipient.email?.replace(/[\u00a0\u200B-\u200D\uFEFF\s]/g, "");
+
+                if (!cleanEmail || !cleanEmail.includes("@")) {
                     failedCount++;
                     results.push({
                         recipientId: recipient.id,
                         success: false,
-                        error: "No email address",
+                        error: `Invalid email address: "${recipient.email}"`,
                     });
                     continue;
                 }
@@ -181,7 +185,7 @@ export const processEmailBatch = internalAction({
                     // Resolve merge field values for this recipient
                     const recipientFirstName = recipient.name?.split(" ")[0] || recipient.name || "";
                     const recipientFullName = recipient.name || "";
-                    const recipientEmail = recipient.email || "";
+                    const recipientEmail = cleanEmail;
 
                     const applyMergeFields = (text: string) =>
                         text
@@ -217,7 +221,7 @@ export const processEmailBatch = internalAction({
                     const result = await sendEmail({
                         subject: mergedSubject,
                         body: emailBody,
-                        toRecipients: [{ email: recipient.email, name: recipient.name }],
+                        toRecipients: [{ email: cleanEmail, name: recipient.name }],
                         attachments: processedAttachments,
                         fromMailbox: campaign.fromMailbox,
                         headers: {

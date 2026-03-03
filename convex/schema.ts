@@ -92,6 +92,7 @@ export default defineSchema({
         opportunityId: v.optional(v.string()),
     })
         .index("by_campaign", ["campaignId"])
+        .index("by_campaign_status", ["campaignId", "status"])
         .index("by_campaign_recipient", ["campaignId", "recipientId"])
         .index("by_status", ["status"])
         .index("by_external_id", ["externalMessageId"]),

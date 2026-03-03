@@ -1,31 +1,47 @@
 import { v } from "convex/values";
+import { paginationOptsValidator } from "convex/server";
 import { internalMutation, internalQuery, query } from "./_generated/server";
 
+// Statuses that can be filtered server-side via the by_campaign_status index.
+// "opened" and "clicked" are engagement states, not message statuses, so they
+// are handled client-side after loading the full paginated set.
+const SERVER_FILTERABLE_STATUSES = ["pending", "sent", "delivered", "failed"];
+
 export const listByCampaign = query({
-    args: { campaignId: v.id("campaigns") },
+    args: {
+        campaignId: v.id("campaigns"),
+        paginationOpts: paginationOptsValidator,
+        status: v.optional(v.string()),
+    },
     handler: async (ctx, args) => {
+        if (args.status && SERVER_FILTERABLE_STATUSES.includes(args.status)) {
+            return await ctx.db
+                .query("messages")
+                .withIndex("by_campaign_status", (q) =>
+                    q.eq("campaignId", args.campaignId).eq("status", args.status!)
+                )
+                .order("desc")
+                .paginate(args.paginationOpts);
+        }
+
         return await ctx.db
             .query("messages")
             .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
             .order("desc")
-            .collect();
+            .paginate(args.paginationOpts);
     },
 });
 
 export const getCampaignStats = query({
     args: { campaignId: v.id("campaigns") },
     handler: async (ctx, args) => {
-        const messages = await ctx.db
-            .query("messages")
-            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
-            .collect();
-
+        const campaign = await ctx.db.get(args.campaignId);
+        if (!campaign) return null;
         return {
-            total: messages.length,
-            pending: messages.filter((m) => m.status === "pending").length,
-            sent: messages.filter((m) => m.status === "sent").length,
-            delivered: messages.filter((m) => m.status === "delivered").length,
-            failed: messages.filter((m) => m.status === "failed").length,
+            total: campaign.totalRecipients,
+            sent: campaign.sentCount || 0,
+            delivered: campaign.deliveredCount || 0,
+            failed: campaign.failedCount || 0,
         };
     },
 });

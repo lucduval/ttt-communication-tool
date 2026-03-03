@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-import { useQuery } from "convex/react";
+import { useQuery, usePaginatedQuery } from "convex/react";
 import { api } from "../../../../convex/_generated/api";
 import { useParams } from "next/navigation";
 import { format } from "date-fns";
@@ -18,13 +18,17 @@ export default function CampaignDetailsPage() {
     const [statusFilter, setStatusFilter] = useState<string>("all");
 
     const campaign = useQuery(api.campaigns.get, { id: campaignId });
-    const messages = useQuery(api.messages.listByCampaign, { campaignId });
+    const { results: messages, status: messagesStatus, loadMore } = usePaginatedQuery(
+        api.messages.listByCampaign,
+        { campaignId, status: statusFilter === "opened" || statusFilter === "clicked" ? undefined : statusFilter === "all" ? undefined : statusFilter },
+        { initialNumItems: 100 }
+    );
     const batches = useQuery(api.campaignBatches.getBatches, { campaignId });
     const stats = useQuery(api.messages.getCampaignStats, { campaignId });
     const engagement = useQuery(api.messages.getEngagementRecipients, { campaignId });
     const opportunityMessages = useQuery(api.messages.listOpportunityMessages, { campaignId });
 
-    if (!campaign || !messages) {
+    if (!campaign || messagesStatus === "LoadingFirstPage") {
         return <div className="p-8 text-center">Loading...</div>;
     }
 
@@ -51,13 +55,16 @@ export default function CampaignDetailsPage() {
     const openedIdSet = new Set(engagement?.openedIds ?? []);
     const clickedIdSet = new Set(engagement?.clickedIds ?? []);
 
-    // Filter messages based on status or engagement
-    const filteredMessages = messages.filter((message) => {
-        if (statusFilter === "all") return true;
-        if (statusFilter === "opened") return openedIdSet.has(message.recipientId);
-        if (statusFilter === "clicked") return clickedIdSet.has(message.recipientId);
-        return message.status === statusFilter;
-    });
+    // Status filters are applied server-side via the paginated query.
+    // "opened" and "clicked" are engagement states (not DB statuses) so they
+    // are filtered client-side from the currently loaded page.
+    const filteredMessages = (statusFilter === "opened" || statusFilter === "clicked")
+        ? messages.filter((message) =>
+            statusFilter === "opened"
+                ? openedIdSet.has(message.recipientId)
+                : clickedIdSet.has(message.recipientId)
+        )
+        : messages;
 
     const hasEngagementData = campaign.channel === "email" &&
         (campaign.opensCount !== undefined || campaign.clicksCount !== undefined);
@@ -317,6 +324,23 @@ export default function CampaignDetailsPage() {
                         </tbody>
                     </table>
                 </div>
+                {messagesStatus === "CanLoadMore" && (
+                    <div className="px-6 py-4 border-t border-gray-200 text-center">
+                        <Button
+                            onClick={() => loadMore(100)}
+                            variant="outline"
+                            className="text-sm"
+                        >
+                            Load more ({messages.length} loaded so far)
+                        </Button>
+                    </div>
+                )}
+                {messagesStatus === "LoadingMore" && (
+                    <div className="px-6 py-4 border-t border-gray-200 text-center text-sm text-gray-500 flex items-center justify-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Loading more...
+                    </div>
+                )}
             </div>
         </div>
     );
