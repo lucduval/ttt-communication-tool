@@ -3,6 +3,7 @@
 import { action } from "../_generated/server";
 import { v } from "convex/values";
 import { getGraphAccessToken } from "../lib/graph_client";
+import { internal } from "../_generated/api";
 
 interface MailboxInfo {
     id: string;
@@ -30,20 +31,34 @@ export const getAvailableMailboxes = action({
         ),
         defaultMailbox: v.union(v.string(), v.null()),
     }),
-    handler: async () => {
-        // Get configured shared mailboxes from environment
-        // Format: "name1:email1@domain.com,name2:email2@domain.com" or just "email1@domain.com,email2@domain.com"
-        const configuredMailboxes = process.env.SHARED_MAILBOX_ADDRESSES || process.env.SHARED_MAILBOX_ADDRESS || "";
-        const defaultMailbox = process.env.SHARED_MAILBOX_ADDRESS || null;
+    handler: async (ctx) => {
+        const identity = await ctx.auth.getUserIdentity();
+        if (!identity) {
+            return { mailboxes: [], defaultMailbox: null };
+        }
 
-        if (!configuredMailboxes) {
+        // We need to fetch the user role from db, but this is an action, not a query.
+        // So we call an internal query to get user details
+        const user = await ctx.runQuery(internal.users.getCurrentUserInternal, { clerkId: identity.subject });
+
+        if (!user || user.status !== "active") {
+            return { mailboxes: [], defaultMailbox: null };
+        }
+
+        const isAdmin = user.role === "admin";
+        const userEmail = user.email.toLowerCase();
+
+        // Get configured shared mailboxes from environment
+        const configuredMailboxesStr = process.env.SHARED_MAILBOX_ADDRESSES || process.env.SHARED_MAILBOX_ADDRESS || "";
+
+        if (!configuredMailboxesStr) {
             return {
                 mailboxes: [],
                 defaultMailbox: null,
             };
         }
 
-        const mailboxes: MailboxInfo[] = configuredMailboxes.split(",").map((entry, index) => {
+        const allMailboxes: MailboxInfo[] = configuredMailboxesStr.split(",").map((entry) => {
             const trimmed = entry.trim();
             if (trimmed.includes(":")) {
                 const [displayName, mail] = trimmed.split(":");
@@ -62,8 +77,36 @@ export const getAvailableMailboxes = action({
             };
         });
 
+        // Ensure user's own email is always in the list if they are allowed to send from it
+        // We can optionally add it if it's not in the env vars, but graph API needs permissions for it.
+        // Assuming the app has Tenant-wide send permissions, we can just allow the user to send as themselves.
+        const userMailbox: MailboxInfo = {
+            id: userEmail,
+            displayName: user.name || userEmail.split("@")[0],
+            mail: userEmail
+        };
+
+        const hasUserMailbox = allMailboxes.some(m => m.mail.toLowerCase() === userEmail);
+        if (!hasUserMailbox) {
+            allMailboxes.push(userMailbox);
+        }
+
+        // Filter mailboxes based on role
+        let allowedMailboxes = allMailboxes;
+        if (!isAdmin) {
+            allowedMailboxes = allMailboxes.filter(m => m.mail.toLowerCase() === userEmail);
+        }
+
+        // If default from env is not in the allowed list, default is null to force selection or use first allowed
+        const configuredDefault = process.env.SHARED_MAILBOX_ADDRESS || null;
+        let defaultMailbox = configuredDefault;
+
+        if (defaultMailbox && !allowedMailboxes.some((m) => m.mail.toLowerCase() === defaultMailbox?.toLowerCase())) {
+            defaultMailbox = allowedMailboxes.length > 0 ? allowedMailboxes[0].mail : null;
+        }
+
         return {
-            mailboxes,
+            mailboxes: allowedMailboxes,
             defaultMailbox,
         };
     },

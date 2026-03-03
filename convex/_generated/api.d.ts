@@ -15,6 +15,7 @@ import type * as actions_graph_mailboxes from "../actions/graph_mailboxes.js";
 import type * as actions_personalised from "../actions/personalised.js";
 import type * as actions_whatsapp from "../actions/whatsapp.js";
 import type * as admin from "../admin.js";
+import type * as backfill from "../backfill.js";
 import type * as bounces from "../bounces.js";
 import type * as campaignBatches from "../campaignBatches.js";
 import type * as campaignQueue from "../campaignQueue.js";
@@ -60,6 +61,7 @@ declare const fullApi: ApiFromModules<{
   "actions/personalised": typeof actions_personalised;
   "actions/whatsapp": typeof actions_whatsapp;
   admin: typeof admin;
+  backfill: typeof backfill;
   bounces: typeof bounces;
   campaignBatches: typeof campaignBatches;
   campaignQueue: typeof campaignQueue;

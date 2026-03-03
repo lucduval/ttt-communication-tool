@@ -77,14 +77,22 @@ export const createBatch = internalMutation({
                 recipientEmail: v.optional(v.string()),
                 recipientPhone: v.optional(v.string()),
                 recipientName: v.string(),
-                status: v.string(),
-                channel: v.union(v.literal("email"), v.literal("whatsapp")),
+            status: v.string(),
+            channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
             })
         ),
     },
     handler: async (ctx, args) => {
         for (const message of args.messages) {
-            await ctx.db.insert("messages", message);
+            const existing = await ctx.db
+                .query("messages")
+                .withIndex("by_campaign_recipient", (q) =>
+                    q.eq("campaignId", message.campaignId).eq("recipientId", message.recipientId)
+                )
+                .first();
+            if (!existing) {
+                await ctx.db.insert("messages", message);
+            }
         }
     },
 });

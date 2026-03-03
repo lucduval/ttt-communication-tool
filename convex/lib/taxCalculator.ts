@@ -135,12 +135,18 @@ export function parseAgeFromIdNumber(idNumber: string): number | null {
 }
 
 /**
- * Future value of an ordinary annuity: FV = PMT × [((1 + r)^n − 1) / r]
- * Assumes annual contributions made at the end of each year.
+ * Future value of an ordinary annuity with monthly compounding.
+ * FV = PMT × [((1 + r/12)^(n*12) − 1) / (r/12)]
+ * Assumes monthly contributions made at the end of each month.
  */
 function futureValueAnnuity(annualPayment: number, rate: number, years: number): number {
     if (years <= 0 || rate <= 0) return annualPayment * Math.max(years, 0);
-    return annualPayment * ((Math.pow(1 + rate, years) - 1) / rate);
+
+    const monthlyRate = rate / 12;
+    const months = years * 12;
+    const monthlyPayment = annualPayment / 12;
+
+    return monthlyPayment * ((Math.pow(1 + monthlyRate, months) - 1) / monthlyRate);
 }
 
 export function calculateRetirementProjection(
@@ -189,11 +195,11 @@ export function calculateOptions(taxProfile: TaxProfileData, age?: number | null
 
     const retirementProjection = age != null
         ? calculateRetirementProjection(
-              optionAScenario.additionalRaContribution,
-              optionBScenario.additionalRaContribution,
-              optionCScenario.additionalRaContribution,
-              age,
-          )
+            optionAScenario.additionalRaContribution,
+            optionBScenario.additionalRaContribution,
+            optionCScenario.additionalRaContribution,
+            age,
+        )
         : null;
 
     return {

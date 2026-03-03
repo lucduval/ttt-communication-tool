@@ -635,10 +635,10 @@ export default function NewCampaignPage() {
                 return selectedIds.size > 0 || isSelectAllActive;
             case "compose":
                 if (campaignChannel === "personalised") {
-                    return aiUserPrompt.trim() !== "" && subject.trim() !== "";
+                    return aiUserPrompt.trim() !== "" && subject.trim() !== "" && selectedMailbox !== null;
                 }
                 if (campaignChannel === "email") {
-                    return subject.trim() !== "" && htmlContent.trim() !== "";
+                    return subject.trim() !== "" && htmlContent.trim() !== "" && selectedMailbox !== null;
                 }
                 return selectedTemplate !== null;
             case "preview":
@@ -780,25 +780,29 @@ export default function NewCampaignPage() {
                         ))}
                     </div>
 
-                    {/* Navigation - Top */}
+                    {/* Navigation - Floating Bottom */}
                     {!sendComplete && (
-                        <div className="flex justify-between pb-2">
-                            <Button
-                                variant="secondary"
-                                onClick={goPrev}
-                                disabled={stepIndex <= 1}
-                            >
-                                <ArrowLeft size={16} />
-                                Back
-                            </Button>
+                        <>
+                            <div className="fixed bottom-6 left-6 md:bottom-8 md:left-72 z-50 transition-all">
+                                <Button
+                                    variant="secondary"
+                                    onClick={goPrev}
+                                    disabled={stepIndex <= 1}
+                                >
+                                    <ArrowLeft size={16} />
+                                    Back
+                                </Button>
+                            </div>
 
                             {currentStep !== "send" && (
-                                <Button onClick={goNext} disabled={false}>
-                                    {currentStep === "preview" ? "Proceed to Send" : "Next"}
-                                    <ArrowRight size={16} />
-                                </Button>
+                                <div className="fixed bottom-6 right-6 md:bottom-8 md:right-8 z-50 transition-all">
+                                    <Button onClick={goNext} disabled={false}>
+                                        {currentStep === "preview" ? "Proceed to Send" : "Next"}
+                                        <ArrowRight size={16} />
+                                    </Button>
+                                </div>
                             )}
-                        </div>
+                        </>
                     )}
 
                     {currentStep === "channel" && (
@@ -828,8 +832,11 @@ export default function NewCampaignPage() {
                                     selectedChannel={campaignChannel}
                                     onChannelChange={(ch) => {
                                         setCampaignChannel(ch);
-                                        if (ch === "personalised" && !subject) {
-                                            setSubject(DEFAULT_PERSONALISED_SUBJECT);
+                                        if (ch === "personalised") {
+                                            setCreateOpportunities(true);
+                                            if (!subject) setSubject(DEFAULT_PERSONALISED_SUBJECT);
+                                        } else {
+                                            setCreateOpportunities(false);
                                         }
                                     }}
                                     campaignTitle={campaignTitle}

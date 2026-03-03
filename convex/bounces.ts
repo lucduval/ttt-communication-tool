@@ -1,7 +1,7 @@
 
 
 import { v } from "convex/values";
-import { internalMutation, internalAction } from "./_generated/server";
+import { action, internalMutation, internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { getGraphAccessToken } from "./lib/graph_client";
 
@@ -61,28 +61,54 @@ export const processBounces = internalAction({
                     let campaignId: string | null = null;
                     let recipientId: string | null = null;
 
-                    // Strategy 1: Check if the NDR body contains our custom headers
-                    // Outlook often puts the original headers in the body of the bounce message
-                    const bodyContent = message.body.content;
-
-                    // Strip HTML tags and decode common entities for reliable header extraction
-                    // NDR bodies are HTML, so headers may be wrapped in tags or entity-encoded
-                    const plainText = bodyContent
-                        .replace(/<[^>]*>/g, " ")
-                        .replace(/&nbsp;/gi, " ")
-                        .replace(/&#160;/g, " ")
-                        .replace(/&amp;/gi, "&")
-                        .replace(/&lt;/gi, "<")
-                        .replace(/&gt;/gi, ">");
-
-                    const campaignMatch = plainText.match(/X-Campaign-ID:\s*([a-zA-Z0-9]+)/i);
-                    const recipientMatch = plainText.match(/X-Recipient-ID:\s*([a-zA-Z0-9-_]+)/i);
-
-                    if (campaignMatch && campaignMatch[1]) {
-                        campaignId = campaignMatch[1];
+                    // Strategy 1: Check attachments for original message headers (Graph API encapsulates original message)
+                    if (message.hasAttachments) {
+                        try {
+                            const attUrl = `https://graph.microsoft.com/v1.0/users/${sharedMailbox}/messages/${message.id}/attachments?$expand=microsoft.graph.itemAttachment/item`;
+                            const attRes = await fetch(attUrl, { headers: { Authorization: `Bearer ${token}` } });
+                            if (attRes.ok) {
+                                const attData = await attRes.json();
+                                for (const att of attData.value) {
+                                    if (att.item?.internetMessageHeaders) {
+                                        for (const header of att.item.internetMessageHeaders) {
+                                            if (header.name.toLowerCase() === 'x-campaign-id') {
+                                                campaignId = header.value;
+                                            }
+                                            if (header.name.toLowerCase() === 'x-recipient-id') {
+                                                recipientId = header.value;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.error(`Failed to fetch attachments for bounce from ${sharedMailbox} (${message.id}):`, e);
+                        }
                     }
-                    if (recipientMatch && recipientMatch[1]) {
-                        recipientId = recipientMatch[1];
+
+                    // Strategy 2: Check if the NDR body contains our custom headers as a fallback
+                    if (!campaignId || !recipientId) {
+                        const bodyContent = message.body.content;
+
+                        // Strip HTML tags and decode common entities for reliable header extraction
+                        // NDR bodies are HTML, so headers may be wrapped in tags or entity-encoded
+                        const plainText = bodyContent
+                            .replace(/<[^>]*>/g, " ")
+                            .replace(/&nbsp;/gi, " ")
+                            .replace(/&#160;/g, " ")
+                            .replace(/&amp;/gi, "&")
+                            .replace(/&lt;/gi, "<")
+                            .replace(/&gt;/gi, ">");
+
+                        const campaignMatch = plainText.match(/X-Campaign-ID:\s*([a-zA-Z0-9]+)/i);
+                        const recipientMatch = plainText.match(/X-Recipient-ID:\s*([a-zA-Z0-9-_]+)/i);
+
+                        if (!campaignId && campaignMatch && campaignMatch[1]) {
+                            campaignId = campaignMatch[1];
+                        }
+                        if (!recipientId && recipientMatch && recipientMatch[1]) {
+                            recipientId = recipientMatch[1];
+                        }
                     }
 
                     if (campaignId && recipientId) {
@@ -203,5 +229,117 @@ export const recordBounces = internalMutation({
                 console.warn(`Message not found for bounce: Campaign ${campaignId}, Recipient ${recipientId}`);
             }
         }
+    },
+});
+
+/**
+ * Debug action to fetch recent NDRs (including read ones) to inspect their structure
+ * Useful for diagnosing why bounce tracking isn't finding headers
+ */
+export const debugBounces = action({
+    args: {
+        limit: v.optional(v.number()),
+    },
+    handler: async (ctx, args) => {
+        const token = await getGraphAccessToken();
+        const sharedMailboxesEnv = process.env.SHARED_MAILBOX_ADDRESS;
+
+        if (!sharedMailboxesEnv) return { error: "SHARED_MAILBOX_ADDRESS is not configured" };
+
+        const sharedMailboxes = sharedMailboxesEnv.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+        if (sharedMailboxes.length === 0) return { error: "SHARED_MAILBOX_ADDRESS is empty" };
+
+        const filter = "contains(subject, 'Undeliverable') or contains(subject, 'Delivery Status Notification')";
+        const top = args.limit || 5;
+        const results: any[] = [];
+
+        for (const sharedMailbox of sharedMailboxes) {
+            try {
+                // Fetch messages
+                const url = `https://graph.microsoft.com/v1.0/users/${sharedMailbox}/messages?$filter=${encodeURIComponent(filter)}&$top=${top}&$select=id,subject,body,internetMessageHeaders,receivedDateTime,hasAttachments`;
+
+                const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                if (!response.ok) {
+                    results.push({ mailbox: sharedMailbox, error: await response.text() });
+                    continue;
+                }
+
+                const data = await response.json();
+                const messages = data.value;
+
+                for (const message of messages) {
+                    let campaignId: string | null = null;
+                    let recipientId: string | null = null;
+                    let attachments = null;
+                    if (message.hasAttachments) {
+                        try {
+                            const attUrl = `https://graph.microsoft.com/v1.0/users/${sharedMailbox}/messages/${message.id}/attachments?$expand=microsoft.graph.itemAttachment/item`;
+                            const attRes = await fetch(attUrl, { headers: { Authorization: `Bearer ${token}` } });
+                            if (attRes.ok) {
+                                const attData = await attRes.json();
+                                // Extract custom headers if any
+                                attachments = attData.value.map((a: any) => ({
+                                    name: a.name,
+                                    contentType: a.contentType,
+                                    itemHeaders: a.item?.internetMessageHeaders
+                                }));
+
+                                for (const att of attData.value) {
+                                    if (att.item?.internetMessageHeaders) {
+                                        for (const header of att.item.internetMessageHeaders) {
+                                            if (header.name.toLowerCase() === 'x-campaign-id') {
+                                                campaignId = header.value;
+                                            }
+                                            if (header.name.toLowerCase() === 'x-recipient-id') {
+                                                recipientId = header.value;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            attachments = { error: String(e) };
+                        }
+                    }
+
+                    if (!campaignId || !recipientId) {
+                        const bodyContent = message.body?.content || "";
+                        const plainText = bodyContent
+                            .replace(/<[^>]*>/g, " ")
+                            .replace(/&nbsp;/gi, " ")
+                            .replace(/&#160;/g, " ")
+                            .replace(/&amp;/gi, "&")
+                            .replace(/&lt;/gi, "<")
+                            .replace(/&gt;/gi, ">");
+
+                        const campaignMatch = plainText.match(/X-Campaign-ID:\s*([a-zA-Z0-9]+)/i);
+                        const recipientMatch = plainText.match(/X-Recipient-ID:\s*([a-zA-Z0-9-_]+)/i);
+
+                        if (!campaignId && campaignMatch && campaignMatch[1]) {
+                            campaignId = campaignMatch[1];
+                        }
+                        if (!recipientId && recipientMatch && recipientMatch[1]) {
+                            recipientId = recipientMatch[1];
+                        }
+                    }
+
+                    results.push({
+                        mailbox: sharedMailbox,
+                        id: message.id,
+                        subject: message.subject,
+                        receivedDateTime: message.receivedDateTime,
+                        hasAttachments: message.hasAttachments,
+                        campaignId,
+                        recipientId,
+                        // fullBody: message.body?.content, // Excluded to keep output small
+                        attachments
+                    });
+                }
+            } catch (error) {
+                results.push({ mailbox: sharedMailbox, error: String(error) });
+            }
+        }
+
+        return results;
     },
 });

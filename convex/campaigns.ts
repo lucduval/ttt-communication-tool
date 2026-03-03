@@ -10,12 +10,20 @@ export const list = query({
 
         if (!access.user) throw new Error("User not found");
 
-        const campaigns = await ctx.db
+        if (access.user.role === "admin") {
+            // Admins can see all campaigns
+            return await ctx.db
+                .query("campaigns")
+                .order("desc")
+                .collect();
+        }
+
+        // Standard users only see their own campaigns
+        return await ctx.db
             .query("campaigns")
-            .withIndex("by_user", (q) => q.eq("createdBy", access.user.clerkId!))
+            .withIndex("by_user", (q) => q.eq("createdBy", access.user!.clerkId!))
             .order("desc")
             .collect();
-        return campaigns;
     },
 });
 
@@ -34,18 +42,28 @@ export const search = query({
     args: { query: v.string() },
     handler: async (ctx, args) => {
         const access = await checkAccessHelper(ctx);
-        if (!access.hasAccess) throw new Error("Unauthorized");
+        if (!access.hasAccess || !access.user) throw new Error("Unauthorized");
 
         if (!args.query) {
             return [];
         }
 
-        const campaigns = await ctx.db
+        if (access.user.role === "admin") {
+            return await ctx.db
+                .query("campaigns")
+                .withSearchIndex("search_name", (q) => q.search("name", args.query))
+                .take(10);
+        }
+
+        // Regular users only search within their own campaigns
+        // Search index doesn't support complex filtering well, so we search and then filter in memory
+        // since we only take 10 anyway, we might grab 50 and filter to 10.
+        const allMatches = await ctx.db
             .query("campaigns")
             .withSearchIndex("search_name", (q) => q.search("name", args.query))
-            .take(10);
+            .take(50);
 
-        return campaigns;
+        return allMatches.filter(c => c.createdBy === access.user!.clerkId).slice(0, 10);
     },
 });
 

@@ -69,6 +69,19 @@ export const createBatches = internalMutation({
                 successCount: 0,
                 failedCount: 0,
             });
+
+            // Create message records so the frontend can display them and tracking can link to them
+            for (const recipient of batchRecipients) {
+                await ctx.db.insert("messages", {
+                    campaignId: args.campaignId,
+                    recipientId: recipient.id,
+                    recipientEmail: recipient.email,
+                    recipientPhone: recipient.phone,
+                    recipientName: recipient.name,
+                    status: "pending",
+                    channel: args.channel,
+                });
+            }
         }
 
         // Only reset currentBatch on the first call
@@ -345,6 +358,27 @@ export const startCampaign = mutation({
             throw new Error("Unauthenticated");
         }
 
+        // --- ADDED: Email Sender Restriction ---
+        if (args.fromMailbox) {
+            const user = await ctx.db
+                .query("users")
+                .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
+                .first();
+
+            if (!user) {
+                throw new Error("User record not found");
+            }
+
+            if (user.role !== "admin") {
+                // Non-admins can only send using their own email or the primary shared mailbox (if allowed, but requirements say "only their own")
+                // Let's enforce strictly that it must match their registered email address
+                if (args.fromMailbox.toLowerCase() !== user.email.toLowerCase()) {
+                    throw new Error("Unauthorized: You can only send emails from your own email address.");
+                }
+            }
+        }
+        // ---------------------------------------
+
         const recipients = args.recipients || [];
 
         const campaignId = await ctx.db.insert("campaigns", {
@@ -369,21 +403,7 @@ export const startCampaign = mutation({
             createOpportunities: args.createOpportunities,
         });
 
-        // If recipients are provided directly, create message records immediately
-        if (recipients.length > 0) {
-            const channel = args.channel;
-            for (const recipient of recipients) {
-                await ctx.db.insert("messages", {
-                    campaignId,
-                    recipientId: recipient.id,
-                    recipientEmail: recipient.email,
-                    recipientPhone: recipient.phone,
-                    recipientName: recipient.name,
-                    status: "pending",
-                    channel,
-                });
-            }
-        }
+        // Messages are now created downstream in createBatches for both direct and filtered campaigns.
 
         return campaignId;
     },

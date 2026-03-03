@@ -745,6 +745,18 @@ export const processPersonalisedBatch = internalAction({
             const ITA34_SEL = "riivo_ita34id,riivo_yearofassessment,riivo_income,riivo_taxableincomeassessedloss,riivo_retirementannuityfundcontributions,riivo_retirementfundcontributions,riivo_providendfundcontributions,riivo_medicalschemefeestaxcredit,riivo_medicalrebatebelow65withnodisability,riivo_dateofassessment,riivo_referencenumber";
             const IRP5_SEL = "riivo_irp5id,riivo_assessmentyearint,riivo_incomepaye,riivo_grosstaxableincome,riivo_totaldeductionscontributions,riivo_racontributions,riivo_providentfundcontributionpaye,riivo_totalprovidentfundcontributions,riivo_medicalaidcontributions,riivo_medicalschemetaxcredit,riivo_taxabletravelremuneration,riivo_employertradingothername,riivo_taxperiodstartdate,riivo_taxperiodenddate";
 
+            // Create pending message records so click/open tracking and setOpportunityId can find them
+            await ctx.runMutation(internal.messages.createBatch, {
+                messages: batch.recipients.map((r) => ({
+                    campaignId: args.campaignId,
+                    recipientId: r.id,
+                    recipientEmail: r.email ?? undefined,
+                    recipientName: r.name,
+                    status: "pending",
+                    channel: "personalised" as const,
+                })),
+            });
+
             for (const recipient of batch.recipients) {
                 try {
                     // 1. Fetch tax data
@@ -834,6 +846,7 @@ export const processPersonalisedBatch = internalAction({
                         yearOfAssessment: scenarios.yearOfAssessment,
                         targetYear,
                         logoUrl: queueLogoUrl,
+                        siteUrl: queueSiteUrl,
                     });
 
                     // 5. Add tracking

@@ -1182,10 +1182,10 @@ export const fetchContactsByTaxReturn = action({
 
 /** Temperature values for riivo_opportunitytemperature OptionSet */
 export const OPPORTUNITY_TEMPERATURE = {
-    PENDING: 0,
-    COLD: 1,
-    WARM: 2,
-    HOT: 3,
+    PENDING: 463630000,
+    COLD: 463630001,
+    WARM: 463630002,
+    HOT: 463630003,
 } as const;
 
 /**
@@ -1206,7 +1206,7 @@ export const createOpportunity = action({
 
             const body: Record<string, unknown> = {
                 riivo_name: opportunityName,
-                "riivo_client@odata.bind": `/contacts(${args.contactId})`,
+                "riivo_Client@odata.bind": `/contacts(${args.contactId})`,
                 riivo_automatedopportunity: true,
                 riivo_notyetcontacted: true,
                 riivo_opportunitytemperature: OPPORTUNITY_TEMPERATURE.PENDING,
@@ -1216,15 +1216,22 @@ export const createOpportunity = action({
                 body["ownerid@odata.bind"] = `/systemusers(${args.ownerId})`;
             }
 
-            const response = await dynamicsRequest<{ riivo_opportunityid: string }>(
+            // Prefer: return=representation asks Dynamics to return the created entity as 201
+            // so riivo_opportunityid is in the response body.
+            // If Dynamics returns 204 instead (some environments ignore the Prefer header),
+            // dynamicsRequest extracts the GUID from the OData-EntityId header as _entityId.
+            const response = await dynamicsRequest<{ riivo_opportunityid?: string; _entityId?: string }>(
                 "riivo_opportunities",
                 {
                     method: "POST",
                     body: JSON.stringify(body),
+                    headers: {
+                        Prefer: 'return=representation,odata.include-annotations="*"',
+                    },
                 }
             );
 
-            return response.riivo_opportunityid ?? null;
+            return response.riivo_opportunityid ?? response._entityId ?? null;
         } catch (err) {
             console.error(`Failed to create opportunity for contact ${args.contactId}:`, err);
             return null;

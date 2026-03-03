@@ -26,6 +26,7 @@ export default defineSchema({
             name: v.string(),
             contentType: v.string(),
             contentBase64: v.optional(v.string()),
+            contentId: v.optional(v.string()),
             storageId: v.optional(v.id("_storage")),
             isInline: v.optional(v.boolean()),
         }))),

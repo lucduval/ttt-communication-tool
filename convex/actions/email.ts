@@ -64,6 +64,21 @@ export const sendTestEmail = action({
         fromMailbox: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const identity = await ctx.auth.getUserIdentity();
+        if (!identity) {
+            throw new Error("Unauthenticated");
+        }
+
+        if (args.fromMailbox) {
+            const user = await ctx.runQuery(internal.users.getCurrentUserInternal, { clerkId: identity.subject });
+
+            if (!user) throw new Error("User not found");
+
+            if (user.role !== "admin" && args.fromMailbox.toLowerCase() !== user.email.toLowerCase()) {
+                throw new Error("Unauthorized: You can only test emails using your own email address.");
+            }
+        }
+
         const result = await sendEmail({
             subject: `[TEST] ${args.subject}`,
             body: wrapEmail(`

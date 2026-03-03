@@ -154,8 +154,8 @@ export function MailboxSelector({
                 onClick={() => !disabled && setIsOpen(!isOpen)}
                 disabled={disabled}
                 className={`w-full flex items-center justify-between gap-3 px-4 py-3 border rounded-lg transition-all ${isOpen
-                        ? "border-[#1E3A5F] ring-2 ring-[#1E3A5F]/20"
-                        : "border-gray-200 hover:border-gray-300"
+                    ? "border-[#1E3A5F] ring-2 ring-[#1E3A5F]/20"
+                    : "border-gray-200 hover:border-gray-300"
                     } ${disabled ? "opacity-60 cursor-not-allowed" : "cursor-pointer"}`}
             >
                 <div className="flex items-center gap-3">
@@ -184,7 +184,7 @@ export function MailboxSelector({
                 createPortal(
                     <div
                         ref={dropdownRef}
-                        className="fixed bg-white border border-gray-200 rounded-lg shadow-xl z-[101] overflow-hidden"
+                        className="fixed bg-white border border-gray-200 rounded-lg shadow-xl z-[101] max-h-64 overflow-y-auto"
                         style={{
                             top: dropdownPosition.top,
                             left: dropdownPosition.left,
@@ -200,8 +200,8 @@ export function MailboxSelector({
                                     setIsOpen(false);
                                 }}
                                 className={`w-full flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors ${selectedMailbox === mailbox.mail
-                                        ? "bg-blue-50 border-l-2 border-[#1E3A5F]"
-                                        : ""
+                                    ? "bg-blue-50 border-l-2 border-[#1E3A5F]"
+                                    : ""
                                     }`}
                             >
                                 <div className="w-8 h-8 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center">

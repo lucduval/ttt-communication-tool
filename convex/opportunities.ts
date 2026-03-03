@@ -2,8 +2,7 @@
 
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
-
-const OPPORTUNITY_TEMPERATURE = { PENDING: 0, COLD: 1, WARM: 2, HOT: 3 } as const;
+import { OPPORTUNITY_TEMPERATURE } from "./actions/dynamics";
 
 /**
  * Update the temperature of a Dynamics opportunity.

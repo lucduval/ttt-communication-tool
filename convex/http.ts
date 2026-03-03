@@ -160,6 +160,22 @@ function validateContactId(request: Request): string | Response {
 }
 
 /**
+ * GET /advisor-interest
+ * Thank-you landing page shown after a client clicks the Option C "Chat with one of our Advisors" CTA.
+ * Click tracking (and the CRM Hot update) is handled by the /click handler before the redirect here.
+ */
+http.route({
+    path: "/advisor-interest",
+    method: "GET",
+    handler: httpAction(async (_ctx, _request) => {
+        return new Response(getAdvisorInterestHtml(), {
+            status: 200,
+            headers: { "Content-Type": "text/html" },
+        });
+    }),
+});
+
+/**
  * GET /unsubscribe?id=<contactId>
  * Shows a confirmation page — does NOT unsubscribe yet.
  */
@@ -243,6 +259,38 @@ function getConfirmHtml(contactId: string): string {
     <form method="POST" action="/unsubscribe?id=${encodeURIComponent(contactId)}">
         <button type="submit">Confirm Unsubscribe</button>
     </form>
+</div>
+</body></html>`;
+}
+
+/** Thank-you page shown after clicking the Option C advisor CTA */
+function getAdvisorInterestHtml(): string {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Thank You | TTT Financial Group</title>
+<style>
+${PAGE_STYLE}
+h1 { color: #003D5C; }
+p  { color: #4a5568; }
+.divider { width: 48px; height: 4px; background: #0077BB; border-radius: 2px;
+           margin: 0 auto 24px; }
+.card-header { background: #0077BB; border-radius: 10px 10px 0 0;
+               padding: 60px 40px 28px; display: flex; justify-content: center; align-items: center;
+               margin: -40px -40px 32px; }
+.ttt-logo { max-width: 100px; height: auto; }
+</style>
+</head>
+<body>
+<div class="card" style="background:#ffffff;border:2px solid #CCE7F5;padding:0;overflow:hidden;">
+    <div class="card-header">
+        <img src="/logo" alt="TTT Financial Group" class="ttt-logo" />
+    </div>
+    <div style="padding:0 40px 40px;text-align:center;">
+        <div class="divider"></div>
+        <h1>Thank You!</h1>
+        <p>One of our TTT Advisors will be in contact with you shortly to discuss your personalised financial plan.</p>
+    </div>
 </div>
 </body></html>`;
 }

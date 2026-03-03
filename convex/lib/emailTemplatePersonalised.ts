@@ -28,8 +28,9 @@ export function buildPersonalisedEmail(params: {
     yearOfAssessment: number;
     targetYear: number;
     logoUrl?: string;
+    siteUrl?: string;
 }): string {
-    const { copy, scenarios, yearOfAssessment, targetYear, logoUrl } = params;
+    const { copy, scenarios, yearOfAssessment, targetYear, logoUrl, siteUrl } = params;
     const { currentSituation, optionA, optionB, optionC, retirementProjection: rp } = scenarios;
 
     // Brand palette based on #0077BB
@@ -206,10 +207,10 @@ export function buildPersonalisedEmail(params: {
                 <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%"${rp ? "" : ` style="margin-top:16px;"`}>
                   <tr>
                     <td align="center">
-                      <!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="tel:+27100001234" style="height:48px;v-text-anchor:middle;width:100%;" arcsize="12%" strokecolor="${brandDeep}" fillcolor="${brandDeep}"><center style="color:#ffffff;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;font-weight:bold;">Call TTT to Get Started</center></v:roundrect><![endif]-->
+                      <!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" href="${siteUrl ?? ''}/advisor-interest" style="height:48px;v-text-anchor:middle;width:100%;" arcsize="12%" strokecolor="${brandDeep}" fillcolor="${brandDeep}"><center style="color:#ffffff;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;font-weight:bold;">Chat with one of our Advisors</center></v:roundrect><![endif]-->
                       <!--[if !mso]><!-->
-                      <a href="tel:+27100001234" style="display:block;background-color:${brandDarker};background-image:linear-gradient(135deg,${brandDarker} 0%,${brandDeep} 100%);color:#ffffff;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;font-weight:700;text-decoration:none;text-align:center;padding:14px 24px;border-radius:8px;">
-                        Call TTT to Get Started &rarr;
+                      <a href="${siteUrl ?? ''}/advisor-interest" style="display:block;background-color:${brandDarker};background-image:linear-gradient(135deg,${brandDarker} 0%,${brandDeep} 100%);color:#ffffff;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;font-weight:700;text-decoration:none;text-align:center;padding:14px 24px;border-radius:8px;">
+                        Chat with one of our Advisors &rarr;
                       </a>
                       <!--<![endif]-->
                     </td>

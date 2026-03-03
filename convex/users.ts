@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { mutation, query, internalMutation, QueryCtx, MutationCtx } from "./_generated/server";
+import { mutation, query, internalMutation, internalQuery, QueryCtx, MutationCtx } from "./_generated/server";
 import { internal } from "./_generated/api";
 
 // Helper for admin check
@@ -151,6 +151,19 @@ export const getCurrentUser = query({
         }
 
         return null;
+    },
+});
+
+/**
+ * Internal query to get a user by Clerk ID
+ */
+export const getCurrentUserInternal = internalQuery({
+    args: { clerkId: v.string() },
+    handler: async (ctx, args) => {
+        return await ctx.db
+            .query("users")
+            .withIndex("by_clerk_id", (q) => q.eq("clerkId", args.clerkId))
+            .first();
     },
 });
 

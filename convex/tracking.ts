@@ -2,8 +2,7 @@ import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { Id, Doc } from "./_generated/dataModel";
-
-const OPPORTUNITY_TEMPERATURE = { PENDING: 0, COLD: 1, WARM: 2, HOT: 3 } as const;
+import { OPPORTUNITY_TEMPERATURE } from "./actions/dynamics";
 
 export const logClick = internalMutation({
     args: {

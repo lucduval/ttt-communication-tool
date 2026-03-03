@@ -97,8 +97,19 @@ export async function dynamicsRequest<T>(
         throw new Error(`Dynamics API error: ${response.status} - ${errorText}`);
     }
 
-    // 204 No Content (e.g. successful PATCH) has no body to parse
+    // 204 No Content — PATCH/DELETE success has no body.
+    // POST 204 responses (when Prefer: return=representation is absent) include an
+    // OData-EntityId header with the URL of the created record, e.g.:
+    //   https://org.api.crm.dynamics.com/api/data/v9.2/riivo_opportunities(guid)
+    // Extract the GUID so callers can retrieve the new record's ID.
     if (response.status === 204) {
+        const entityIdHeader = response.headers.get("OData-EntityId");
+        if (entityIdHeader) {
+            const match = entityIdHeader.match(/\(([a-f0-9-]{36})\)/i);
+            if (match) {
+                return { _entityId: match[1] } as unknown as T;
+            }
+        }
         return {} as T;
     }
 
