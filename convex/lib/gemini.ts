@@ -78,18 +78,18 @@ RECIPIENT CONTEXT (use these exact numbers — do NOT invent or change any figur
 
 OPTION A (Moderate Top-Up):
 - Monthly RA Contribution: ${fmt(scenarios.optionA.monthlyRa)}/month (${fmt(scenarios.optionA.additionalRa)}/year)
-- Annual Tax Saving: ${fmt(scenarios.optionA.taxSaving)}
+- Additional Tax Refund: ${fmt(scenarios.optionA.taxSaving)}
 
 OPTION B (Accelerated Growth):
 - Monthly RA Contribution: ${fmt(scenarios.optionB.monthlyRa)}/month (${fmt(scenarios.optionB.additionalRa)}/year)
-- Annual Tax Saving: ${fmt(scenarios.optionB.taxSaving)}
+- Additional Tax Refund: ${fmt(scenarios.optionB.taxSaving)}
 
 OPTION C (Personalised Plan — call TTT):
 - Do NOT include any specific contribution amounts, tax saving figures, or projected values for Option C.
 - Instead, explain that TTT can find the perfect plan tailored to the client's unique situation.
 ${retirementBlock}
 
-IMPORTANT: For Options A and B, frame all RA contribution amounts in MONTHLY terms (per month). The tax saving is annual.${rp ? " When retirement projections are available, reference how much extra the client could have at 65 for Options A and B — this is a powerful motivator. Use the exact projected figures." : ""} For Option C, do NOT include any numbers — only describe how TTT can help.
+IMPORTANT: For Options A and B, frame all RA contribution amounts in MONTHLY terms (per month). The additional tax refund is annual.${rp ? " When retirement projections are available, reference how much extra the client could have at 65 for Options A and B — this is a powerful motivator. Use the exact projected figures." : ""} For Option C, do NOT include any numbers — only describe how TTT can help.
 
 Respond ONLY with valid JSON matching this exact structure (no markdown, no code fences):
 {

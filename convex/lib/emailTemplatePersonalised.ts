@@ -137,7 +137,7 @@ export function buildPersonalisedEmail(params: {
                         <div style="font-family:'Segoe UI',Arial,sans-serif;font-size:18px;font-weight:700;color:${brand};">${fmt(optionA.monthlyAdditionalRa)}</div>
                       </div>
                       <div style="background-color:${brandLight};border-radius:8px;padding:10px 12px;text-align:center;margin-bottom:8px;">
-                        <div style="font-family:'Segoe UI',Arial,sans-serif;font-size:10px;color:${brandDark};text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">Tax Saving / year</div>
+                        <div style="font-family:'Segoe UI',Arial,sans-serif;font-size:10px;color:${brandDark};text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">Additional Tax Refund</div>
                         <div style="font-family:'Segoe UI',Arial,sans-serif;font-size:18px;font-weight:700;color:${brand};">${fmt(optionA.taxSaving)}</div>
                       </div>
                       ${rp ? `<div style="background-color:#ECFDF5;border:1px solid #A7F3D0;border-radius:8px;padding:10px 12px;text-align:center;">
@@ -164,7 +164,7 @@ export function buildPersonalisedEmail(params: {
                         <div style="font-family:'Segoe UI',Arial,sans-serif;font-size:18px;font-weight:700;color:${brandDark};">${fmt(optionB.monthlyAdditionalRa)}</div>
                       </div>
                       <div style="background-color:${brandLight};border-radius:8px;padding:10px 12px;text-align:center;margin-bottom:8px;">
-                        <div style="font-family:'Segoe UI',Arial,sans-serif;font-size:10px;color:${brandDark};text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">Tax Saving / year</div>
+                        <div style="font-family:'Segoe UI',Arial,sans-serif;font-size:10px;color:${brandDark};text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;">Additional Tax Refund</div>
                         <div style="font-family:'Segoe UI',Arial,sans-serif;font-size:18px;font-weight:700;color:${brandDark};">${fmt(optionB.taxSaving)}</div>
                       </div>
                       ${rp ? `<div style="background-color:#ECFDF5;border:1px solid #A7F3D0;border-radius:8px;padding:10px 12px;text-align:center;">

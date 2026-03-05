@@ -58,7 +58,7 @@ export const getAvailableMailboxes = action({
             };
         }
 
-        const allMailboxes: MailboxInfo[] = configuredMailboxesStr.split(",").map((entry) => {
+        const sharedMailboxes: MailboxInfo[] = configuredMailboxesStr.split(",").map((entry) => {
             const trimmed = entry.trim();
             if (trimmed.includes(":")) {
                 const [displayName, mail] = trimmed.split(":");
@@ -77,37 +77,29 @@ export const getAvailableMailboxes = action({
             };
         });
 
-        // Ensure user's own email is always in the list if they are allowed to send from it
-        // We can optionally add it if it's not in the env vars, but graph API needs permissions for it.
-        // Assuming the app has Tenant-wide send permissions, we can just allow the user to send as themselves.
-        const userMailbox: MailboxInfo = {
+        const personalMailbox: MailboxInfo = {
             id: userEmail,
-            displayName: user.name || userEmail.split("@")[0],
-            mail: userEmail
+            displayName: `${user.name || userEmail.split("@")[0]} (Personal)`,
+            mail: userEmail,
         };
 
-        const hasUserMailbox = allMailboxes.some(m => m.mail.toLowerCase() === userEmail);
-        if (!hasUserMailbox) {
-            allMailboxes.push(userMailbox);
-        }
+        let allowedMailboxes: MailboxInfo[];
 
-        // Filter mailboxes based on role
-        let allowedMailboxes = allMailboxes;
-        if (!isAdmin) {
-            allowedMailboxes = allMailboxes.filter(m => m.mail.toLowerCase() === userEmail);
-        }
-
-        // If default from env is not in the allowed list, default is null to force selection or use first allowed
-        const configuredDefault = process.env.SHARED_MAILBOX_ADDRESS || null;
-        let defaultMailbox = configuredDefault;
-
-        if (defaultMailbox && !allowedMailboxes.some((m) => m.mail.toLowerCase() === defaultMailbox?.toLowerCase())) {
-            defaultMailbox = allowedMailboxes.length > 0 ? allowedMailboxes[0].mail : null;
+        if (isAdmin) {
+            // Admins get their personal mailbox first, then all shared mailboxes.
+            // Deduplicate in case the admin's email happens to be in the shared list.
+            const sharedExcludingPersonal = sharedMailboxes.filter(
+                m => m.mail.toLowerCase() !== userEmail
+            );
+            allowedMailboxes = [personalMailbox, ...sharedExcludingPersonal];
+        } else {
+            // Non-admins can only send from their own email address.
+            allowedMailboxes = [personalMailbox];
         }
 
         return {
             mailboxes: allowedMailboxes,
-            defaultMailbox,
+            defaultMailbox: allowedMailboxes[0]?.mail ?? null,
         };
     },
 });
