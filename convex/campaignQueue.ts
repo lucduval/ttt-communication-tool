@@ -947,7 +947,7 @@ export const processPersonalisedBatch = internalAction({
                         if (campaign.createOpportunities) {
                             try {
                                 const opportunityId = await ctx.runAction(
-                                    api.actions.dynamics.createOpportunity,
+                                    internal.actions.dynamics.createOpportunity,
                                     {
                                         contactId: recipient.id,
                                         contactName: recipient.name,

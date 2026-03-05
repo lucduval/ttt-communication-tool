@@ -1,6 +1,6 @@
 "use node";
 
-import { action } from "../_generated/server";
+import { action, internalAction } from "../_generated/server";
 import { v } from "convex/values";
 import { dynamicsRequest } from "../lib/dynamics_auth";
 import { api } from "../_generated/api";
@@ -1220,16 +1220,14 @@ export const OPPORTUNITY_TEMPERATURE = {
  * Sets riivo_automatedopportunity = true and initial temperature = Pending (0).
  * Returns the new riivo_opportunityid.
  */
-export const createOpportunity = action({
+export const createOpportunity = internalAction({
     args: {
         contactId: v.string(),
         contactName: v.string(),
         campaignId: v.string(),
         ownerId: v.optional(v.string()),
     },
-    handler: async (ctx, args): Promise<string | null> => {
-        const access = await ctx.runQuery(api.users.checkAccess);
-        if (!access.hasAccess) throw new Error("Unauthorized");
+    handler: async (_ctx, args): Promise<string | null> => {
         try {
             const opportunityName = `TAX-${new Date().getFullYear()}-${args.contactName.substring(0, 30).trim()}`;
 
@@ -1272,14 +1270,12 @@ export const createOpportunity = action({
  * Update the temperature of an existing opportunity.
  * Only upgrades temperature — will not overwrite Hot with Warm.
  */
-export const updateOpportunityTemperature = action({
+export const updateOpportunityTemperature = internalAction({
     args: {
         opportunityId: v.string(),
         temperature: v.number(), // 0=Pending, 1=Cold, 2=Warm, 3=Hot
     },
-    handler: async (ctx, args): Promise<boolean> => {
-        const access = await ctx.runQuery(api.users.checkAccess);
-        if (!access.hasAccess) throw new Error("Unauthorized");
+    handler: async (_ctx, args): Promise<boolean> => {
         try {
             await dynamicsRequest(
                 `riivo_opportunities(${args.opportunityId})`,
