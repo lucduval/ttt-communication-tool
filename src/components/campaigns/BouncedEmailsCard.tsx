@@ -64,17 +64,17 @@ export function BouncedEmailsCard({ campaignId }: { campaignId: Id<"campaigns"> 
                                     View List
                                 </Button>
                             </DialogTrigger>
-                            <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col">
+                            <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col bg-white text-gray-900">
                                 <DialogHeader>
-                                    <DialogTitle>Bounced / Failed Emails</DialogTitle>
-                                    <DialogDescription>
+                                    <DialogTitle className="text-gray-900">Bounced / Failed Emails</DialogTitle>
+                                    <DialogDescription className="text-gray-500">
                                         List of emails that could not be delivered for this campaign.
                                     </DialogDescription>
                                 </DialogHeader>
 
-                                <div className="mt-4 flex-1 overflow-auto border rounded-md">
+                                <div className="mt-4 flex-1 overflow-auto border border-gray-200 rounded-md">
                                     <table className="w-full text-sm text-left">
-                                        <thead className="bg-gray-50 text-gray-500 font-medium border-b sticky top-0">
+                                        <thead className="bg-gray-50 text-gray-500 font-medium border-b border-gray-200 sticky top-0">
                                             <tr>
                                                 <th className="px-4 py-2">Recipient</th>
                                                 <th className="px-4 py-2">Email</th>
@@ -82,7 +82,7 @@ export function BouncedEmailsCard({ campaignId }: { campaignId: Id<"campaigns"> 
                                                 <th className="px-4 py-2">Time</th>
                                             </tr>
                                         </thead>
-                                        <tbody className="divide-y">
+                                        <tbody className="divide-y divide-gray-100 bg-white">
                                             {failedMessages.length === 0 ? (
                                                 <tr>
                                                     <td colSpan={4} className="px-4 py-8 text-center text-gray-500">
@@ -92,9 +92,9 @@ export function BouncedEmailsCard({ campaignId }: { campaignId: Id<"campaigns"> 
                                             ) : (
                                                 failedMessages.map((msg) => (
                                                     <tr key={msg._id} className="hover:bg-gray-50">
-                                                        <td className="px-4 py-2 font-medium">{msg.recipientName}</td>
-                                                        <td className="px-4 py-2">{msg.recipientEmail}</td>
-                                                        <td className="px-4 py-2 text-red-600 break-words max-w-xs block">
+                                                        <td className="px-4 py-2 font-medium text-gray-900">{msg.recipientName}</td>
+                                                        <td className="px-4 py-2 text-gray-700">{msg.recipientEmail}</td>
+                                                        <td className="px-4 py-2 text-red-600 break-words max-w-xs">
                                                             {msg.errorMessage || "Unknown error"}
                                                         </td>
                                                         <td className="px-4 py-2 text-gray-500 whitespace-nowrap">
