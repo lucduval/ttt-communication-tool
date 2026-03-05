@@ -10,7 +10,7 @@ const SERVER_FILTERABLE_STATUSES = ["pending", "sent", "delivered", "failed"];
 export const listByCampaign = query({
     args: {
         campaignId: v.id("campaigns"),
-        paginationOpts: v.optional(paginationOptsValidator),
+        paginationOpts: paginationOptsValidator,
         status: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
@@ -27,12 +27,7 @@ export const listByCampaign = query({
                 .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
                 .order("desc");
 
-        if (args.paginationOpts) {
-            return await baseQuery.paginate(args.paginationOpts);
-        }
-
-        // Fallback for older clients: cap at 500 to avoid the 8192 array limit
-        return await baseQuery.take(500);
+        return await baseQuery.paginate(args.paginationOpts);
     },
 });
 

@@ -328,7 +328,7 @@ export default function CampaignDetailsPage() {
                     <div className="px-6 py-4 border-t border-gray-200 text-center">
                         <Button
                             onClick={() => loadMore(100)}
-                            variant="outline"
+                            variant="secondary"
                             className="text-sm"
                         >
                             Load more ({messages.length} loaded so far)

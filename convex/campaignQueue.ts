@@ -61,9 +61,15 @@ export const queueCampaignBatches = action({
                     campaignId: args.campaignId,
                 });
             } else if (args.channel === "email") {
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
-                    campaignId: args.campaignId,
-                });
+                // Start 3 parallel workers staggered by 150ms so they naturally pick
+                // up different batches and don't all race for batch 1 at once.
+                for (let i = 0; i < 3; i++) {
+                    await ctx.scheduler.runAfter(
+                        i * 150,
+                        internal.campaignQueue.processEmailBatch,
+                        { campaignId: args.campaignId }
+                    );
+                }
             } else {
                 await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
                     campaignId: args.campaignId,
@@ -107,17 +113,65 @@ export const processEmailBatch = internalAction({
         });
 
         if (!acquired) {
-            // Batch was already picked up by another action invocation, skip
+            // Another parallel worker claimed this batch. Re-schedule self to pick
+            // up the next available batch, keeping the worker pool stable.
+            await ctx.scheduler.runAfter(250, internal.campaignQueue.processEmailBatch, {
+                campaignId: args.campaignId,
+            });
             return;
         }
 
         let successCount = 0;
         let failedCount = 0;
         const results: Array<{ recipientId: string; success: boolean; error?: string }> = [];
+        const crmQueue: Array<{ recipientId: string; subject: string; body: string }> = [];
 
         try {
             // Import sendEmail function dynamically
             const { sendEmail } = await import("./lib/graph_client");
+
+            // Resolve attachments once per batch (not once per recipient).
+            // Fetching from Convex storage on every recipient was the primary cause of
+            // slow campaigns — each storageId attachment triggered a query + HTTP download
+            // for every single email in the batch.
+            const processedAttachments: Array<{
+                name: string;
+                contentType: string;
+                contentBase64: string;
+                isInline?: boolean;
+                contentId?: string;
+            }> = [];
+            if (campaign.attachments) {
+                for (const att of campaign.attachments) {
+                    let contentBase64 = att.contentBase64;
+
+                    if (att.storageId && !contentBase64) {
+                        try {
+                            const fileUrl = await ctx.runQuery(api.files.getDownloadUrl, {
+                                storageId: att.storageId,
+                            });
+                            if (fileUrl) {
+                                const response = await fetch(fileUrl);
+                                const arrayBuffer = await response.arrayBuffer();
+                                contentBase64 = Buffer.from(arrayBuffer).toString("base64");
+                            }
+                        } catch (e) {
+                            console.error(`Failed to fetch attachment ${att.name} from storage:`, e);
+                        }
+                    }
+
+                    const base64 = contentBase64 ?? att.contentBase64;
+                    if (base64) {
+                        processedAttachments.push({
+                            name: att.name,
+                            contentType: att.contentType,
+                            contentBase64: base64,
+                            isInline: att.isInline,
+                            contentId: (att as any).contentId,
+                        });
+                    }
+                }
+            }
 
             // Process each recipient in the batch
             for (const recipient of batch.recipients) {
@@ -136,52 +190,6 @@ export const processEmailBatch = internalAction({
                 }
 
                 try {
-                    // Prepare attachments (fetch from storage if needed)
-                    const processedAttachments = [];
-                    if (campaign.attachments) {
-                        for (const att of campaign.attachments) {
-                            let contentBase64 = att.contentBase64;
-
-                            // If we have a storageId but no contentBase64, fetch it
-                            if (att.storageId && !contentBase64) {
-                                try {
-                                    // fetching the url from our internal query
-                                    const fileUrl = await ctx.runQuery(api.files.getDownloadUrl, {
-                                        storageId: att.storageId
-                                    });
-
-                                    if (fileUrl) {
-                                        const response = await fetch(fileUrl);
-                                        const arrayBuffer = await response.arrayBuffer();
-                                        contentBase64 = Buffer.from(arrayBuffer).toString('base64');
-                                    }
-                                } catch (e) {
-                                    console.error(`Failed to fetch attachment ${att.name} from storage:`, e);
-                                    // Skip this attachment or continue with empty content? 
-                                    // better to continue so the email sends, maybe with a warning
-                                }
-                            }
-
-                            if (contentBase64) {
-                                processedAttachments.push({
-                                    name: att.name,
-                                    contentType: att.contentType,
-                                    contentBase64: contentBase64,
-                                    isInline: att.isInline,
-                                    contentId: (att as any).contentId, // Explicit contentId
-                                });
-                            } else if (att.contentBase64) {
-                                processedAttachments.push({
-                                    name: att.name,
-                                    contentType: att.contentType,
-                                    contentBase64: att.contentBase64,
-                                    isInline: att.isInline,
-                                    contentId: (att as any).contentId, // Explicit contentId
-                                });
-                            }
-                        }
-                    }
-
                     // Resolve merge field values for this recipient
                     const recipientFirstName = recipient.name?.split(" ")[0] || recipient.name || "";
                     const recipientFullName = recipient.name || "";
@@ -234,17 +242,14 @@ export const processEmailBatch = internalAction({
                         successCount++;
                         results.push({ recipientId: recipient.id, success: true });
 
-                        // Log to Dynamics CRM if enabled
+                        // Queue CRM logging — written to Dynamics in a background job
+                        // after this batch completes so it doesn't block the send loop.
                         if (campaign.createDynamicsActivity) {
-                            try {
-                                await logEmailActivity(
-                                    recipient.id,
-                                    campaign.subject || "",
-                                    campaign.htmlBody || ""
-                                );
-                            } catch (e) {
-                                console.error(`CRM email log failed for ${recipient.id}:`, e);
-                            }
+                            crmQueue.push({
+                                recipientId: recipient.id,
+                                subject: campaign.subject || "",
+                                body: campaign.htmlBody || "",
+                            });
                         }
                     } else {
                         failedCount++;
@@ -289,7 +294,16 @@ export const processEmailBatch = internalAction({
                 }
             );
 
-            // Schedule next batch if there are more
+            // Fire CRM logging as a background job so it never blocks the send loop.
+            // Each batch schedules its own logging action independently.
+            if (crmQueue.length > 0) {
+                await ctx.scheduler.runAfter(0, internal.campaignQueue.logEmailBatchToCRM, {
+                    entries: crmQueue,
+                });
+            }
+
+            // Each worker self-schedules exactly one successor. With N workers running
+            // in parallel, this keeps the pool stable until the queue is drained.
             if (hasMoreBatches) {
                 await ctx.scheduler.runAfter(500, internal.campaignQueue.processEmailBatch, {
                     campaignId: args.campaignId,
@@ -302,11 +316,49 @@ export const processEmailBatch = internalAction({
                 errorMessage: err instanceof Error ? err.message : "Unknown error",
             });
 
-            // Continue processing remaining batches even after a failure
             if (hasMoreBatches) {
                 await ctx.scheduler.runAfter(500, internal.campaignQueue.processEmailBatch, {
                     campaignId: args.campaignId,
                 });
+            }
+        }
+    },
+});
+
+/**
+ * Background action that writes email activity records to Dynamics CRM for a
+ * completed batch. Runs independently from the send loop so CRM latency never
+ * delays email delivery. Retries each contact up to 3 times before skipping.
+ */
+export const logEmailBatchToCRM = internalAction({
+    args: {
+        entries: v.array(
+            v.object({
+                recipientId: v.string(),
+                subject: v.string(),
+                body: v.string(),
+            })
+        ),
+    },
+    handler: async (_ctx, args) => {
+        const { logEmailActivity } = await import("./lib/dynamics_logging");
+
+        for (const entry of args.entries) {
+            const maxAttempts = 3;
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                try {
+                    await logEmailActivity(entry.recipientId, entry.subject, entry.body);
+                    break;
+                } catch (err) {
+                    if (attempt === maxAttempts) {
+                        console.error(
+                            `CRM log failed after ${maxAttempts} attempts for ${entry.recipientId}:`,
+                            err
+                        );
+                    } else {
+                        await new Promise((r) => setTimeout(r, 500 * attempt));
+                    }
+                }
             }
         }
     },
@@ -670,9 +722,14 @@ export const processCampaignFilters = internalAction({
                     campaignId,
                 });
             } else if (channel === "email") {
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
-                    campaignId,
-                });
+                // Mirror the 3-worker parallel start from queueCampaignBatches.
+                for (let i = 0; i < 3; i++) {
+                    await ctx.scheduler.runAfter(
+                        i * 150,
+                        internal.campaignQueue.processEmailBatch,
+                        { campaignId }
+                    );
+                }
             } else {
                 await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
                     campaignId,
@@ -869,6 +926,9 @@ export const processPersonalisedBatch = internalAction({
                         subject: emailSubject,
                         body: emailBody,
                         toRecipients: [{ email: recipient.email!, name: recipient.name }],
+                        ccRecipients: campaign.ccEmail
+                            ? [{ email: campaign.ccEmail }]
+                            : undefined,
                         attachments: [],
                         fromMailbox: campaign.fromMailbox,
                         headers: {
