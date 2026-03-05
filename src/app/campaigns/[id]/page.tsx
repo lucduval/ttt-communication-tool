@@ -18,10 +18,17 @@ export default function CampaignDetailsPage() {
     const [statusFilter, setStatusFilter] = useState<string>("all");
 
     const campaign = useQuery(api.campaigns.get, { id: campaignId });
-    const { results: messages, status: messagesStatus, loadMore } = usePaginatedQuery(
+    const isEngagementFilter = statusFilter === "opened" || statusFilter === "clicked";
+    const { results: paginatedMessages, status: messagesStatus, loadMore } = usePaginatedQuery(
         api.messages.listByCampaign,
-        { campaignId, status: statusFilter === "opened" || statusFilter === "clicked" ? undefined : statusFilter === "all" ? undefined : statusFilter },
+        { campaignId, status: isEngagementFilter || statusFilter === "all" ? undefined : statusFilter },
         { initialNumItems: 100 }
+    );
+    const engagementMessages = useQuery(
+        api.messages.listByEngagement,
+        isEngagementFilter
+            ? { campaignId, engagement: statusFilter as "opened" | "clicked" }
+            : "skip"
     );
     const batches = useQuery(api.campaignBatches.getBatches, { campaignId });
     const stats = useQuery(api.messages.getCampaignStats, { campaignId });
@@ -31,6 +38,8 @@ export default function CampaignDetailsPage() {
     if (!campaign || messagesStatus === "LoadingFirstPage") {
         return <div className="p-8 text-center">Loading...</div>;
     }
+
+    const messages = isEngagementFilter ? (engagementMessages ?? []) : paginatedMessages;
 
     const isProcessing = campaign.status === "processing" || campaign.status === "queued";
     const completedBatches = batches?.filter((b) => b.status === "completed").length || 0;
@@ -55,16 +64,9 @@ export default function CampaignDetailsPage() {
     const openedIdSet = new Set(engagement?.openedIds ?? []);
     const clickedIdSet = new Set(engagement?.clickedIds ?? []);
 
-    // Status filters are applied server-side via the paginated query.
-    // "opened" and "clicked" are engagement states (not DB statuses) so they
-    // are filtered client-side from the currently loaded page.
-    const filteredMessages = (statusFilter === "opened" || statusFilter === "clicked")
-        ? messages.filter((message) =>
-            statusFilter === "opened"
-                ? openedIdSet.has(message.recipientId)
-                : clickedIdSet.has(message.recipientId)
-        )
-        : messages;
+    // "opened"/"clicked" are served directly by listByEngagement (server-side join).
+    // All other filters are applied server-side via the paginated query.
+    const filteredMessages = messages;
 
     const hasEngagementData = campaign.channel === "email" &&
         (campaign.opensCount !== undefined || campaign.clicksCount !== undefined);
@@ -324,21 +326,27 @@ export default function CampaignDetailsPage() {
                         </tbody>
                     </table>
                 </div>
-                {messagesStatus === "CanLoadMore" && (
+                {!isEngagementFilter && messagesStatus === "CanLoadMore" && (
                     <div className="px-6 py-4 border-t border-gray-200 text-center">
                         <Button
                             onClick={() => loadMore(100)}
                             variant="secondary"
                             className="text-sm"
                         >
-                            Load more ({messages.length} loaded so far)
+                            Load more ({paginatedMessages.length} loaded so far)
                         </Button>
                     </div>
                 )}
-                {messagesStatus === "LoadingMore" && (
+                {!isEngagementFilter && messagesStatus === "LoadingMore" && (
                     <div className="px-6 py-4 border-t border-gray-200 text-center text-sm text-gray-500 flex items-center justify-center gap-2">
                         <Loader2 className="w-4 h-4 animate-spin" />
                         Loading more...
+                    </div>
+                )}
+                {isEngagementFilter && engagementMessages === undefined && (
+                    <div className="px-6 py-4 border-t border-gray-200 text-center text-sm text-gray-500 flex items-center justify-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        Loading...
                     </div>
                 )}
             </div>

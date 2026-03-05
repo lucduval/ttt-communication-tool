@@ -45,6 +45,40 @@ export const getCampaignStats = query({
     },
 });
 
+/**
+ * Fetch messages for all recipients who opened or clicked in a campaign.
+ * Looks up engagement records first, then resolves each message via the
+ * by_campaign_recipient index — avoids scanning the full messages table.
+ */
+export const listByEngagement = query({
+    args: {
+        campaignId: v.id("campaigns"),
+        engagement: v.union(v.literal("opened"), v.literal("clicked")),
+    },
+    handler: async (ctx, args) => {
+        const tableName = args.engagement === "clicked" ? "clicks" : "opens";
+        const records = await ctx.db
+            .query(tableName)
+            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
+            .collect();
+
+        const recipientIds = [...new Set(records.map((r) => r.recipientId))];
+
+        const messages = await Promise.all(
+            recipientIds.map((recipientId) =>
+                ctx.db
+                    .query("messages")
+                    .withIndex("by_campaign_recipient", (q) =>
+                        q.eq("campaignId", args.campaignId).eq("recipientId", recipientId)
+                    )
+                    .first()
+            )
+        );
+
+        return messages.filter((m): m is NonNullable<typeof m> => m !== null);
+    },
+});
+
 export const getEngagementRecipients = query({
     args: { campaignId: v.id("campaigns") },
     handler: async (ctx, args) => {
