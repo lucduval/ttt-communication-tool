@@ -4,7 +4,7 @@ import { action, internalAction } from "../_generated/server";
 import { v } from "convex/values";
 import { sendEmail, type EmailAttachment } from "../lib/graph_client";
 import { dynamicsRequest } from "../lib/dynamics_auth";
-import { internal } from "../_generated/api";
+import { internal, api } from "../_generated/api";
 import { wrapEmail } from "../lib/emailLayout";
 
 /**
@@ -31,6 +31,8 @@ export const sendSingleEmail = action({
         ),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const result = await sendEmail({
             subject: args.subject,
             body: wrapEmail(args.htmlBody, args.subject),
@@ -64,10 +66,10 @@ export const sendTestEmail = action({
         fromMailbox: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const identity = await ctx.auth.getUserIdentity();
-        if (!identity) {
-            throw new Error("Unauthenticated");
-        }
+        if (!identity) throw new Error("Unauthenticated");
 
         if (args.fromMailbox) {
             const user = await ctx.runQuery(internal.users.getCurrentUserInternal, { clerkId: identity.subject });
@@ -128,6 +130,8 @@ export const sendBulkEmails = action({
         fromMailbox: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const results: Array<{
             recipientId: string;
             email: string;
@@ -300,7 +304,9 @@ async function createEmailActivity(
  */
 export const getSharedMailbox = action({
     args: {},
-    handler: async () => {
+    handler: async (ctx) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const mailbox = process.env.SHARED_MAILBOX_ADDRESS;
         return {
             configured: !!mailbox,

@@ -2,6 +2,7 @@
 
 import { v } from "convex/values";
 import { action } from "../_generated/server";
+import { api } from "../_generated/api";
 import { dynamicsRequest } from "../lib/dynamics_auth";
 import { calculateOptions, parseAgeFromIdNumber } from "../lib/taxCalculator";
 import { generatePersonalisedCopy, type TaxScenarioContext } from "../lib/gemini";
@@ -96,6 +97,8 @@ export const generatePreviewEmail = action({
         siteUrl: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const [taxProfile, contactInfo] = await Promise.all([
             fetchTaxProfile(args.contactId),
             fetchContactInfo(args.contactId),

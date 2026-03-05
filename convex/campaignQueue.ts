@@ -37,6 +37,8 @@ export const queueCampaignBatches = action({
         filters: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         if (args.filters) {
             await ctx.scheduler.runAfter(0, internal.campaignQueue.processCampaignFilters, {
                 campaignId: args.campaignId,

@@ -2,7 +2,7 @@
 
 import { v } from "convex/values";
 import { action, internalMutation, internalAction } from "./_generated/server";
-import { internal } from "./_generated/api";
+import { internal, api } from "./_generated/api";
 import { getGraphAccessToken } from "./lib/graph_client";
 
 /**
@@ -254,6 +254,8 @@ export const debugBounces = action({
         limit: v.optional(v.number()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const token = await getGraphAccessToken();
         const sharedMailboxesEnv = process.env.SHARED_MAILBOX_ADDRESS;
 

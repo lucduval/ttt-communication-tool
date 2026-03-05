@@ -8,17 +8,22 @@ export { dynamicsRequest };
 
 /**
  * Resolves the effective ownerId for a contact query.
- * Non-admin users with a dynamicsUserId set are always restricted to their own contacts,
- * regardless of what ownerId was passed in by the client.
+ * - Admins: full control (can query any owner or all contacts)
+ * - Non-admins with a dynamicsUserId: always restricted to their own contacts
+ * - Non-admins without a dynamicsUserId (unlinked): denied entirely
  */
 async function resolveEffectiveOwnerId(
     ctx: { runQuery: (ref: any, args?: any) => Promise<any> },
     requestedOwnerId?: string
 ): Promise<string | undefined> {
     const user = await ctx.runQuery(api.users.getCurrentUser);
-    // Admins and users without a dynamicsUserId retain full control
-    if (!user || user.role === "admin" || !user.dynamicsUserId) {
+    // Admins retain full control
+    if (!user || user.role === "admin") {
         return requestedOwnerId;
+    }
+    // Non-admin without a Dynamics link: deny all contact access
+    if (!user.dynamicsUserId) {
+        throw new Error("Your account is not linked to a Dynamics consultant. Please ask an administrator to link your account before accessing contacts.");
     }
     // Non-admin with dynamicsUserId: always enforce their own scope
     return user.dynamicsUserId;
@@ -107,6 +112,8 @@ export const fetchContacts = action({
         industryId: v.optional(v.string()), // New industry filter
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const {
             filter,
             search,
@@ -278,6 +285,8 @@ export const getContactCount = action({
         industryId: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const {
             filter,
             search,
@@ -377,6 +386,8 @@ export const fetchAllContactIds = action({
         industryId: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const {
             filter,
             search,
@@ -514,6 +525,8 @@ export const getContact = action({
         contactId: v.string(),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const endpoint = `contacts(${args.contactId})?$select=${CONTACT_SELECT_FIELDS}`;
 
         const contact = await dynamicsRequest<DynamicsContact>(endpoint);
@@ -557,6 +570,8 @@ export const getAttributeOptionSet = action({
         attributeName: v.string(),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const { entityName, attributeName } = args;
 
         // Helper to fetch options from a specific metadata type
@@ -618,6 +633,8 @@ export const getGlobalOptionSet = action({
         optionSetName: v.string(),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const endpoint = `GlobalOptionSetDefinitions(Name='${args.optionSetName}')`;
         const response = await dynamicsRequest<any>(endpoint);
         const options = response.Options.map((opt: any) => ({
@@ -636,6 +653,8 @@ export const fetchUsers = action({
         includeDisabled: v.optional(v.boolean()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const filterParts: string[] = [];
 
         if (!args.includeDisabled) {
@@ -677,6 +696,8 @@ export const fetchUsers = action({
 export const fetchIndustries = action({
     args: {},
     handler: async (ctx) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         // Fetch industries from riivo_industries entity
         // Entity: riivo_industry
         // PK: riivo_industryid
@@ -777,6 +798,8 @@ export const fetchContactTaxData = action({
         contactId: v.string(),
     },
     handler: async (ctx, args): Promise<TaxProfileData> => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const ita34Endpoint = `riivo_ita34s?$select=${ITA34_SELECT_FIELDS}&$filter=_riivo_taxpayercontact_value eq '${args.contactId}'&$orderby=riivo_yearofassessment desc&$top=1`;
         const irp5Endpoint = `riivo_irp5s?$select=${IRP5_SELECT_FIELDS}&$filter=_riivo_client_value eq '${args.contactId}'&$orderby=riivo_assessmentyearint desc&$top=1`;
 
@@ -849,6 +872,8 @@ export const fetchContactsWithITA34 = action({
         industryId: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const effectiveOwnerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
         // Replace args.ownerId with the enforced value for the rest of the handler
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
@@ -1032,6 +1057,8 @@ export const fetchContactsByTaxReturn = action({
         industryId: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         const effectiveOwnerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
 
@@ -1200,7 +1227,9 @@ export const createOpportunity = action({
         campaignId: v.string(),
         ownerId: v.optional(v.string()),
     },
-    handler: async (_ctx, args): Promise<string | null> => {
+    handler: async (ctx, args): Promise<string | null> => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         try {
             const opportunityName = `TAX-${new Date().getFullYear()}-${args.contactName.substring(0, 30).trim()}`;
 
@@ -1248,7 +1277,9 @@ export const updateOpportunityTemperature = action({
         opportunityId: v.string(),
         temperature: v.number(), // 0=Pending, 1=Cold, 2=Warm, 3=Hot
     },
-    handler: async (_ctx, args): Promise<boolean> => {
+    handler: async (ctx, args): Promise<boolean> => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
         try {
             await dynamicsRequest(
                 `riivo_opportunities(${args.opportunityId})`,
