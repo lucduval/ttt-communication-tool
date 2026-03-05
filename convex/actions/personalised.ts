@@ -159,7 +159,7 @@ export const generatePreviewEmail = action({
 
         return {
             html,
-            income: scenarios.currentSituation.income,
+            income: scenarios.currentSituation.taxableIncome,
             raContribution: scenarios.currentSituation.currentRa,
             taxSaving: scenarios.optionC.taxSaving,
             yearOfAssessment: scenarios.yearOfAssessment,

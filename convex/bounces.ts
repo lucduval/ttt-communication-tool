@@ -186,17 +186,22 @@ export const recordBounces = internalMutation({
         })),
     },
     handler: async (ctx, args) => {
+        // Accumulate per-campaign stat deltas so we only fetch each campaign
+        // document once, regardless of how many bounces belong to it.
+        // Campaign docs can be very large (htmlBody, base64 attachments), so
+        // reading the same one N times quickly exhausts the 16 MB bytes-read budget.
+        type CampaignDelta = { failedDelta: number; deliveredDelta: number };
+        const campaignDeltas = new Map<string, CampaignDelta>();
+
         for (const bounce of args.bounces) {
             const { campaignId: rawCampaignId, recipientId } = bounce;
 
-            // Validate campaign ID
             const campaignId = ctx.db.normalizeId("campaigns", rawCampaignId);
             if (!campaignId) {
                 console.warn(`Invalid campaign ID in bounce: ${rawCampaignId}`);
                 continue;
             }
 
-            // Find the message record
             const message = await ctx.db
                 .query("messages")
                 .withIndex("by_campaign_recipient", (q) =>
@@ -205,28 +210,36 @@ export const recordBounces = internalMutation({
                 .first();
 
             if (message) {
-                // Update message status to failed
                 if (message.status !== "failed") {
                     await ctx.db.patch(message._id, {
                         status: "failed",
                         errorMessage: "Bounced (NDR received)",
                     });
 
-                    // Update campaign stats
-                    const campaign = await ctx.db.get(campaignId);
-                    if (campaign) {
-                        const statsUpdate: Record<string, number> = {
-                            failedCount: (campaign.failedCount || 0) + 1,
-                        };
-                        // If previously counted as delivered, decrement to keep stats accurate
-                        if (message.status === "sent" || message.status === "delivered") {
-                            statsUpdate.deliveredCount = Math.max(0, (campaign.deliveredCount || 0) - 1);
-                        }
-                        await ctx.db.patch(campaignId, statsUpdate);
+                    const delta = campaignDeltas.get(campaignId) ?? { failedDelta: 0, deliveredDelta: 0 };
+                    delta.failedDelta += 1;
+                    if (message.status === "sent" || message.status === "delivered") {
+                        delta.deliveredDelta -= 1;
                     }
+                    campaignDeltas.set(campaignId, delta);
                 }
             } else {
                 console.warn(`Message not found for bounce: Campaign ${campaignId}, Recipient ${recipientId}`);
+            }
+        }
+
+        // Apply stat changes — one campaign fetch per unique campaign.
+        for (const [campaignId, delta] of campaignDeltas) {
+            const id = ctx.db.normalizeId("campaigns", campaignId);
+            if (!id) continue;
+            const campaign = await ctx.db.get(id);
+            if (campaign) {
+                await ctx.db.patch(id, {
+                    failedCount: (campaign.failedCount || 0) + delta.failedDelta,
+                    ...(delta.deliveredDelta !== 0 && {
+                        deliveredCount: Math.max(0, (campaign.deliveredCount || 0) + delta.deliveredDelta),
+                    }),
+                });
             }
         }
     },

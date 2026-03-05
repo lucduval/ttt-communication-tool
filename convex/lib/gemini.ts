@@ -121,6 +121,10 @@ export async function generatePersonalisedCopy(params: {
                 throw new Error("Gemini response missing required fields");
             }
 
+            // Remove em dashes — they read as AI-generated; replace with commas
+            parsed.greeting = parsed.greeting.replace(/\s*—\s*/g, ", ");
+            parsed.closingText = parsed.closingText.replace(/\s*—\s*/g, ", ");
+
             return parsed;
         } catch (err) {
             lastError = err instanceof Error ? err : new Error(String(err));

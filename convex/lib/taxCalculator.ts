@@ -178,7 +178,7 @@ export function calculateOptions(taxProfile: TaxProfileData, age?: number | null
     const income = ita34.income;
     const taxableIncome = ita34.taxableIncome;
     const currentRa = Math.abs(ita34.raContributions) + Math.abs(ita34.providentFundContributions);
-    const maxAllowableRa = calculateMaxRaDeduction(income);
+    const maxAllowableRa = calculateMaxRaDeduction(taxableIncome);
     const remainingHeadroom = Math.max(0, maxAllowableRa - currentRa);
     const taxBefore = calculateTax(taxableIncome);
 

@@ -97,17 +97,17 @@ export function buildPersonalisedEmail(params: {
       <!-- GREETING + INTRO -->
       <tr>
         <td style="background-color:#ffffff;padding:28px 32px 20px;">
-          <p style="margin:0 0 20px;font-family:'Segoe UI',Arial,sans-serif;font-size:16px;color:#1a202c;line-height:1.6;">
+          <p style="margin:0 0 20px;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;color:#4a5568;line-height:1.7;">
             ${copy.greeting}
           </p>
           <p style="margin:0 0 16px;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;color:#4a5568;line-height:1.7;">
-            The new ${targetYear} tax year has just begun &mdash; which means you now have a full year of opportunity to structure your finances strategically and reduce your tax burden.
+            The new ${targetYear} tax year has just begun, which means you now have a full year of opportunity to structure your finances strategically and reduce your tax burden.
           </p>
           <p style="margin:0 0 16px;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;color:#4a5568;line-height:1.7;">
             At TTT Financial Group, we don&rsquo;t believe in reactive tax planning. We believe in using every available mechanism to legally minimise tax and accelerate long-term wealth creation.
           </p>
           <p style="margin:0 0 16px;font-family:'Segoe UI',Arial,sans-serif;font-size:15px;color:#4a5568;line-height:1.7;">
-            Using the figures below from your most recent tax return, I&rsquo;ve prepared three tailored retirement annuity scenarios for you. For many clients, the outcome is compelling &mdash; redirecting money that would have gone to tax into a growing retirement asset instead.
+            Using the figures below from your most recent tax return, I&rsquo;ve prepared three tailored retirement annuity scenarios for you. For many clients, the outcome is compelling, redirecting money that would have gone to tax into a growing retirement asset instead.
           </p>
 
         </td>

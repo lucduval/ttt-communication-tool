@@ -36,6 +36,8 @@ export default defineSchema({
         createDynamicsActivity: v.optional(v.boolean()),
         // Selected sender mailbox for email campaigns
         fromMailbox: v.optional(v.string()),
+        // CC recipient for personalised campaigns
+        ccEmail: v.optional(v.string()),
         // Tracking stats
         clicksCount: v.optional(v.number()),
         opensCount: v.optional(v.number()),

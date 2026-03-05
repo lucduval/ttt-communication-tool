@@ -193,7 +193,7 @@ export function PersonalisedPreview({
                                     {preview && !preview.error && (
                                         <div className="flex gap-3 text-xs text-gray-500">
                                             <span>
-                                                Income: <strong className="text-gray-700">{fmt(preview.income)}</strong>
+                                                Taxable Income: <strong className="text-gray-700">{fmt(preview.income)}</strong>
                                             </span>
                                             <span>
                                                 RA: <strong className="text-gray-700">{fmt(preview.raContribution)}</strong>
