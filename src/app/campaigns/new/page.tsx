@@ -828,36 +828,38 @@ export default function NewCampaignPage() {
                                             onMailboxChange={setSelectedMailbox}
                                         />
                                         {campaignChannel === "personalised" && (
-                                            <div className="space-y-1 pt-2 border-t border-gray-100">
-                                                <label className="text-sm font-medium text-gray-700">
-                                                    CC colleague <span className="text-gray-400 font-normal">(optional)</span>
-                                                </label>
-                                                <input
-                                                    type="email"
-                                                    value={ccEmail}
-                                                    onChange={(e) => setCcEmail(e.target.value)}
-                                                    placeholder="colleague@example.com"
-                                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:border-transparent"
-                                                />
-                                                <p className="text-xs text-gray-500">
-                                                    This address will be CC&apos;d on every personalised email sent in this campaign.
-                                                </p>
-                                            </div>
-                                            <div className="space-y-1">
-                                                <label className="text-sm font-medium text-gray-700">
-                                                    BCC colleague <span className="text-gray-400 font-normal">(optional)</span>
-                                                </label>
-                                                <input
-                                                    type="email"
-                                                    value={bccEmail}
-                                                    onChange={(e) => setBccEmail(e.target.value)}
-                                                    placeholder="colleague@example.com"
-                                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:border-transparent"
-                                                />
-                                                <p className="text-xs text-gray-500">
-                                                    This address will be BCC&apos;d on every personalised email sent in this campaign.
-                                                </p>
-                                            </div>
+                                            <>
+                                                <div className="space-y-1 pt-2 border-t border-gray-100">
+                                                    <label className="text-sm font-medium text-gray-700">
+                                                        CC colleague <span className="text-gray-400 font-normal">(optional)</span>
+                                                    </label>
+                                                    <input
+                                                        type="email"
+                                                        value={ccEmail}
+                                                        onChange={(e) => setCcEmail(e.target.value)}
+                                                        placeholder="colleague@example.com"
+                                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:border-transparent"
+                                                    />
+                                                    <p className="text-xs text-gray-500">
+                                                        This address will be CC&apos;d on every personalised email sent in this campaign.
+                                                    </p>
+                                                </div>
+                                                <div className="space-y-1">
+                                                    <label className="text-sm font-medium text-gray-700">
+                                                        BCC colleague <span className="text-gray-400 font-normal">(optional)</span>
+                                                    </label>
+                                                    <input
+                                                        type="email"
+                                                        value={bccEmail}
+                                                        onChange={(e) => setBccEmail(e.target.value)}
+                                                        placeholder="colleague@example.com"
+                                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:border-transparent"
+                                                    />
+                                                    <p className="text-xs text-gray-500">
+                                                        This address will be BCC&apos;d on every personalised email sent in this campaign.
+                                                    </p>
+                                                </div>
+                                            </>
                                         )}
                                     </div>
                                 </Card>
