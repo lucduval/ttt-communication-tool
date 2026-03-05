@@ -931,6 +931,9 @@ export const processPersonalisedBatch = internalAction({
                         ccRecipients: campaign.ccEmail
                             ? [{ email: campaign.ccEmail }]
                             : undefined,
+                        bccRecipients: campaign.bccEmail
+                            ? [{ email: campaign.bccEmail }]
+                            : undefined,
                         attachments: [],
                         fromMailbox: campaign.fromMailbox,
                         headers: {

@@ -38,6 +38,8 @@ export default defineSchema({
         fromMailbox: v.optional(v.string()),
         // CC recipient for personalised campaigns
         ccEmail: v.optional(v.string()),
+        // BCC recipient for personalised campaigns
+        bccEmail: v.optional(v.string()),
         // Tracking stats
         clicksCount: v.optional(v.number()),
         opensCount: v.optional(v.number()),

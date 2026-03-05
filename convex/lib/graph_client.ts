@@ -78,6 +78,7 @@ export interface EmailMessage {
     body: string; // HTML content
     toRecipients: Array<{ email: string; name?: string }>;
     ccRecipients?: Array<{ email: string; name?: string }>;
+    bccRecipients?: Array<{ email: string; name?: string }>;
     attachments?: EmailAttachment[];
     importance?: "low" | "normal" | "high";
     saveToSentItems?: boolean;
@@ -129,6 +130,16 @@ export async function sendEmail(message: EmailMessage): Promise<{ success: boole
     // Add CC recipients if provided
     if (message.ccRecipients && message.ccRecipients.length > 0) {
         (emailPayload.message as Record<string, unknown>).ccRecipients = message.ccRecipients.map((r) => ({
+            emailAddress: {
+                address: r.email,
+                name: r.name || r.email,
+            },
+        }));
+    }
+
+    // Add BCC recipients if provided
+    if (message.bccRecipients && message.bccRecipients.length > 0) {
+        (emailPayload.message as Record<string, unknown>).bccRecipients = message.bccRecipients.map((r) => ({
             emailAddress: {
                 address: r.email,
                 name: r.name || r.email,

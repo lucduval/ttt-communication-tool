@@ -122,6 +122,7 @@ export default function NewCampaignPage() {
     const [previewsGenerated, setPreviewsGenerated] = useState(false);
     const [createOpportunities, setCreateOpportunities] = useState(false);
     const [ccEmail, setCcEmail] = useState("");
+    const [bccEmail, setBccEmail] = useState("");
 
     // Test email state
     const [showTestModal, setShowTestModal] = useState(false);
@@ -609,6 +610,7 @@ export default function NewCampaignPage() {
                 aiSystemPrompt: campaignChannel === "personalised" ? aiSystemPrompt : undefined,
                 createOpportunities: campaignChannel === "personalised" ? createOpportunities : undefined,
                 ccEmail: campaignChannel === "personalised" ? ccEmail || undefined : undefined,
+                bccEmail: campaignChannel === "personalised" ? bccEmail || undefined : undefined,
             });
 
             // Queue batches and start processing (async - returns immediately)
@@ -839,6 +841,21 @@ export default function NewCampaignPage() {
                                                 />
                                                 <p className="text-xs text-gray-500">
                                                     This address will be CC&apos;d on every personalised email sent in this campaign.
+                                                </p>
+                                            </div>
+                                            <div className="space-y-1">
+                                                <label className="text-sm font-medium text-gray-700">
+                                                    BCC colleague <span className="text-gray-400 font-normal">(optional)</span>
+                                                </label>
+                                                <input
+                                                    type="email"
+                                                    value={bccEmail}
+                                                    onChange={(e) => setBccEmail(e.target.value)}
+                                                    placeholder="colleague@example.com"
+                                                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:border-transparent"
+                                                />
+                                                <p className="text-xs text-gray-500">
+                                                    This address will be BCC&apos;d on every personalised email sent in this campaign.
                                                 </p>
                                             </div>
                                         )}
