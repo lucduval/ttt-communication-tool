@@ -17,7 +17,7 @@ const SECONDARY_REBATE = 9_444; // 65-74
 const TERTIARY_REBATE = 3_145; // 75+
 
 const RA_DEDUCTION_RATE = 0.275; // 27.5%
-const RA_DEDUCTION_CAP = 350_000;
+const RA_DEDUCTION_CAP = 430_000;
 
 export interface RetirementProjection {
     currentAge: number;
