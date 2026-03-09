@@ -5,7 +5,7 @@ import { useAction, useQuery, useMutation } from "convex/react";
 import { ConvexError } from "convex/values";
 import { api } from "@/../convex/_generated/api";
 import { Header } from "@/components/layout";
-import { Button, Card, Badge, ConfirmationModal, Pagination } from "@/components/ui";
+import { Button, Card, Badge, ConfirmationModal } from "@/components/ui";
 import { EmailComposer, EmailPreview, TestEmailModal, MailboxSelector, LivePreviewModal, PersonalisedComposer, PersonalisedPreview } from "@/components/email";
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, DEFAULT_SUBJECT as DEFAULT_PERSONALISED_SUBJECT } from "@/components/email/PersonalisedComposer";
 import {
@@ -43,7 +43,7 @@ import type { Doc, Id } from "@/../convex/_generated/dataModel";
 type CampaignChannel = "email" | "whatsapp" | "personalised";
 type WizardStep = "channel" | "recipients" | "compose" | "preview" | "send";
 
-const ITEMS_PER_PAGE = 50;
+const LOAD_MORE_SIZE = 50;
 
 const STEPS: { id: WizardStep; label: string; icon: React.ElementType }[] = [
     { id: "channel", label: "Channel", icon: Zap },
@@ -98,18 +98,18 @@ export default function NewCampaignPage() {
     const [totalCount, setTotalCount] = useState<number | null>(null);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [selectedContacts, setSelectedContacts] = useState<Contact[]>([]);
-    const [currentPage, setCurrentPage] = useState(1);
-    // Cursor tokens for server-side pagination (Dynamics doesn't support $skip).
-    // Stored in a ref so that updating tokens doesn't recreate loadContacts via useCallback.
-    // pageTokensRef.current[n] is the skipToken needed to fetch page n.
-    const pageTokensRef = useRef<Record<number, string>>({});
+    // Load More state — replaces page-based pagination
+    const [nextPageToken, setNextPageToken] = useState<string | null>(null);
+    const [clientSideOffset, setClientSideOffset] = useState(LOAD_MORE_SIZE);
+    const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [audience, setAudience] = useState<"clients" | "employees">("clients");
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
         status: "all",
     });
     const [allEmployees, setAllEmployees] = useState<Contact[]>([]);
-    const [allFilteredContacts, setAllFilteredContacts] = useState<Contact[]>([]);
+    // Holds the full client-side dataset for employee/ITA34/TaxReturn modes so Load More can slice it
+    const allFilteredContactsRef = useRef<Contact[]>([]);
     const [availableDomains, setAvailableDomains] = useState<string[]>([]);
 
     // Email state
@@ -193,130 +193,151 @@ export default function NewCampaignPage() {
 
     const hasTaxReturnFilters = filters.taxReturnMin !== null;
 
-    const loadContacts = useCallback(async (page: number = 1) => {
+    const loadContacts = useCallback(async (append: boolean = false) => {
         try {
-            setIsLoadingContacts(true);
+            if (append) {
+                setIsLoadingMore(true);
+            } else {
+                setIsLoadingContacts(true);
+            }
 
             if (audience === "employees") {
-                const needDisabled = employeeFilters.status === "all" || employeeFilters.status === "inactive";
-                const employees = await fetchEmployees({ includeDisabled: needDisabled });
-                const mappedEmployees: Contact[] = employees.map(emp => ({
-                    id: emp.id,
-                    fullName: emp.name,
-                    firstName: null,
-                    lastName: null,
-                    email: emp.email || null,
-                    phone: emp.phone || null,
-                    internationalPhone: emp.phone || null,
-                    isActive: !emp.isDisabled,
-                    clientType: "employee",
-                    marketingPreferences: { tax: false, accounting: false, insurance: false },
-                    whatsappOptIn: true,
-                    emailNotifications: true,
-                    smsNotifications: true,
-                    createdOn: new Date().toISOString(),
-                    modifiedOn: new Date().toISOString(),
-                }));
+                if (!append) {
+                    // Full re-fetch on filter reset
+                    const needDisabled = employeeFilters.status === "all" || employeeFilters.status === "inactive";
+                    const employees = await fetchEmployees({ includeDisabled: needDisabled });
+                    const mappedEmployees: Contact[] = employees.map(emp => ({
+                        id: emp.id,
+                        fullName: emp.name,
+                        firstName: null,
+                        lastName: null,
+                        email: emp.email || null,
+                        phone: emp.phone || null,
+                        internationalPhone: emp.phone || null,
+                        isActive: !emp.isDisabled,
+                        clientType: "employee",
+                        marketingPreferences: { tax: false, accounting: false, insurance: false },
+                        whatsappOptIn: true,
+                        emailNotifications: true,
+                        smsNotifications: true,
+                        createdOn: new Date().toISOString(),
+                        modifiedOn: new Date().toISOString(),
+                    }));
 
-                // Extract unique domains for the filter dropdown
-                const domains = new Set<string>();
-                mappedEmployees.forEach(emp => {
-                    if (emp.email) {
-                        const domain = emp.email.split("@")[1];
-                        if (domain) domains.add(domain);
+                    const domains = new Set<string>();
+                    mappedEmployees.forEach(emp => {
+                        if (emp.email) {
+                            const domain = emp.email.split("@")[1];
+                            if (domain) domains.add(domain);
+                        }
+                    });
+                    setAvailableDomains(Array.from(domains).sort());
+                    setAllEmployees(mappedEmployees);
+
+                    let filtered = mappedEmployees;
+                    if (employeeFilters.status === "active") {
+                        filtered = filtered.filter(e => e.isActive);
+                    } else if (employeeFilters.status === "inactive") {
+                        filtered = filtered.filter(e => !e.isActive);
                     }
-                });
-                const sortedDomains = Array.from(domains).sort();
-                setAvailableDomains(sortedDomains);
-                setAllEmployees(mappedEmployees);
-
-                // Apply client-side filters
-                let filtered = mappedEmployees;
-
-                if (employeeFilters.status === "active") {
-                    filtered = filtered.filter(e => e.isActive);
-                } else if (employeeFilters.status === "inactive") {
-                    filtered = filtered.filter(e => !e.isActive);
-                }
-
-                if (employeeFilters.emailDomains.length > 0) {
+                    if (employeeFilters.emailDomains.length > 0) {
+                        filtered = filtered.filter(e => {
+                            if (!e.email) return false;
+                            const domain = e.email.split("@")[1];
+                            return domain && employeeFilters.emailDomains.includes(domain);
+                        });
+                    }
                     filtered = filtered.filter(e => {
-                        if (!e.email) return false;
-                        const domain = e.email.split("@")[1];
-                        return domain && employeeFilters.emailDomains.includes(domain);
+                        if (campaignChannel === "email") return !!e.email;
+                        return !!e.phone;
+                    });
+
+                    allFilteredContactsRef.current = filtered;
+                    setTotalCount(filtered.length);
+                    setClientSideOffset(LOAD_MORE_SIZE);
+                    setContacts(filtered.slice(0, LOAD_MORE_SIZE));
+                } else {
+                    // Load More: append next slice from already-fetched data
+                    setClientSideOffset(prev => {
+                        const newOffset = prev + LOAD_MORE_SIZE;
+                        setContacts(allFilteredContactsRef.current.slice(0, newOffset));
+                        return newOffset;
                     });
                 }
-
-                // Filter by channel capability
-                filtered = filtered.filter(e => {
-                    if (campaignChannel === "email") return !!e.email;
-                    return !!e.phone;
-                });
-
-                setAllFilteredContacts(filtered);
-                setTotalCount(filtered.length);
-                const start = (page - 1) * ITEMS_PER_PAGE;
-                setContacts(filtered.slice(start, start + ITEMS_PER_PAGE));
             } else if (campaignChannel === "personalised" && hasTaxReturnFilters) {
-                const channelFilter = getChannelFilter();
-
-                const result = await fetchContactsByTaxReturn({
-                    taxReturnMin: filters.taxReturnMin!,
-                    taxReturnYear: filters.taxReturnYear ?? undefined,
-                    filter: channelFilter,
-                    search: filters.search || undefined,
-                    clientType: filters.clientType || undefined,
-                    entityType: filters.entityType ?? undefined,
-                    bank: filters.bank ?? undefined,
-                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
-                    province: filters.province || undefined,
-                    ageMin: filters.ageMin ?? undefined,
-                    ageMax: filters.ageMax ?? undefined,
-                    ownerId: filters.ownerId || undefined,
-                    industryId: filters.industryId || undefined,
-                });
-
-                const allContacts = result.contacts as Contact[];
-                setAllFilteredContacts(allContacts);
-                setTotalCount(result.totalCount);
-                const start = (page - 1) * ITEMS_PER_PAGE;
-                setContacts(allContacts.slice(start, start + ITEMS_PER_PAGE));
+                if (!append) {
+                    const channelFilter = getChannelFilter();
+                    const result = await fetchContactsByTaxReturn({
+                        taxReturnMin: filters.taxReturnMin!,
+                        taxReturnYear: filters.taxReturnYear ?? undefined,
+                        filter: channelFilter,
+                        search: filters.search || undefined,
+                        clientType: filters.clientType || undefined,
+                        entityType: filters.entityType ?? undefined,
+                        bank: filters.bank ?? undefined,
+                        sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                        province: filters.province || undefined,
+                        ageMin: filters.ageMin ?? undefined,
+                        ageMax: filters.ageMax ?? undefined,
+                        ownerId: filters.ownerId || undefined,
+                        industryId: filters.industryId || undefined,
+                    });
+                    const allContacts = result.contacts as Contact[];
+                    allFilteredContactsRef.current = allContacts;
+                    setTotalCount(result.totalCount);
+                    setClientSideOffset(LOAD_MORE_SIZE);
+                    setContacts(allContacts.slice(0, LOAD_MORE_SIZE));
+                } else {
+                    setClientSideOffset(prev => {
+                        const newOffset = prev + LOAD_MORE_SIZE;
+                        setContacts(allFilteredContactsRef.current.slice(0, newOffset));
+                        return newOffset;
+                    });
+                }
             } else if (campaignChannel === "personalised" && hasITA34Filters) {
-                const channelFilter = getChannelFilter();
-
-                const result = await fetchContactsWithITA34({
-                    filter: channelFilter,
-                    search: filters.search || undefined,
-                    clientType: filters.clientType || undefined,
-                    entityType: filters.entityType ?? undefined,
-                    bank: filters.bank ?? undefined,
-                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
-                    province: filters.province || undefined,
-                    ageMin: filters.ageMin ?? undefined,
-                    ageMax: filters.ageMax ?? undefined,
-                    ownerId: filters.ownerId || undefined,
-                    industryId: filters.industryId || undefined,
-                    incomeMin: filters.incomeMin ?? undefined,
-                    incomeMax: filters.incomeMax ?? undefined,
-                    retirementFundMin: filters.retirementFundMin ?? undefined,
-                    retirementFundMax: filters.retirementFundMax ?? undefined,
-                });
-
-                const allContacts = result.contacts as Contact[];
-                setAllFilteredContacts(allContacts);
-                setTotalCount(result.totalCount);
-                const start = (page - 1) * ITEMS_PER_PAGE;
-                setContacts(allContacts.slice(start, start + ITEMS_PER_PAGE));
+                if (!append) {
+                    const channelFilter = getChannelFilter();
+                    const result = await fetchContactsWithITA34({
+                        filter: channelFilter,
+                        search: filters.search || undefined,
+                        clientType: filters.clientType || undefined,
+                        entityType: filters.entityType ?? undefined,
+                        bank: filters.bank ?? undefined,
+                        sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                        province: filters.province || undefined,
+                        ageMin: filters.ageMin ?? undefined,
+                        ageMax: filters.ageMax ?? undefined,
+                        ownerId: filters.ownerId || undefined,
+                        industryId: filters.industryId || undefined,
+                        incomeMin: filters.incomeMin ?? undefined,
+                        incomeMax: filters.incomeMax ?? undefined,
+                        retirementFundMin: filters.retirementFundMin ?? undefined,
+                        retirementFundMax: filters.retirementFundMax ?? undefined,
+                    });
+                    const allContacts = result.contacts as Contact[];
+                    allFilteredContactsRef.current = allContacts;
+                    setTotalCount(result.totalCount);
+                    setClientSideOffset(LOAD_MORE_SIZE);
+                    setContacts(allContacts.slice(0, LOAD_MORE_SIZE));
+                } else {
+                    setClientSideOffset(prev => {
+                        const newOffset = prev + LOAD_MORE_SIZE;
+                        setContacts(allFilteredContactsRef.current.slice(0, newOffset));
+                        return newOffset;
+                    });
+                }
             } else {
-                setAllFilteredContacts([]);
+                // Server-side cursor pagination
+                allFilteredContactsRef.current = [];
                 const channelFilter = getChannelFilter();
+                const token = append ? nextPageToken ?? undefined : undefined;
 
                 const [contactsResult, countResult] = await Promise.all([
                     fetchContacts({
                         filter: channelFilter,
                         search: filters.search || undefined,
-                        top: ITEMS_PER_PAGE,
-                        skipToken: pageTokensRef.current[page] || undefined,
+                        top: LOAD_MORE_SIZE,
+                        skipToken: token,
                         clientType: filters.clientType || undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
@@ -327,7 +348,8 @@ export default function NewCampaignPage() {
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
                     }),
-                    getContactCount({
+                    // Only fetch count on initial load (not on append)
+                    !append ? getContactCount({
                         filter: channelFilter,
                         search: filters.search || undefined,
                         clientType: filters.clientType || undefined,
@@ -339,22 +361,24 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
-                    }),
+                    }) : Promise.resolve(null),
                 ]);
 
-                setContacts(contactsResult.contacts as Contact[]);
-                setTotalCount(countResult.count);
-                // Store the next page cursor token so we can navigate forward
-                if (contactsResult.nextPage) {
-                    pageTokensRef.current[page + 1] = contactsResult.nextPage as string;
+                if (append) {
+                    setContacts(prev => [...prev, ...contactsResult.contacts as Contact[]]);
+                } else {
+                    setContacts(contactsResult.contacts as Contact[]);
+                    if (countResult) setTotalCount(countResult.count);
                 }
+                setNextPageToken(contactsResult.nextPage ?? null);
             }
         } catch (err) {
             console.error("Failed to fetch contacts:", err);
         } finally {
             setIsLoadingContacts(false);
+            setIsLoadingMore(false);
         }
-    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters]);
+    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, nextPageToken]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -367,12 +391,13 @@ export default function NewCampaignPage() {
     const loadContactsRef = useRef(loadContacts);
     useEffect(() => { loadContactsRef.current = loadContacts; });
 
-    // Reload contacts when filters or step changes (only in recipients step) — reset to page 1
+    // Reload contacts when filters or step changes — reset to fresh first batch
     useEffect(() => {
         if (currentStep === "recipients") {
-            setCurrentPage(1);
-            pageTokensRef.current = {};
-            const timer = setTimeout(() => loadContactsRef.current(1), 300);
+            setNextPageToken(null);
+            setClientSideOffset(LOAD_MORE_SIZE);
+            allFilteredContactsRef.current = [];
+            const timer = setTimeout(() => loadContactsRef.current(false), 300);
             return () => clearTimeout(timer);
         }
     }, [currentStep, filters, audience, employeeFilters]);
@@ -766,18 +791,16 @@ export default function NewCampaignPage() {
         setVirtualTotalCount(null);
     };
 
-    const handlePageChange = (page: number) => {
-        setCurrentPage(page);
-        // For ITA34/TaxReturn/Employee modes we already have all data client-side
-        const isClientSidePaginated = audience === "employees" ||
-            (campaignChannel === "personalised" && (hasITA34Filters || hasTaxReturnFilters));
-        if (isClientSidePaginated && allFilteredContacts.length > 0) {
-            const start = (page - 1) * ITEMS_PER_PAGE;
-            setContacts(allFilteredContacts.slice(start, start + ITEMS_PER_PAGE));
-        } else {
-            loadContacts(page);
-        }
+    const handleLoadMore = () => {
+        loadContacts(true);
     };
+
+    // Derived: whether more contacts are available to load
+    const isClientSideMode = audience === "employees" ||
+        (campaignChannel === "personalised" && (hasITA34Filters || hasTaxReturnFilters));
+    const hasMore = isClientSideMode
+        ? contacts.length < allFilteredContactsRef.current.length
+        : nextPageToken !== null;
 
     const channelLabel = campaignChannel === "personalised" ? "Personalised" : campaignChannel === "email" ? "Email" : "WhatsApp";
 
@@ -1061,15 +1084,29 @@ export default function NewCampaignPage() {
                                 onClearAll={handleClearSelection}
                             />
 
-                            {totalCount !== null && totalCount > ITEMS_PER_PAGE && (
-                                <Pagination
-                                    currentPage={currentPage}
-                                    totalPages={Math.ceil(totalCount / ITEMS_PER_PAGE)}
-                                    totalItems={totalCount}
-                                    itemsPerPage={ITEMS_PER_PAGE}
-                                    onPageChange={handlePageChange}
-                                    isLoading={isLoadingContacts}
-                                />
+                            {/* Load More footer */}
+                            {!isLoadingContacts && (
+                                <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100">
+                                    <span className="text-sm text-gray-500">
+                                        Showing {contacts.length}{totalCount !== null ? ` of ${totalCount.toLocaleString()}` : ""} contacts
+                                    </span>
+                                    {hasMore && (
+                                        <button
+                                            onClick={handleLoadMore}
+                                            disabled={isLoadingMore}
+                                            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-[#1E3A5F] border border-[#1E3A5F] rounded-lg hover:bg-[#1E3A5F] hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                        >
+                                            {isLoadingMore ? (
+                                                <>
+                                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                                    Loading…
+                                                </>
+                                            ) : (
+                                                "Load more"
+                                            )}
+                                        </button>
+                                    )}
+                                </div>
                             )}
                         </div>
                     )}
