@@ -5,7 +5,7 @@ import { useAction, useQuery, useMutation } from "convex/react";
 import { ConvexError } from "convex/values";
 import { api } from "@/../convex/_generated/api";
 import { Header } from "@/components/layout";
-import { Button, Card, Badge, ConfirmationModal } from "@/components/ui";
+import { Button, Card, Badge, ConfirmationModal, Pagination } from "@/components/ui";
 import { EmailComposer, EmailPreview, TestEmailModal, MailboxSelector, LivePreviewModal, PersonalisedComposer, PersonalisedPreview } from "@/components/email";
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, DEFAULT_SUBJECT as DEFAULT_PERSONALISED_SUBJECT } from "@/components/email/PersonalisedComposer";
 import {
@@ -42,6 +42,8 @@ import type { Doc, Id } from "@/../convex/_generated/dataModel";
 
 type CampaignChannel = "email" | "whatsapp" | "personalised";
 type WizardStep = "channel" | "recipients" | "compose" | "preview" | "send";
+
+const ITEMS_PER_PAGE = 50;
 
 const STEPS: { id: WizardStep; label: string; icon: React.ElementType }[] = [
     { id: "channel", label: "Channel", icon: Zap },
@@ -96,12 +98,14 @@ export default function NewCampaignPage() {
     const [totalCount, setTotalCount] = useState<number | null>(null);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [selectedContacts, setSelectedContacts] = useState<Contact[]>([]);
+    const [currentPage, setCurrentPage] = useState(1);
     const [audience, setAudience] = useState<"clients" | "employees">("clients");
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
         status: "all",
     });
     const [allEmployees, setAllEmployees] = useState<Contact[]>([]);
+    const [allFilteredContacts, setAllFilteredContacts] = useState<Contact[]>([]);
     const [availableDomains, setAvailableDomains] = useState<string[]>([]);
 
     // Email state
@@ -185,7 +189,7 @@ export default function NewCampaignPage() {
 
     const hasTaxReturnFilters = filters.taxReturnMin !== null;
 
-    const loadContacts = useCallback(async () => {
+    const loadContacts = useCallback(async (page: number = 1) => {
         try {
             setIsLoadingContacts(true);
 
@@ -245,8 +249,10 @@ export default function NewCampaignPage() {
                     return !!e.phone;
                 });
 
-                setContacts(filtered);
+                setAllFilteredContacts(filtered);
                 setTotalCount(filtered.length);
+                const start = (page - 1) * ITEMS_PER_PAGE;
+                setContacts(filtered.slice(start, start + ITEMS_PER_PAGE));
             } else if (campaignChannel === "personalised" && hasTaxReturnFilters) {
                 const channelFilter = getChannelFilter();
 
@@ -266,8 +272,11 @@ export default function NewCampaignPage() {
                     industryId: filters.industryId || undefined,
                 });
 
-                setContacts(result.contacts as Contact[]);
+                const allContacts = result.contacts as Contact[];
+                setAllFilteredContacts(allContacts);
                 setTotalCount(result.totalCount);
+                const start = (page - 1) * ITEMS_PER_PAGE;
+                setContacts(allContacts.slice(start, start + ITEMS_PER_PAGE));
             } else if (campaignChannel === "personalised" && hasITA34Filters) {
                 const channelFilter = getChannelFilter();
 
@@ -289,16 +298,21 @@ export default function NewCampaignPage() {
                     retirementFundMax: filters.retirementFundMax ?? undefined,
                 });
 
-                setContacts(result.contacts as Contact[]);
+                const allContacts = result.contacts as Contact[];
+                setAllFilteredContacts(allContacts);
                 setTotalCount(result.totalCount);
+                const start = (page - 1) * ITEMS_PER_PAGE;
+                setContacts(allContacts.slice(start, start + ITEMS_PER_PAGE));
             } else {
+                setAllFilteredContacts([]);
                 const channelFilter = getChannelFilter();
 
                 const [contactsResult, countResult] = await Promise.all([
                     fetchContacts({
                         filter: channelFilter,
                         search: filters.search || undefined,
-                        top: 50,
+                        top: ITEMS_PER_PAGE,
+                        skip: (page - 1) * ITEMS_PER_PAGE,
                         clientType: filters.clientType || undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
@@ -339,10 +353,11 @@ export default function NewCampaignPage() {
     const [isSelectAllActive, setIsSelectAllActive] = useState(false);
     const [virtualTotalCount, setVirtualTotalCount] = useState<number | null>(null);
 
-    // Reload contacts when filters or step changes (only in recipients step)
+    // Reload contacts when filters or step changes (only in recipients step) — reset to page 1
     useEffect(() => {
         if (currentStep === "recipients") {
-            const timer = setTimeout(() => loadContacts(), 300);
+            setCurrentPage(1);
+            const timer = setTimeout(() => loadContacts(1), 300);
             return () => clearTimeout(timer);
         }
     }, [currentStep, filters, loadContacts, audience, employeeFilters]);
@@ -736,6 +751,19 @@ export default function NewCampaignPage() {
         setVirtualTotalCount(null);
     };
 
+    const handlePageChange = (page: number) => {
+        setCurrentPage(page);
+        // For ITA34/TaxReturn/Employee modes we already have all data client-side
+        const isClientSidePaginated = audience === "employees" ||
+            (campaignChannel === "personalised" && (hasITA34Filters || hasTaxReturnFilters));
+        if (isClientSidePaginated && allFilteredContacts.length > 0) {
+            const start = (page - 1) * ITEMS_PER_PAGE;
+            setContacts(allFilteredContacts.slice(start, start + ITEMS_PER_PAGE));
+        } else {
+            loadContacts(page);
+        }
+    };
+
     const channelLabel = campaignChannel === "personalised" ? "Personalised" : campaignChannel === "email" ? "Email" : "WhatsApp";
 
     // Estimated WhatsApp cost
@@ -1013,7 +1041,21 @@ export default function NewCampaignPage() {
                                 showSelection={true}
                                 showITA34Columns={campaignChannel === "personalised" && hasITA34Filters}
                                 showSarsColumn={campaignChannel === "personalised" && hasTaxReturnFilters}
+                                isSelectAllActive={isSelectAllActive}
+                                onSelectAll={handleSelectAll}
+                                onClearAll={handleClearSelection}
                             />
+
+                            {totalCount !== null && totalCount > ITEMS_PER_PAGE && (
+                                <Pagination
+                                    currentPage={currentPage}
+                                    totalPages={Math.ceil(totalCount / ITEMS_PER_PAGE)}
+                                    totalItems={totalCount}
+                                    itemsPerPage={ITEMS_PER_PAGE}
+                                    onPageChange={handlePageChange}
+                                    isLoading={isLoadingContacts}
+                                />
+                            )}
                         </div>
                     )}
 

@@ -37,6 +37,9 @@ interface ContactListProps {
     showSelection?: boolean;
     showITA34Columns?: boolean;
     showSarsColumn?: boolean;
+    isSelectAllActive?: boolean;
+    onSelectAll?: () => void;
+    onClearAll?: () => void;
 }
 
 const formatCurrency = (value: number | null | undefined) => {
@@ -52,9 +55,21 @@ export function ContactList({
     showSelection = false,
     showITA34Columns = false,
     showSarsColumn = false,
+    isSelectAllActive = false,
+    onSelectAll,
+    onClearAll,
 }: ContactListProps) {
     const toggleSelection = (id: string) => {
         if (!onSelectionChange) return;
+        // If select-all is active and user unchecks one, clear select-all mode first
+        if (isSelectAllActive && onClearAll) {
+            onClearAll();
+            // Select all current page contacts except the toggled one
+            const newSelection = new Set(contacts.map((c) => c.id));
+            newSelection.delete(id);
+            onSelectionChange(newSelection);
+            return;
+        }
         const newSelection = new Set(selectedIds);
         if (newSelection.has(id)) {
             newSelection.delete(id);
@@ -65,6 +80,15 @@ export function ContactList({
     };
 
     const toggleAll = () => {
+        if (isSelectAllActive && onClearAll) {
+            onClearAll();
+            return;
+        }
+        if (onSelectAll) {
+            onSelectAll();
+            return;
+        }
+        // Fallback: page-level toggle
         if (!onSelectionChange) return;
         if (selectedIds.size === contacts.length) {
             onSelectionChange(new Set());
@@ -106,7 +130,7 @@ export function ContactList({
                             <th className="px-4 py-4 w-12">
                                 <input
                                     type="checkbox"
-                                    checked={selectedIds.size === contacts.length && contacts.length > 0}
+                                    checked={isSelectAllActive || (selectedIds.size === contacts.length && contacts.length > 0)}
                                     onChange={toggleAll}
                                     className="rounded border-gray-300"
                                 />
@@ -132,14 +156,14 @@ export function ContactList({
                     {contacts.map((contact) => (
                         <tr
                             key={contact.id}
-                            className={`hover:bg-gray-50 transition-colors ${selectedIds.has(contact.id) ? "bg-blue-50" : ""
+                            className={`hover:bg-gray-50 transition-colors ${(isSelectAllActive || selectedIds.has(contact.id)) ? "bg-blue-50" : ""
                                 }`}
                         >
                             {showSelection && (
                                 <td className="px-4 py-4">
                                     <input
                                         type="checkbox"
-                                        checked={selectedIds.has(contact.id)}
+                                        checked={isSelectAllActive || selectedIds.has(contact.id)}
                                         onChange={() => toggleSelection(contact.id)}
                                         className="rounded border-gray-300"
                                     />
