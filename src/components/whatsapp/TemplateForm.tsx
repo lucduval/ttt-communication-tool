@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { useMutation } from "convex/react";
 import { api } from "@/../convex/_generated/api";
 import { Button } from "@/components/ui";
-import { Loader2 } from "lucide-react";
+import { Globe, Lock, Loader2 } from "lucide-react";
 import type { Doc, Id } from "@/../convex/_generated/dataModel";
 
 const CATEGORIES = ["marketing", "utility", "authentication"] as const;
@@ -34,6 +34,7 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
         headerType: "none" as typeof HEADER_TYPES[number],
         headerText: "",
         headerUrl: "",
+        visibility: "shared" as "private" | "shared",
     });
 
     const DYNAMICS_FIELDS = [
@@ -70,6 +71,7 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                 headerType: (initialData.headerType as typeof HEADER_TYPES[number]) || "none",
                 headerText: initialData.headerText || "",
                 headerUrl: initialData.headerUrl || "",
+                visibility: (initialData.visibility as "private" | "shared") ?? "shared",
             });
         }
     }, [initialData]);
@@ -112,6 +114,7 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                 headerType: formData.headerType,
                 headerText: formData.headerType === "text" ? formData.headerText : undefined,
                 headerUrl: ["image", "document", "video"].includes(formData.headerType) ? formData.headerUrl : undefined,
+                visibility: formData.visibility,
             };
 
             let templateId: Id<"whatsappTemplates">;
@@ -364,6 +367,38 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                     </div>
                 </div>
             )}
+
+            {/* Visibility */}
+            <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg border border-gray-100">
+                <div className="flex-1">
+                    <p className="text-sm font-medium text-gray-700">Visibility</p>
+                    <p className="text-xs text-gray-400 mt-0.5">
+                        {formData.visibility === "shared"
+                            ? "Visible to all users"
+                            : "Only visible to admins"}
+                    </p>
+                </div>
+                <button
+                    type="button"
+                    onClick={() =>
+                        setFormData((prev) => ({
+                            ...prev,
+                            visibility: prev.visibility === "shared" ? "private" : "shared",
+                        }))
+                    }
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium border transition-colors ${
+                        formData.visibility === "shared"
+                            ? "bg-green-50 border-green-200 text-green-700 hover:bg-green-100"
+                            : "bg-gray-100 border-gray-200 text-gray-600 hover:bg-gray-200"
+                    }`}
+                >
+                    {formData.visibility === "shared" ? (
+                        <><Globe size={14} /> Shared</>
+                    ) : (
+                        <><Lock size={14} /> Private</>
+                    )}
+                </button>
+            </div>
 
             <div className="flex justify-end gap-3 pt-4 border-t">
                 <Button

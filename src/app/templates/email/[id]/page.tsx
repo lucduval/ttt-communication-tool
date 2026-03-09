@@ -4,7 +4,7 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "../../../../../convex/_generated/api";
 import { EmailComposer } from "@/components/email/EmailComposer";
 import { Button } from "@/components/ui/Button";
-import { ChevronLeft, Save } from "lucide-react";
+import { ChevronLeft, Globe, Lock, Save } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
@@ -24,6 +24,7 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
     const templateId = isNew ? undefined : (id as Id<"emailTemplates">);
 
     const template = useQuery(api.emailTemplates.getById, templateId ? { id: templateId } : "skip");
+    const currentUser = useQuery(api.users.getCurrentUser);
     const createTemplate = useMutation(api.emailTemplates.create);
     const updateTemplate = useMutation(api.emailTemplates.update);
 
@@ -31,17 +32,22 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
     const [subject, setSubject] = useState("");
     const [htmlContent, setHtmlContent] = useState("");
     const [fontSize, setFontSize] = useState("18px");
+    const [visibility, setVisibility] = useState<"private" | "shared">("private");
     const [isSubmitting, setIsSubmitting] = useState(false);
 
-    // Load template data
     useEffect(() => {
         if (template) {
             setName(template.name);
             setSubject(template.subject);
             setHtmlContent(template.htmlContent);
             if (template.fontSize) setFontSize(template.fontSize);
+            setVisibility(template.visibility ?? "shared");
         }
     }, [template]);
+
+    const isAdmin = currentUser?.role === "admin";
+    const isOwner = template ? template.createdBy === currentUser?._id : true;
+    const canEdit = isNew || isAdmin || isOwner;
 
     const handleSave = async () => {
         if (!name.trim()) {
@@ -61,8 +67,8 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
                     subject,
                     htmlContent,
                     fontSize,
+                    visibility,
                 });
-                alert("Template created");
                 router.push("/templates/email");
             } else {
                 if (templateId) {
@@ -72,8 +78,8 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
                         subject,
                         htmlContent,
                         fontSize,
+                        visibility,
                     });
-                    // toast.success("Template updated");
                     router.push("/templates/email");
                 }
             }
@@ -85,7 +91,7 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
         }
     };
 
-    if (!isNew && template === undefined) {
+    if (!isNew && (template === undefined || currentUser === undefined)) {
         return <div className="p-8 text-center">Loading template...</div>;
     }
 
@@ -114,14 +120,49 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
                         />
                     </div>
                 </div>
-                <div className="flex gap-3">
+
+                <div className="flex items-center gap-3">
+                    {/* Visibility toggle */}
+                    {canEdit && (
+                        <button
+                            type="button"
+                            onClick={() =>
+                                setVisibility((v) => (v === "shared" ? "private" : "shared"))
+                            }
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium border transition-colors ${
+                                visibility === "shared"
+                                    ? "bg-green-50 border-green-200 text-green-700 hover:bg-green-100"
+                                    : "bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100"
+                            }`}
+                            title={
+                                visibility === "shared"
+                                    ? "Visible to everyone — click to make private"
+                                    : "Only visible to you — click to share"
+                            }
+                        >
+                            {visibility === "shared" ? (
+                                <>
+                                    <Globe size={15} />
+                                    Shared
+                                </>
+                            ) : (
+                                <>
+                                    <Lock size={15} />
+                                    Private
+                                </>
+                            )}
+                        </button>
+                    )}
+
                     <Link href="/templates/email">
                         <Button variant="ghost">Cancel</Button>
                     </Link>
-                    <Button onClick={handleSave} disabled={isSubmitting} className="gap-2">
-                        <Save size={18} />
-                        {isSubmitting ? "Saving..." : "Save Template"}
-                    </Button>
+                    {canEdit && (
+                        <Button onClick={handleSave} disabled={isSubmitting} className="gap-2">
+                            <Save size={18} />
+                            {isSubmitting ? "Saving..." : "Save Template"}
+                        </Button>
+                    )}
                 </div>
             </div>
 
@@ -135,13 +176,7 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
                         onContentChange={setHtmlContent}
                         fontSize={fontSize}
                         onFontSizeChange={setFontSize}
-                        // We can reuse image upload functionality if needed, or implement a simple one
-                        onImageUpload={async (file) => {
-                            // Ideally, this should upload to storage and return URL
-                            // For now, we rely on base64 insertion handled by EmailComposer fallbacks
-                            // or if we have storage logic from campaigns we can reuse it.
-                            // Since EmailComposer handles inline base64 as fallback, we can skip explicit upload for now
-                            // or implement a simple upload mutation.
+                        onImageUpload={async () => {
                             return { url: "", contentId: "" };
                         }}
                     />

@@ -13,18 +13,23 @@ import {
     MessageSquare,
     Info,
     Loader2,
+    Globe,
+    Lock,
 } from "lucide-react";
 import type { Doc, Id } from "@/../convex/_generated/dataModel";
 import { TemplateForm } from "@/components/whatsapp";
 
-const CATEGORIES = ["marketing", "utility", "authentication"] as const;
-
 export default function WhatsAppTemplatesPage() {
     const templates = useQuery(api.whatsappTemplates.list, {});
+    const currentUser = useQuery(api.users.getCurrentUser);
     const deleteTemplate = useMutation(api.whatsappTemplates.remove);
+    const setVisibility = useMutation(api.whatsappTemplates.setVisibility);
 
     const [showForm, setShowForm] = useState(false);
     const [editingTemplate, setEditingTemplate] = useState<Doc<"whatsappTemplates"> | null>(null);
+    const [togglingId, setTogglingId] = useState<string | null>(null);
+
+    const isAdmin = currentUser?.role === "admin";
 
     const handleCloseForm = () => {
         setEditingTemplate(null);
@@ -46,6 +51,21 @@ export default function WhatsAppTemplatesPage() {
             await deleteTemplate({ id });
         } catch (err) {
             console.error("Failed to delete template:", err);
+        }
+    };
+
+    const handleToggleVisibility = async (
+        id: Id<"whatsappTemplates">,
+        current: "private" | "shared" | undefined
+    ) => {
+        const next = current === "private" ? "shared" : "private";
+        setTogglingId(id);
+        try {
+            await setVisibility({ id, visibility: next });
+        } catch (err) {
+            console.error("Failed to update visibility:", err);
+        } finally {
+            setTogglingId(null);
         }
     };
 
@@ -87,10 +107,12 @@ export default function WhatsAppTemplatesPage() {
                                 {templates?.length || 0} templates available
                             </p>
                         </div>
-                        <Button onClick={() => setShowForm(true)}>
-                            <Plus size={18} />
-                            Add Template
-                        </Button>
+                        {isAdmin && (
+                            <Button onClick={() => setShowForm(true)}>
+                                <Plus size={18} />
+                                Add Template
+                            </Button>
+                        )}
                     </div>
 
                     {/* Template Form Modal */}
@@ -132,88 +154,151 @@ export default function WhatsAppTemplatesPage() {
                                 No templates yet
                             </h3>
                             <p className="text-sm text-gray-500 mb-4">
-                                Add your first WhatsApp template to start sending messages.
+                                {isAdmin
+                                    ? "Add your first WhatsApp template to start sending messages."
+                                    : "No shared templates are available yet. Ask an admin to create and share templates."}
                             </p>
-                            <Button onClick={() => setShowForm(true)}>
-                                <Plus size={18} />
-                                Add Template
-                            </Button>
+                            {isAdmin && (
+                                <Button onClick={() => setShowForm(true)}>
+                                    <Plus size={18} />
+                                    Add Template
+                                </Button>
+                            )}
                         </Card>
                     ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                            {templates.map((template) => (
-                                <Card key={template._id} className="flex flex-col">
-                                    <div className="flex items-start justify-between mb-3">
-                                        <div>
-                                            <h4 className="font-bold text-gray-900">
-                                                {template.name}
-                                            </h4>
-                                            <p className="text-xs text-gray-400 font-mono">
-                                                {template.metaTemplateId}
-                                            </p>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span
-                                                className={`px-2 py-0.5 rounded text-xs font-medium ${categoryColors[template.category] ||
-                                                    "bg-gray-100 text-gray-600"
-                                                    }`}
-                                            >
-                                                {template.category}
-                                            </span>
-                                        </div>
-                                    </div>
+                            {templates.map((template) => {
+                                const isShared = template.visibility !== "private";
+                                const isToggling = togglingId === template._id;
 
-                                    <p className="text-sm text-gray-600 flex-1 mb-3 line-clamp-3">
-                                        {template.body}
-                                    </p>
-
-                                    {template.variables.length > 0 && (
-                                        <div className="flex flex-wrap gap-1 mb-3">
-                                            {template.variables.map((v) => (
+                                return (
+                                    <Card key={template._id} className="flex flex-col">
+                                        <div className="flex items-start justify-between mb-3">
+                                            <div>
+                                                <h4 className="font-bold text-gray-900">
+                                                    {template.name}
+                                                </h4>
+                                                <p className="text-xs text-gray-400 font-mono">
+                                                    {template.metaTemplateId}
+                                                </p>
+                                            </div>
+                                            <div className="flex items-center gap-2">
                                                 <span
-                                                    key={v}
-                                                    className="px-1.5 py-0.5 bg-green-50 text-green-600 rounded text-xs"
+                                                    className={`px-2 py-0.5 rounded text-xs font-medium ${
+                                                        categoryColors[template.category] ||
+                                                        "bg-gray-100 text-gray-600"
+                                                    }`}
                                                 >
-                                                    {v}
+                                                    {template.category}
                                                 </span>
-                                            ))}
+                                            </div>
                                         </div>
-                                    )}
 
-                                    <div className="flex items-center justify-between pt-3 border-t border-gray-100">
-                                        <div className="flex items-center gap-2">
-                                            <Badge
-                                                status={
-                                                    template.status === "approved"
-                                                        ? "success"
-                                                        : template.status === "rejected"
-                                                            ? "error"
-                                                            : "warning"
-                                                }
-                                            >
-                                                {template.status}
-                                            </Badge>
-                                            <span className="text-xs text-gray-400">
-                                                {template.language}
-                                            </span>
+                                        <p className="text-sm text-gray-600 flex-1 mb-3 line-clamp-3">
+                                            {template.body}
+                                        </p>
+
+                                        {template.variables.length > 0 && (
+                                            <div className="flex flex-wrap gap-1 mb-3">
+                                                {template.variables.map((v) => (
+                                                    <span
+                                                        key={v}
+                                                        className="px-1.5 py-0.5 bg-green-50 text-green-600 rounded text-xs"
+                                                    >
+                                                        {v}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        )}
+
+                                        <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+                                            <div className="flex items-center gap-2">
+                                                <Badge
+                                                    status={
+                                                        template.status === "approved"
+                                                            ? "success"
+                                                            : template.status === "rejected"
+                                                                ? "error"
+                                                                : "warning"
+                                                    }
+                                                >
+                                                    {template.status}
+                                                </Badge>
+                                                <span className="text-xs text-gray-400">
+                                                    {template.language}
+                                                </span>
+                                            </div>
+
+                                            <div className="flex items-center gap-1">
+                                                {/* Visibility toggle — admin only */}
+                                                {isAdmin && (
+                                                    <button
+                                                        onClick={() =>
+                                                            handleToggleVisibility(
+                                                                template._id,
+                                                                template.visibility
+                                                            )
+                                                        }
+                                                        disabled={isToggling}
+                                                        title={
+                                                            isShared
+                                                                ? "Shared — click to make private"
+                                                                : "Private — click to share with everyone"
+                                                        }
+                                                        className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium border transition-colors disabled:opacity-50 ${
+                                                            isShared
+                                                                ? "border-green-200 text-green-700 hover:bg-green-50"
+                                                                : "border-gray-200 text-gray-500 hover:bg-gray-50"
+                                                        }`}
+                                                    >
+                                                        {isShared ? (
+                                                            <Globe size={12} />
+                                                        ) : (
+                                                            <Lock size={12} />
+                                                        )}
+                                                        {isToggling
+                                                            ? "..."
+                                                            : isShared
+                                                                ? "Shared"
+                                                                : "Private"}
+                                                    </button>
+                                                )}
+
+                                                {/* Non-admin visibility indicator */}
+                                                {!isAdmin && (
+                                                    <span
+                                                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${
+                                                            isShared
+                                                                ? "bg-green-50 text-green-700"
+                                                                : "bg-gray-100 text-gray-500"
+                                                        }`}
+                                                    >
+                                                        <Globe size={11} />
+                                                        Shared
+                                                    </span>
+                                                )}
+
+                                                {isAdmin && (
+                                                    <>
+                                                        <button
+                                                            onClick={() => openEditForm(template)}
+                                                            className="p-1.5 hover:bg-gray-100 rounded"
+                                                        >
+                                                            <Pencil size={16} className="text-gray-500" />
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleDelete(template._id)}
+                                                            className="p-1.5 hover:bg-red-50 rounded"
+                                                        >
+                                                            <Trash2 size={16} className="text-red-500" />
+                                                        </button>
+                                                    </>
+                                                )}
+                                            </div>
                                         </div>
-                                        <div className="flex items-center gap-1">
-                                            <button
-                                                onClick={() => openEditForm(template)}
-                                                className="p-1.5 hover:bg-gray-100 rounded"
-                                            >
-                                                <Pencil size={16} className="text-gray-500" />
-                                            </button>
-                                            <button
-                                                onClick={() => handleDelete(template._id)}
-                                                className="p-1.5 hover:bg-red-50 rounded"
-                                            >
-                                                <Trash2 size={16} className="text-red-500" />
-                                            </button>
-                                        </div>
-                                    </div>
-                                </Card>
-                            ))}
+                                    </Card>
+                                );
+                            })}
                         </div>
                     )}
                 </div>

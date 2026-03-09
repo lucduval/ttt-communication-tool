@@ -116,6 +116,8 @@ export default defineSchema({
         headerText: v.optional(v.string()), // For text headers
         headerUrl: v.optional(v.string()), // For media headers (image, document, video)
         lastUpdatedAt: v.number(),
+        createdBy: v.optional(v.string()), // Convex user _id of creator
+        visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))), // undefined treated as "shared"
     })
         .index("by_status", ["status"])
         .index("by_meta_id", ["metaTemplateId"]),
@@ -191,9 +193,10 @@ export default defineSchema({
         name: v.string(),
         subject: v.string(),
         htmlContent: v.string(), // The HTML body
-        createdBy: v.string(), // User ID
+        createdBy: v.string(), // Convex user _id
         lastUpdatedAt: v.number(),
         fontSize: v.optional(v.string()),
+        visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))), // undefined treated as "shared"
     })
         .index("by_name", ["name"])
         .index("by_user", ["createdBy"]),

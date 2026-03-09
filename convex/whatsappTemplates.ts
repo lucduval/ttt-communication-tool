@@ -1,23 +1,33 @@
 import { v } from "convex/values";
 import { query, mutation, internalQuery } from "./_generated/server";
-import { checkAccessHelper, checkAdminAccess } from "./users";
+import { checkAccessHelper } from "./users";
 
-// List all templates, optionally filtered by status
+// List templates visible to the current user:
+// - Admins see all templates
+// - Regular users only see shared templates (visibility !== "private")
 export const list = query({
     args: {
         status: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await checkAccessHelper(ctx);
-        if (!access.hasAccess) throw new Error("Unauthorized");
+        if (!access.hasAccess || !access.user) throw new Error("Unauthorized");
 
+        const isAdmin = access.user.role === "admin";
+
+        let templates;
         if (args.status) {
-            return await ctx.db
+            templates = await ctx.db
                 .query("whatsappTemplates")
                 .withIndex("by_status", (q) => q.eq("status", args.status!))
                 .collect();
+        } else {
+            templates = await ctx.db.query("whatsappTemplates").collect();
         }
-        return await ctx.db.query("whatsappTemplates").collect();
+
+        if (isAdmin) return templates;
+
+        return templates.filter((t) => t.visibility !== "private");
     },
 });
 
@@ -28,9 +38,17 @@ export const getById = query({
     },
     handler: async (ctx, args) => {
         const access = await checkAccessHelper(ctx);
-        if (!access.hasAccess) throw new Error("Unauthorized");
+        if (!access.hasAccess || !access.user) throw new Error("Unauthorized");
 
-        return await ctx.db.get(args.id);
+        const template = await ctx.db.get(args.id);
+        if (!template) return null;
+
+        const isAdmin = access.user.role === "admin";
+        if (template.visibility === "private" && !isAdmin) {
+            throw new Error("Not authorized to view this template");
+        }
+
+        return template;
     },
 });
 
@@ -44,7 +62,7 @@ export const getByIdInternal = internalQuery({
     },
 });
 
-// Create a new template
+// Create a new template — admin only, defaults to "shared"
 export const create = mutation({
     args: {
         name: v.string(),
@@ -53,25 +71,31 @@ export const create = mutation({
         status: v.string(),
         body: v.string(),
         variables: v.array(v.string()),
-        variableMappings: v.optional(v.string()), // JSON stringified mapping
+        variableMappings: v.optional(v.string()),
         language: v.string(),
-        headerType: v.optional(v.string()), // none, text, image, document, video
+        headerType: v.optional(v.string()),
         headerText: v.optional(v.string()),
         headerUrl: v.optional(v.string()),
+        visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))),
     },
     handler: async (ctx, args) => {
-        const access = await checkAdminAccess(ctx);
-        if (!access) throw new Error("Unauthorized");
+        const access = await checkAccessHelper(ctx);
+        if (!access.hasAccess || !access.user || access.user.role !== "admin") {
+            throw new Error("Unauthorized");
+        }
 
+        const { visibility, ...rest } = args;
         const id = await ctx.db.insert("whatsappTemplates", {
-            ...args,
+            ...rest,
+            createdBy: access.user._id,
+            visibility: visibility ?? "shared",
             lastUpdatedAt: Date.now(),
         });
         return id;
     },
 });
 
-// Update an existing template
+// Update an existing template — admin only
 export const update = mutation({
     args: {
         id: v.id("whatsappTemplates"),
@@ -86,18 +110,18 @@ export const update = mutation({
         headerType: v.optional(v.string()),
         headerText: v.optional(v.string()),
         headerUrl: v.optional(v.string()),
+        visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))),
     },
     handler: async (ctx, args) => {
-        const access = await checkAdminAccess(ctx);
-        if (!access) throw new Error("Unauthorized");
+        const access = await checkAccessHelper(ctx);
+        if (!access.hasAccess || !access.user || access.user.role !== "admin") {
+            throw new Error("Unauthorized");
+        }
 
         const { id, ...updates } = args;
         const existing = await ctx.db.get(id);
-        if (!existing) {
-            throw new Error("Template not found");
-        }
+        if (!existing) throw new Error("Template not found");
 
-        // Filter out undefined values
         const filteredUpdates = Object.fromEntries(
             Object.entries(updates).filter(([, value]) => value !== undefined)
         );
@@ -111,15 +135,39 @@ export const update = mutation({
     },
 });
 
-// Delete a template
+// Delete a template — admin only
 export const remove = mutation({
     args: {
         id: v.id("whatsappTemplates"),
     },
     handler: async (ctx, args) => {
-        const access = await checkAdminAccess(ctx);
-        if (!access) throw new Error("Unauthorized");
+        const access = await checkAccessHelper(ctx);
+        if (!access.hasAccess || !access.user || access.user.role !== "admin") {
+            throw new Error("Unauthorized");
+        }
 
         await ctx.db.delete(args.id);
+    },
+});
+
+// Toggle visibility — admin only
+export const setVisibility = mutation({
+    args: {
+        id: v.id("whatsappTemplates"),
+        visibility: v.union(v.literal("private"), v.literal("shared")),
+    },
+    handler: async (ctx, args) => {
+        const access = await checkAccessHelper(ctx);
+        if (!access.hasAccess || !access.user || access.user.role !== "admin") {
+            throw new Error("Unauthorized");
+        }
+
+        const existing = await ctx.db.get(args.id);
+        if (!existing) throw new Error("Template not found");
+
+        await ctx.db.patch(args.id, {
+            visibility: args.visibility,
+            lastUpdatedAt: Date.now(),
+        });
     },
 });
