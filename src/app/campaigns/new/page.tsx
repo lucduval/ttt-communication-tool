@@ -99,9 +99,10 @@ export default function NewCampaignPage() {
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [selectedContacts, setSelectedContacts] = useState<Contact[]>([]);
     const [currentPage, setCurrentPage] = useState(1);
-    // Cursor tokens for server-side pagination (Dynamics doesn't support $skip)
-    // pageTokens[n] is the skipToken needed to fetch page n (undefined = start from beginning)
-    const [pageTokens, setPageTokens] = useState<Record<number, string>>({});
+    // Cursor tokens for server-side pagination (Dynamics doesn't support $skip).
+    // Stored in a ref so that updating tokens doesn't recreate loadContacts via useCallback.
+    // pageTokensRef.current[n] is the skipToken needed to fetch page n.
+    const pageTokensRef = useRef<Record<number, string>>({});
     const [audience, setAudience] = useState<"clients" | "employees">("clients");
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
@@ -315,7 +316,7 @@ export default function NewCampaignPage() {
                         filter: channelFilter,
                         search: filters.search || undefined,
                         top: ITEMS_PER_PAGE,
-                        skipToken: pageTokens[page] || undefined,
+                        skipToken: pageTokensRef.current[page] || undefined,
                         clientType: filters.clientType || undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
@@ -345,7 +346,7 @@ export default function NewCampaignPage() {
                 setTotalCount(countResult.count);
                 // Store the next page cursor token so we can navigate forward
                 if (contactsResult.nextPage) {
-                    setPageTokens(prev => ({ ...prev, [page + 1]: contactsResult.nextPage as string }));
+                    pageTokensRef.current[page + 1] = contactsResult.nextPage as string;
                 }
             }
         } catch (err) {
@@ -353,7 +354,7 @@ export default function NewCampaignPage() {
         } finally {
             setIsLoadingContacts(false);
         }
-    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, pageTokens]);
+    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -370,7 +371,7 @@ export default function NewCampaignPage() {
     useEffect(() => {
         if (currentStep === "recipients") {
             setCurrentPage(1);
-            setPageTokens({});
+            pageTokensRef.current = {};
             const timer = setTimeout(() => loadContactsRef.current(1), 300);
             return () => clearTimeout(timer);
         }
