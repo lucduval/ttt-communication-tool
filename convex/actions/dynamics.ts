@@ -226,7 +226,12 @@ export const fetchContacts = action({
             endpoint = skipToken.replace(/^.*\/api\/data\/v9\.2\//, "");
         }
 
-        const response = await dynamicsRequest<ContactsResponse>(endpoint);
+        // odata.maxpagesize tells Dynamics to treat $top as a page size and return @odata.nextLink
+        const response = await dynamicsRequest<ContactsResponse>(endpoint, {
+            headers: {
+                Prefer: `odata.include-annotations="*",odata.maxpagesize=${top}`,
+            },
+        });
 
         // Transform the response
         const contacts = response.value.map((contact) => ({
