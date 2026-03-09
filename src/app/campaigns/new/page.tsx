@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useAction, useQuery, useMutation } from "convex/react";
 import { ConvexError } from "convex/values";
 import { api } from "@/../convex/_generated/api";
@@ -353,14 +353,20 @@ export default function NewCampaignPage() {
     const [isSelectAllActive, setIsSelectAllActive] = useState(false);
     const [virtualTotalCount, setVirtualTotalCount] = useState<number | null>(null);
 
+    // Keep a stable ref to loadContacts so the filter-change effect doesn't need it as a dep
+    // (Convex useAction hooks return a new function reference on every render, which would
+    // cause the effect to fire on every render and reset the page back to 1)
+    const loadContactsRef = useRef(loadContacts);
+    useEffect(() => { loadContactsRef.current = loadContacts; });
+
     // Reload contacts when filters or step changes (only in recipients step) — reset to page 1
     useEffect(() => {
         if (currentStep === "recipients") {
             setCurrentPage(1);
-            const timer = setTimeout(() => loadContacts(1), 300);
+            const timer = setTimeout(() => loadContactsRef.current(1), 300);
             return () => clearTimeout(timer);
         }
-    }, [currentStep, filters, loadContacts, audience, employeeFilters]);
+    }, [currentStep, filters, audience, employeeFilters]);
 
     // Update selected contacts when moving forward from recipients
     useEffect(() => {
