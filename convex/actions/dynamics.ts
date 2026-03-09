@@ -204,19 +204,14 @@ export const fetchContacts = action({
         // Order by name
         queryParts.push("$orderby=fullname asc");
 
-        // Pagination - offset based
-        if (skip !== undefined && skip > 0) {
-            queryParts.push(`$skip=${skip}`);
-        }
-        queryParts.push(`$top=${top}`);
-
-        // Include count
+        // For count-only queries, use $top=1 to minimise data transfer
         if (countOnly) {
             queryParts.push("$count=true");
-            // For count only, just get 1 record
-            queryParts.length = queryParts.length - 1; // Remove $top
             queryParts.push("$top=1");
         }
+        // Do NOT add $top for normal paged queries — Dynamics ignores @odata.nextLink when
+        // $top is present (it treats $top as a hard limit, not a page size).
+        // Page size is controlled exclusively via the Prefer: odata.maxpagesize header.
 
         // Build the endpoint
         let endpoint = `contacts?${queryParts.join("&")}`;
@@ -226,7 +221,7 @@ export const fetchContacts = action({
             endpoint = skipToken.replace(/^.*\/api\/data\/v9\.2\//, "");
         }
 
-        // odata.maxpagesize tells Dynamics to treat $top as a page size and return @odata.nextLink
+        // odata.maxpagesize controls page size and triggers @odata.nextLink in the response
         const response = await dynamicsRequest<ContactsResponse>(endpoint, {
             headers: {
                 Prefer: `odata.include-annotations="*",odata.maxpagesize=${top}`,

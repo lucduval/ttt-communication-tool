@@ -1084,9 +1084,9 @@ export default function NewCampaignPage() {
                                 onClearAll={handleClearSelection}
                             />
 
-                            {/* Load More footer */}
+                            {/* Load More footer — mb-24 clears the fixed Back/Next buttons */}
                             {!isLoadingContacts && (
-                                <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100">
+                                <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 mb-24">
                                     <span className="text-sm text-gray-500">
                                         Showing {contacts.length}{totalCount !== null ? ` of ${totalCount.toLocaleString()}` : ""} contacts
                                     </span>
