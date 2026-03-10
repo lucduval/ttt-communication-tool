@@ -188,6 +188,18 @@ export default defineSchema({
         .index("by_recipient", ["recipientId"])
         .index("by_campaign_recipient", ["campaignId", "recipientId"]),
 
+    // Tracks which contacts have been sent which personalised campaigns (dedup + history)
+    personalisedCampaignHistory: defineTable({
+        contactId: v.string(),        // Dynamics contact ID
+        campaignId: v.id("campaigns"),
+        campaignName: v.string(),     // Dedup key — matches campaign.name
+        sentAt: v.number(),
+    })
+        .index("by_contact", ["contactId"])
+        .index("by_campaign", ["campaignId"])
+        .index("by_campaign_name", ["campaignName"])
+        .index("by_contact_campaign_name", ["contactId", "campaignName"]),
+
     // Email Templates
     emailTemplates: defineTable({
         name: v.string(),

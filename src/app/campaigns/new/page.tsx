@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useAction, useQuery, useMutation } from "convex/react";
 import { ConvexError } from "convex/values";
 import { api } from "@/../convex/_generated/api";
@@ -73,6 +73,7 @@ const INITIAL_FILTERS: FilterState = {
     retirementFundMax: null,
     taxReturnMin: null,
     taxReturnYear: null,
+    personalisedCampaignFilter: "all",
 };
 
 interface UploadedImage {
@@ -157,6 +158,34 @@ export default function NewCampaignPage() {
     const whatsappTemplates = useQuery(api.whatsappTemplates.list, {});
     const access = useQuery(api.users.checkAccess);
     const canAccessPersonalised = access?.user?.canAccessPersonalised === true;
+
+    // Personalised campaign history — only fetched when building a personalised campaign
+    const visibleContactIds = useMemo(() => contacts.map((c) => c.id), [contacts]);
+    const personalisedHistory = useQuery(
+        api.personalisedHistory.getHistoryByContactIds,
+        campaignChannel === "personalised" && visibleContactIds.length > 0
+            ? { contactIds: visibleContactIds }
+            : "skip"
+    );
+
+    // Distinct campaign names visible in current contact page (for the filter dropdown label)
+    const personalisedCampaignNames = useMemo(() => {
+        if (!personalisedHistory || campaignChannel !== "personalised") return undefined;
+        const names = new Set<string>();
+        for (const entries of Object.values(personalisedHistory)) {
+            for (const e of entries) names.add(e.campaignName);
+        }
+        return [...names].sort();
+    }, [personalisedHistory, campaignChannel]);
+
+    // Apply the personalised campaign history filter client-side
+    const displayedContacts = useMemo(() => {
+        if (!personalisedHistory || filters.personalisedCampaignFilter === "all") return contacts;
+        return contacts.filter((c) => {
+            const hasSent = (personalisedHistory[c.id]?.length ?? 0) > 0;
+            return filters.personalisedCampaignFilter === "sent" ? hasSent : !hasSent;
+        });
+    }, [contacts, personalisedHistory, filters.personalisedCampaignFilter]);
 
     // Actions
     const fetchContacts = useAction(api.actions.dynamics.fetchContacts);
@@ -748,6 +777,12 @@ export default function NewCampaignPage() {
                 setSelectedContacts(contacts);
                 // We don't set isSelectAllActive to true for employees to avoid backend filtering logic
                 // Instead we just select all explicitly
+            } else if (filters.personalisedCampaignFilter !== "all") {
+                // Client-side personalised history filter is active — select only the displayed subset
+                const allIds = new Set(displayedContacts.map(c => c.id));
+                setSelectedIds(allIds);
+                setSelectedContacts(displayedContacts);
+                // Do NOT set isSelectAllActive — that would bypass the client-side filter
             } else {
                 const channelFilter = getChannelFilter();
 
@@ -987,9 +1022,10 @@ export default function NewCampaignPage() {
                                                         variant="secondary"
                                                         onClick={handleSelectAll}
                                                         disabled={
-                                                            isSelectAllActive ||
-                                                            (selectedIds.size === contacts.length && contacts.length === totalCount) ||
-                                                            isSelectingAll
+                                                            (isSelectAllActive && filters.personalisedCampaignFilter === "all") ||
+                                                            (selectedIds.size === displayedContacts.length && displayedContacts.length > 0) ||
+                                                            isSelectingAll ||
+                                                            displayedContacts.length === 0
                                                         }
                                                     >
                                                         {isSelectingAll ? (
@@ -998,7 +1034,9 @@ export default function NewCampaignPage() {
                                                                 Selecting...
                                                             </>
                                                         ) : (
-                                                            `Select All (${totalCount ?? contacts.length})`
+                                                            filters.personalisedCampaignFilter !== "all"
+                                                                ? `Select All (${displayedContacts.length})`
+                                                                : `Select All (${totalCount ?? contacts.length})`
                                                         )}
                                                     </Button>
                                                     {(selectedIds.size > 0 || isSelectAllActive) && (
@@ -1055,8 +1093,13 @@ export default function NewCampaignPage() {
                                         <ContactFilters
                                             filters={filters}
                                             onFiltersChange={setFilters}
-                                            totalCount={totalCount}
+                                            totalCount={
+                                                filters.personalisedCampaignFilter !== "all"
+                                                    ? displayedContacts.length
+                                                    : totalCount
+                                            }
                                             isPersonalised={campaignChannel === "personalised"}
+                                            personalisedCampaignNames={personalisedCampaignNames}
                                         />
                                     )}
 
@@ -1072,7 +1115,7 @@ export default function NewCampaignPage() {
                             </Card>
 
                             <ContactList
-                                contacts={contacts}
+                                contacts={displayedContacts}
                                 isLoading={isLoadingContacts && contacts.length === 0}
                                 selectedIds={selectedIds}
                                 onSelectionChange={setSelectedIds}
@@ -1082,13 +1125,17 @@ export default function NewCampaignPage() {
                                 isSelectAllActive={isSelectAllActive}
                                 onSelectAll={handleSelectAll}
                                 onClearAll={handleClearSelection}
+                                personalisedHistory={campaignChannel === "personalised" ? (personalisedHistory ?? {}) : undefined}
                             />
 
                             {/* Load More footer — mb-24 clears the fixed Back/Next buttons */}
                             {!isLoadingContacts && (
                                 <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 mb-24">
                                     <span className="text-sm text-gray-500">
-                                        Showing {contacts.length}{totalCount !== null ? ` of ${totalCount.toLocaleString()}` : ""} contacts
+                                        {filters.personalisedCampaignFilter !== "all"
+                                            ? `Showing ${displayedContacts.length} of ${contacts.length} loaded contacts (filtered)`
+                                            : `Showing ${contacts.length}${totalCount !== null ? ` of ${totalCount.toLocaleString()}` : ""} contacts`
+                                        }
                                     </span>
                                     {hasMore && (
                                         <button

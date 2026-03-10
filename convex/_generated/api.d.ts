@@ -41,6 +41,7 @@ import type * as lib_whatsapp from "../lib/whatsapp.js";
 import type * as messages from "../messages.js";
 import type * as notifications from "../notifications.js";
 import type * as opportunities from "../opportunities.js";
+import type * as personalisedHistory from "../personalisedHistory.js";
 import type * as test_graph_cid from "../test_graph_cid.js";
 import type * as test_graph_raw from "../test_graph_raw.js";
 import type * as tracking from "../tracking.js";
@@ -87,6 +88,7 @@ declare const fullApi: ApiFromModules<{
   messages: typeof messages;
   notifications: typeof notifications;
   opportunities: typeof opportunities;
+  personalisedHistory: typeof personalisedHistory;
   test_graph_cid: typeof test_graph_cid;
   test_graph_raw: typeof test_graph_raw;
   tracking: typeof tracking;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useAction, useQuery } from "convex/react";
 import { api } from "@/../convex/_generated/api";
 import { Header } from "@/components/layout";
@@ -44,6 +44,7 @@ export default function RecipientsPage() {
         retirementFundMax: null,
         taxReturnMin: null,
         taxReturnYear: null,
+        personalisedCampaignFilter: "all",
     };
 
     const [contacts, setContacts] = useState<Contact[]>([]);
@@ -53,6 +54,32 @@ export default function RecipientsPage() {
     const [totalCount, setTotalCount] = useState<number | null>(null);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const [currentPage, setCurrentPage] = useState(1);
+
+    // Derive contact IDs for the current page to look up personalised campaign history
+    const visibleContactIds = useMemo(() => contacts.map((c) => c.id), [contacts]);
+    const personalisedHistory = useQuery(
+        api.personalisedHistory.getHistoryByContactIds,
+        visibleContactIds.length > 0 ? { contactIds: visibleContactIds } : "skip"
+    );
+
+    // All distinct campaign names visible in the current page's history (for the filter UI)
+    const personalisedCampaignNames = useMemo(() => {
+        if (!personalisedHistory) return [];
+        const names = new Set<string>();
+        for (const entries of Object.values(personalisedHistory)) {
+            for (const e of entries) names.add(e.campaignName);
+        }
+        return [...names].sort();
+    }, [personalisedHistory]);
+
+    // Apply the personalised campaign history filter client-side
+    const displayedContacts = useMemo(() => {
+        if (!personalisedHistory || filters.personalisedCampaignFilter === "all") return contacts;
+        return contacts.filter((c) => {
+            const hasSent = (personalisedHistory[c.id]?.length ?? 0) > 0;
+            return filters.personalisedCampaignFilter === "sent" ? hasSent : !hasSent;
+        });
+    }, [contacts, personalisedHistory, filters.personalisedCampaignFilter]);
 
     // When the locked consultant ID resolves (after currentUser loads), seed the filter
     useEffect(() => {
@@ -190,18 +217,24 @@ export default function RecipientsPage() {
                         <ContactFilters
                             filters={filters}
                             onFiltersChange={setFilters}
-                            totalCount={totalCount}
+                            totalCount={
+                                filters.personalisedCampaignFilter !== "all"
+                                    ? displayedContacts.length
+                                    : totalCount
+                            }
                             lockedConsultantId={lockedConsultantId}
+                            personalisedCampaignNames={personalisedCampaignNames}
                         />
                     </Card>
 
                     {/* Contact List */}
                     <ContactList
-                        contacts={contacts}
+                        contacts={displayedContacts}
                         isLoading={isLoading && contacts.length === 0}
                         selectedIds={selectedIds}
                         onSelectionChange={setSelectedIds}
                         showSelection={true}
+                        personalisedHistory={personalisedHistory ?? {}}
                     />
 
                     {/* Pagination */}

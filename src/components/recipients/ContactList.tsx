@@ -1,7 +1,8 @@
 "use client";
 
 import { Badge } from "@/components/ui";
-import { Mail, MessageSquare, MoreVertical, User } from "lucide-react";
+import { Mail, MessageSquare, MoreVertical, Sparkles, User } from "lucide-react";
+import { format } from "date-fns";
 
 export interface Contact {
     id: string;
@@ -40,6 +41,7 @@ interface ContactListProps {
     isSelectAllActive?: boolean;
     onSelectAll?: () => void;
     onClearAll?: () => void;
+    personalisedHistory?: Record<string, { campaignName: string; sentAt: number }[]>;
 }
 
 const formatCurrency = (value: number | null | undefined) => {
@@ -58,6 +60,7 @@ export function ContactList({
     isSelectAllActive = false,
     onSelectAll,
     onClearAll,
+    personalisedHistory,
 }: ContactListProps) {
     const toggleSelection = (id: string) => {
         if (!onSelectionChange) return;
@@ -148,6 +151,9 @@ export function ContactList({
                         {showSarsColumn && (
                             <th className="px-4 py-4">SARS Refund</th>
                         )}
+                        {personalisedHistory !== undefined && (
+                            <th className="px-4 py-4">Personalised Campaigns</th>
+                        )}
                         <th className="px-4 py-4">Channels</th>
                         <th className="px-4 py-4 w-12"></th>
                     </tr>
@@ -222,6 +228,31 @@ export function ContactList({
                                     <span className={`text-sm font-semibold ${contact.sarsReimbursement ? "text-green-700" : "text-gray-400"}`}>
                                         {formatCurrency(contact.sarsReimbursement)}
                                     </span>
+                                </td>
+                            )}
+                            {personalisedHistory !== undefined && (
+                                <td className="px-4 py-4">
+                                    {(() => {
+                                        const entries = personalisedHistory[contact.id];
+                                        if (!entries || entries.length === 0) {
+                                            return <span className="text-gray-400 text-xs">—</span>;
+                                        }
+                                        return (
+                                            <div className="flex flex-col gap-1">
+                                                {entries.map((entry, i) => (
+                                                    <div key={i} className="flex items-center gap-1.5">
+                                                        <Sparkles size={11} className="text-purple-500 shrink-0" />
+                                                        <span className="text-xs text-gray-800 font-medium truncate max-w-[160px]" title={entry.campaignName}>
+                                                            {entry.campaignName}
+                                                        </span>
+                                                        <span className="text-xs text-gray-400 shrink-0">
+                                                            · {format(new Date(entry.sentAt), "d MMM yyyy")}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        );
+                                    })()}
                                 </td>
                             )}
                             <td className="px-4 py-4">

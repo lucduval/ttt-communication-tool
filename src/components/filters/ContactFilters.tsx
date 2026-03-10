@@ -30,6 +30,8 @@ export interface FilterState {
     // Tax return (SARS reimbursement) filters
     taxReturnMin: number | null;
     taxReturnYear: number | null;
+    // Personalised campaign history filter (client-side)
+    personalisedCampaignFilter: "all" | "sent" | "not_sent";
 }
 
 interface Option {
@@ -44,6 +46,8 @@ interface ContactFiltersProps {
     isPersonalised?: boolean;
     /** When set, the consultant filter is locked to this Dynamics systemuser ID and cannot be changed */
     lockedConsultantId?: string;
+    /** When provided, shows the personalised campaign filter and lists known campaign names */
+    personalisedCampaignNames?: string[];
 }
 
 export function ContactFilters({
@@ -52,6 +56,7 @@ export function ContactFilters({
     totalCount,
     isPersonalised = false,
     lockedConsultantId,
+    personalisedCampaignNames,
 }: ContactFiltersProps) {
     const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -137,6 +142,7 @@ export function ContactFilters({
             retirementFundMax: null,
             taxReturnMin: null,
             taxReturnYear: null,
+            personalisedCampaignFilter: "all",
         });
     };
 
@@ -159,7 +165,8 @@ export function ContactFilters({
         filters.retirementFundMin !== null ||
         filters.retirementFundMax !== null ||
         filters.taxReturnMin !== null ||
-        filters.taxReturnYear !== null;
+        filters.taxReturnYear !== null ||
+        filters.personalisedCampaignFilter !== "all";
 
     return (
         <div className="space-y-4">
@@ -442,6 +449,55 @@ export function ContactFilters({
                         </div>
                     </div>
 
+                    {/* Personalised Campaign History filter — shown whenever history data is available */}
+                    {personalisedCampaignNames !== undefined && (
+                        <div className="mt-4 pt-4 border-t border-purple-200 bg-purple-50/50 -mx-4 px-4 pb-3 rounded-b-lg">
+                            <h4 className="font-semibold text-sm text-purple-900 mb-3 flex items-center gap-1.5">
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" /></svg>
+                                Personalised Campaign History
+                            </h4>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                        History Status
+                                    </label>
+                                    <select
+                                        value={filters.personalisedCampaignFilter}
+                                        onChange={(e) =>
+                                            updateFilter(
+                                                "personalisedCampaignFilter",
+                                                e.target.value as FilterState["personalisedCampaignFilter"]
+                                            )
+                                        }
+                                        className="w-full bg-white border border-purple-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-purple-500/20"
+                                    >
+                                        <option value="all">All contacts</option>
+                                        <option value="not_sent">Not yet received a personalised campaign</option>
+                                        <option value="sent">Already received a personalised campaign</option>
+                                    </select>
+                                </div>
+                                {personalisedCampaignNames.length > 0 && (
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                            Campaign names in this list
+                                        </label>
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {personalisedCampaignNames.map((name) => (
+                                                <span
+                                                    key={name}
+                                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800"
+                                                >
+                                                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" /></svg>
+                                                    {name}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
                     {isPersonalised && (
                         <div className="mt-4 pt-4 border-t border-amber-200 bg-amber-50/50 -mx-4 px-4 pb-2 rounded-b-lg">
                             <h4 className="font-semibold text-sm text-amber-800 mb-3 flex items-center gap-1.5">
@@ -602,6 +658,16 @@ export function ContactFilters({
                                 <Badge status="warning">
                                     SARS Refund: min R{filters.taxReturnMin.toLocaleString()}
                                     {filters.taxReturnYear ? ` (${filters.taxReturnYear})` : ""}
+                                </Badge>
+                            )}
+                            {filters.personalisedCampaignFilter === "sent" && (
+                                <Badge status="default">
+                                    Personalised: already sent
+                                </Badge>
+                            )}
+                            {filters.personalisedCampaignFilter === "not_sent" && (
+                                <Badge status="default">
+                                    Personalised: not yet sent
                                 </Badge>
                             )}
                         </div>

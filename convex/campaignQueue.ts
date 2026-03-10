@@ -50,9 +50,31 @@ export const queueCampaignBatches = action({
         }
 
         if (args.recipients && args.recipients.length > 0) {
+            let recipients = args.recipients;
+
+            // For personalised campaigns, filter out contacts already sent this campaign name
+            if (args.channel === "personalised") {
+                const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, {
+                    campaignId: args.campaignId,
+                });
+                if (campaign?.name) {
+                    const excludedArr = await ctx.runQuery(
+                        internal.personalisedHistory.getContactIdsForCampaignName,
+                        { campaignName: campaign.name }
+                    );
+                    const excludedIds = new Set(excludedArr);
+                    const before = recipients.length;
+                    recipients = recipients.filter((r) => !excludedIds.has(r.id));
+                    const excluded = before - recipients.length;
+                    if (excluded > 0) {
+                        console.log(`Dedup: excluded ${excluded} contacts already sent "${campaign.name}"`);
+                    }
+                }
+            }
+
             await ctx.runMutation(internal.campaignBatches.createBatches, {
                 campaignId: args.campaignId,
-                recipients: args.recipients,
+                recipients,
                 channel: args.channel,
                 // @ts-ignore - The schema validator might need updating for createBatches but it's passed through
                 attachments: args.attachments,
@@ -679,6 +701,23 @@ export const processCampaignFilters = internalAction({
             // Import dynamically to avoid circular dependencies if any
             const { fetchMatchingContacts } = await import("./lib/dynamics_util");
 
+            // For personalised campaigns, pre-fetch contacts already sent this campaign
+            // so we can filter them out as we stream chunks from Dynamics
+            let excludedPersonalisedIds = new Set<string>();
+            if (channel === "personalised") {
+                const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, { campaignId });
+                if (campaign?.name) {
+                    const excludedArr = await ctx.runQuery(
+                        internal.personalisedHistory.getContactIdsForCampaignName,
+                        { campaignName: campaign.name }
+                    );
+                    excludedPersonalisedIds = new Set(excludedArr);
+                    if (excludedPersonalisedIds.size > 0) {
+                        console.log(`Dedup: will exclude ${excludedPersonalisedIds.size} contacts already sent "${campaign.name}"`);
+                    }
+                }
+            }
+
             // We'll fetch in chunks of 500 to match email batch size
             // This loop handles fetching ALL matching contacts from Dynamics
             // and creating batches incrementally
@@ -690,16 +729,20 @@ export const processCampaignFilters = internalAction({
                 pageCount++;
                 if (chunk.length === 0) return;
 
-                // Map to recipient format
-                const recipients = chunk.map(c => ({
-                    id: c.id,
-                    email: c.email ?? undefined,
-                    phone: (c.internationalPhone || c.phone) ?? undefined,
-                    name: c.fullName,
-                    variables: JSON.stringify({
-                        referralCode: c.referralCode,
-                    }), // Include referral code in variables
-                }));
+                // Map to recipient format, filtering out dedup exclusions for personalised campaigns
+                const recipients = chunk
+                    .filter((c) => !excludedPersonalisedIds.has(c.id))
+                    .map(c => ({
+                        id: c.id,
+                        email: c.email ?? undefined,
+                        phone: (c.internationalPhone || c.phone) ?? undefined,
+                        name: c.fullName,
+                        variables: JSON.stringify({
+                            referralCode: c.referralCode,
+                        }), // Include referral code in variables
+                    }));
+
+                if (recipients.length === 0) return;
 
                 // Create a batch for this chunk
                 await ctx.runMutation(internal.campaignBatches.createBatches, {
@@ -988,15 +1031,29 @@ export const processPersonalisedBatch = internalAction({
             }
 
             // Batch update message statuses
+            const sentAt = Date.now();
             await ctx.runMutation(internal.messages.updateStatusBatch, {
                 campaignId: args.campaignId,
                 updates: results.map((r) => ({
                     recipientId: r.recipientId,
                     status: r.success ? "sent" : "failed",
-                    sentAt: r.success ? Date.now() : undefined,
+                    sentAt: r.success ? sentAt : undefined,
                     errorMessage: r.error,
                 })),
             });
+
+            // Record successful sends in personalised campaign history (enables dedup for future campaigns)
+            const successfulRecipients = results.filter((r) => r.success);
+            if (successfulRecipients.length > 0 && campaign.name) {
+                await ctx.runMutation(internal.personalisedHistory.recordSentBatch, {
+                    records: successfulRecipients.map((r) => ({
+                        contactId: r.recipientId,
+                        campaignId: args.campaignId,
+                        campaignName: campaign.name,
+                        sentAt,
+                    })),
+                });
+            }
 
             const { hasMoreBatches } = await ctx.runMutation(
                 internal.campaignBatches.markBatchComplete,
