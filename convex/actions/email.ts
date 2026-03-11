@@ -156,7 +156,7 @@ export const sendBulkEmails = action({
 
         const siteUrl = process.env.CONVEX_SITE_URL || "";
 
-        // Process emails with rate limiting (10 per second)
+        // Process emails with rate limiting (stay under Graph IncomingBytes limit)
         for (const recipient of args.recipients) {
             try {
                 // Build email body with link rewriting and open tracking
@@ -213,8 +213,9 @@ export const sendBulkEmails = action({
                     });
                 }
 
-                // Rate limiting: 100ms between emails (10/sec)
-                await new Promise((resolve) => setTimeout(resolve, 100));
+                // Rate limiting: stay under Graph IncomingBytes (150 MB / 5 min). Default 600ms.
+                const emailDelayMs = Math.max(100, parseInt(process.env.GRAPH_EMAIL_DELAY_MS ?? "600", 10) || 600);
+                await new Promise((resolve) => setTimeout(resolve, emailDelayMs));
             } catch (err) {
                 const errorMessage = err instanceof Error ? err.message : "Unknown error";
                 results.push({

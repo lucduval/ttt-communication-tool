@@ -73,6 +73,25 @@ export interface EmailAttachment {
     contentId?: string; // Explicit content ID for inline images to ensure exact match
 }
 
+/**
+ * Parse Retry-After header (seconds or HTTP-date). Returns null if unparseable.
+ */
+function parseRetryAfter(value: string | null): number | null {
+    if (!value?.trim()) return null;
+    const n = parseInt(value, 10);
+    if (!Number.isNaN(n) && n >= 0) return n;
+    try {
+        const date = new Date(value);
+        if (!Number.isNaN(date.getTime())) {
+            const sec = Math.ceil((date.getTime() - Date.now()) / 1000);
+            return Math.max(0, sec);
+        }
+    } catch {
+        /* ignore */
+    }
+    return null;
+}
+
 export interface EmailMessage {
     subject: string;
     body: string; // HTML content
@@ -197,8 +216,16 @@ export async function sendEmail(message: EmailMessage): Promise<{ success: boole
             };
         }
 
-        const delay = baseDelayMs * Math.pow(2, attempt - 1);
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        // For 429 (rate limit / IncomingBytes), use Retry-After or minimum 60s delay.
+        // IncomingBytes limit resets over a 5-min window; short backoff is insufficient.
+        let delayMs: number;
+        if (response.status === 429) {
+            const retryAfterSeconds = parseRetryAfter(response.headers.get("Retry-After"));
+            delayMs = Math.max((retryAfterSeconds ?? 60) * 1000, 60_000);
+        } else {
+            delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+        }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
     return { success: true };

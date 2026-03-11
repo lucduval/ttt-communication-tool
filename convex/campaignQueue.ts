@@ -85,15 +85,10 @@ export const queueCampaignBatches = action({
                     campaignId: args.campaignId,
                 });
             } else if (args.channel === "email") {
-                // Start 3 parallel workers staggered by 150ms so they naturally pick
-                // up different batches and don't all race for batch 1 at once.
-                for (let i = 0; i < 3; i++) {
-                    await ctx.scheduler.runAfter(
-                        i * 150,
-                        internal.campaignQueue.processEmailBatch,
-                        { campaignId: args.campaignId }
-                    );
-                }
+                // Single worker to stay under Graph IncomingBytes limit (150 MB / 5 min per mailbox).
+                await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
+                    campaignId: args.campaignId,
+                });
             } else {
                 await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
                     campaignId: args.campaignId,
@@ -284,8 +279,9 @@ export const processEmailBatch = internalAction({
                         });
                     }
 
-                    // Rate limiting: 100ms between emails (10/sec)
-                    await new Promise((resolve) => setTimeout(resolve, 100));
+                    // Rate limiting: stay under Graph IncomingBytes (150 MB / 5 min). Default 600ms.
+                    const emailDelayMs = Math.max(100, parseInt(process.env.GRAPH_EMAIL_DELAY_MS ?? "600", 10) || 600);
+                    await new Promise((resolve) => setTimeout(resolve, emailDelayMs));
                 } catch (err) {
                     failedCount++;
                     results.push({
@@ -767,14 +763,10 @@ export const processCampaignFilters = internalAction({
                     campaignId,
                 });
             } else if (channel === "email") {
-                // Mirror the 3-worker parallel start from queueCampaignBatches.
-                for (let i = 0; i < 3; i++) {
-                    await ctx.scheduler.runAfter(
-                        i * 150,
-                        internal.campaignQueue.processEmailBatch,
-                        { campaignId }
-                    );
-                }
+                // Single worker to stay under Graph IncomingBytes limit (150 MB / 5 min per mailbox).
+                await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
+                    campaignId,
+                });
             } else {
                 await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
                     campaignId,
