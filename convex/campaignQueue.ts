@@ -171,7 +171,7 @@ export const processEmailBatch = internalAction({
 
                     if (att.storageId && !contentBase64) {
                         try {
-                            const fileUrl = await ctx.runQuery(api.files.getDownloadUrl, {
+                            const fileUrl = await ctx.runQuery(internal.files.getDownloadUrlInternal, {
                                 storageId: att.storageId,
                             });
                             if (fileUrl) {
