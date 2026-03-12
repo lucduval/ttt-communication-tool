@@ -29,6 +29,9 @@ export default function CampaignsPage() {
                                 Channel
                             </th>
                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                Created By
+                            </th>
+                            <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                                 Status
                             </th>
                             <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -45,13 +48,13 @@ export default function CampaignsPage() {
                     <tbody className="bg-white divide-y divide-gray-200">
                         {!campaigns ? (
                             <tr>
-                                <td colSpan={6} className="px-6 py-4 text-center">
+                                <td colSpan={7} className="px-6 py-4 text-center">
                                     Loading...
                                 </td>
                             </tr>
                         ) : campaigns.length === 0 ? (
                             <tr>
-                                <td colSpan={6} className="px-6 py-4 text-center">
+                                <td colSpan={7} className="px-6 py-4 text-center">
                                     No campaigns found.
                                 </td>
                             </tr>
@@ -67,6 +70,9 @@ export default function CampaignsPage() {
                                         <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 capitalize">
                                             {campaign.channel}
                                         </span>
+                                    </td>
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
+                                        {campaign.creatorName ?? campaign.creatorEmail}
                                     </td>
                                     <td className="px-6 py-4 whitespace-nowrap">
                                         <span

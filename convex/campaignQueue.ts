@@ -116,6 +116,11 @@ export const processEmailBatch = internalAction({
             return;
         }
 
+        if (campaign.status === "paused") {
+            console.log("Campaign paused, stopping batch processing:", args.campaignId);
+            return;
+        }
+
         // Get next pending batch
         const batch = await ctx.runQuery(internal.campaignBatches.getNextPendingBatchInternal, {
             campaignId: args.campaignId,
@@ -397,6 +402,11 @@ export const processWhatsAppBatch = internalAction({
 
         if (!campaign || !campaign.whatsappTemplateId) {
             console.error("Campaign or template not found:", args.campaignId);
+            return;
+        }
+
+        if (campaign.status === "paused") {
+            console.log("Campaign paused, stopping batch processing:", args.campaignId);
             return;
         }
 
@@ -809,6 +819,11 @@ export const processPersonalisedBatch = internalAction({
 
         if (!campaign) {
             console.error("Campaign not found:", args.campaignId);
+            return;
+        }
+
+        if (campaign.status === "paused") {
+            console.log("Campaign paused, stopping batch processing:", args.campaignId);
             return;
         }
 

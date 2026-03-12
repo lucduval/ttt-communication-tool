@@ -1,5 +1,6 @@
 import { query, mutation, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
+import { internal } from "./_generated/api";
 import { checkAccessHelper } from "./users";
 
 export const list = query({
@@ -10,20 +11,39 @@ export const list = query({
 
         if (!access.user) throw new Error("User not found");
 
+        let campaigns;
         if (access.user.role === "admin") {
-            // Admins can see all campaigns
-            return await ctx.db
+            campaigns = await ctx.db
                 .query("campaigns")
+                .order("desc")
+                .collect();
+        } else {
+            campaigns = await ctx.db
+                .query("campaigns")
+                .withIndex("by_user", (q) => q.eq("createdBy", access.user!.clerkId!))
                 .order("desc")
                 .collect();
         }
 
-        // Standard users only see their own campaigns
-        return await ctx.db
-            .query("campaigns")
-            .withIndex("by_user", (q) => q.eq("createdBy", access.user!.clerkId!))
-            .order("desc")
-            .collect();
+        // Resolve creator names from users table
+        const clerkIds = [...new Set(campaigns.map((c) => c.createdBy))];
+        const userMap = new Map<string, { name?: string; email: string }>();
+        for (const clerkId of clerkIds) {
+            const user = await ctx.db
+                .query("users")
+                .withIndex("by_clerk_id", (q) => q.eq("clerkId", clerkId))
+                .first();
+            userMap.set(clerkId, {
+                name: user?.name,
+                email: user?.email ?? "—",
+            });
+        }
+
+        return campaigns.map((c) => ({
+            ...c,
+            creatorName: userMap.get(c.createdBy)?.name,
+            creatorEmail: userMap.get(c.createdBy)?.email ?? "—",
+        }));
     },
 });
 
@@ -125,5 +145,70 @@ export const updateStatus = internalMutation({
     },
     handler: async (ctx, args) => {
         await ctx.db.patch(args.campaignId, { status: args.status });
+    },
+});
+
+/**
+ * Pause a running campaign. Stops processing of pending batches immediately.
+ * Only admins or the campaign creator can pause.
+ */
+export const pauseCampaign = mutation({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (ctx, args) => {
+        const access = await checkAccessHelper(ctx);
+        if (!access.hasAccess || !access.user) throw new Error("Unauthorized");
+
+        const campaign = await ctx.db.get(args.campaignId);
+        if (!campaign) throw new Error("Campaign not found");
+
+        const isAdmin = access.user.role === "admin";
+        const isCreator = campaign.createdBy === access.user.clerkId;
+        if (!isAdmin && !isCreator) {
+            throw new Error("Only the campaign creator or an admin can pause this campaign");
+        }
+
+        if (campaign.status !== "queued" && campaign.status !== "processing") {
+            throw new Error(`Cannot pause campaign with status "${campaign.status}"`);
+        }
+
+        await ctx.db.patch(args.campaignId, { status: "paused" });
+
+        await ctx.runMutation(internal.notifications.create, {
+            userId: campaign.createdBy,
+            title: "Campaign Paused",
+            message: `Campaign "${campaign.name}" has been paused. Pending batches will not be sent.`,
+            type: "warning",
+            link: `/campaigns/${args.campaignId}`,
+        });
+
+        return { success: true };
+    },
+});
+
+/**
+ * Emergency pause - no auth required. Use from Convex Dashboard when you need
+ * to stop a campaign immediately (Dashboard runs without user context).
+ */
+export const emergencyPauseCampaign = mutation({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (ctx, args) => {
+        const campaign = await ctx.db.get(args.campaignId);
+        if (!campaign) throw new Error("Campaign not found");
+
+        if (campaign.status !== "queued" && campaign.status !== "processing") {
+            throw new Error(`Cannot pause campaign with status "${campaign.status}"`);
+        }
+
+        await ctx.db.patch(args.campaignId, { status: "paused" });
+
+        await ctx.runMutation(internal.notifications.create, {
+            userId: campaign.createdBy,
+            title: "Campaign Paused",
+            message: `Campaign "${campaign.name}" has been paused (emergency). Pending batches will not be sent.`,
+            type: "warning",
+            link: `/campaigns/${args.campaignId}`,
+        });
+
+        return { success: true };
     },
 });

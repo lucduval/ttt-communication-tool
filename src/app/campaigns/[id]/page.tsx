@@ -2,14 +2,14 @@
 
 import { useState } from "react";
 
-import { useQuery, usePaginatedQuery } from "convex/react";
+import { useQuery, usePaginatedQuery, useMutation } from "convex/react";
 import { api } from "../../../../convex/_generated/api";
 import { useParams } from "next/navigation";
 import { format } from "date-fns";
 import { Id } from "../../../../convex/_generated/dataModel";
 import { Button } from "@/components/ui/Button";
 import Link from "next/link";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { ArrowLeft, Loader2, Pause } from "lucide-react";
 import { BouncedEmailsCard } from "@/components/campaigns/BouncedEmailsCard";
 
 export default function CampaignDetailsPage() {
@@ -18,6 +18,7 @@ export default function CampaignDetailsPage() {
     const [statusFilter, setStatusFilter] = useState<string>("all");
 
     const campaign = useQuery(api.campaigns.get, { id: campaignId });
+    const pauseCampaign = useMutation(api.campaigns.pauseCampaign);
     const isEngagementFilter = statusFilter === "opened" || statusFilter === "clicked";
     const { results: paginatedMessages, status: messagesStatus, loadMore } = usePaginatedQuery(
         api.messages.listByCampaign,
@@ -42,6 +43,7 @@ export default function CampaignDetailsPage() {
     const messages = isEngagementFilter ? (engagementMessages ?? []) : paginatedMessages;
 
     const isProcessing = campaign.status === "processing" || campaign.status === "queued";
+    const canPause = campaign.status === "processing" || campaign.status === "queued";
     const completedBatches = batches?.filter((b) => b.status === "completed").length || 0;
     const totalBatches = campaign.totalBatches || batches?.length || 1;
     const progressPercent = totalBatches > 0 ? Math.round((completedBatches / totalBatches) * 100) : 0;
@@ -101,9 +103,11 @@ export default function CampaignDetailsPage() {
                                     ? "bg-green-100 text-green-800"
                                     : campaign.status === "failed"
                                         ? "bg-red-100 text-red-800"
-                                        : campaign.status === "processing" || campaign.status === "queued"
-                                            ? "bg-yellow-100 text-yellow-800"
-                                            : "bg-gray-100 text-gray-800"
+                                        : campaign.status === "paused"
+                                            ? "bg-amber-100 text-amber-800"
+                                            : campaign.status === "processing" || campaign.status === "queued"
+                                                ? "bg-yellow-100 text-yellow-800"
+                                                : "bg-gray-100 text-gray-800"
                                     }`}
                             >
                                 {isProcessing && <Loader2 className="w-3 h-3 animate-spin" />}
@@ -121,6 +125,20 @@ export default function CampaignDetailsPage() {
                             )}
                         </div>
                     </div>
+                    {canPause && (
+                        <Button
+                            variant="secondary"
+                            className="bg-amber-100 text-amber-800 hover:bg-amber-200 border-amber-300"
+                            onClick={async () => {
+                                if (confirm("Pause this campaign? Pending batches will not be sent. The current batch will finish.")) {
+                                    await pauseCampaign({ campaignId });
+                                }
+                            }}
+                        >
+                            <Pause className="w-4 h-4 mr-2" />
+                            Pause Campaign
+                        </Button>
+                    )}
                 </div>
             </div>
 
