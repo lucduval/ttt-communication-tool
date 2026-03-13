@@ -51,11 +51,18 @@ export const get = query({
     args: { id: v.id("campaigns") },
     handler: async (ctx, args) => {
         const access = await checkAccessHelper(ctx);
-        if (!access.hasAccess) throw new Error("Unauthorized");
+        if (!access.hasAccess || !access.user) throw new Error("Unauthorized");
 
-        return await ctx.db.get(args.id);
+        const campaign = await ctx.db.get(args.id);
+        if (!campaign) return null;
+
+        // Non-admins can only view campaigns they created
+        if (access.user.role !== "admin" && campaign.createdBy !== access.user.clerkId) {
+            return null;
+        }
+
+        return campaign;
     },
-
 });
 
 export const search = query({

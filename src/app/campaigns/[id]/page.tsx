@@ -36,8 +36,22 @@ export default function CampaignDetailsPage() {
     const engagement = useQuery(api.messages.getEngagementRecipients, { campaignId });
     const opportunityMessages = useQuery(api.messages.listOpportunityMessages, { campaignId });
 
-    if (!campaign || messagesStatus === "LoadingFirstPage") {
+    if (campaign === undefined || messagesStatus === "LoadingFirstPage") {
         return <div className="p-8 text-center">Loading...</div>;
+    }
+
+    if (campaign === null) {
+        return (
+            <div className="container mx-auto py-8 px-8">
+                <div className="text-center py-12">
+                    <h2 className="text-xl font-semibold text-gray-900 mb-2">Campaign not found</h2>
+                    <p className="text-gray-500 mb-4">This campaign does not exist or you don&apos;t have access to view it.</p>
+                    <Link href="/campaigns" className="text-indigo-600 hover:text-indigo-800">
+                        Back to Campaigns
+                    </Link>
+                </div>
+            </div>
+        );
     }
 
     const messages = isEngagementFilter ? (engagementMessages ?? []) : paginatedMessages;
@@ -236,14 +250,14 @@ export default function CampaignDetailsPage() {
                                     active={statusFilter === "opened"}
                                     onClick={() => setStatusFilter("opened")}
                                     label="Opened"
-                                    count={engagement?.openedIds.length}
+                                    count={(engagement?.openedIds ?? []).length}
                                     variant="purple"
                                 />
                                 <FilterButton
                                     active={statusFilter === "clicked"}
                                     onClick={() => setStatusFilter("clicked")}
                                     label="Clicked"
-                                    count={engagement?.clickedIds.length}
+                                    count={(engagement?.clickedIds ?? []).length}
                                     variant="indigo"
                                 />
                             </>
