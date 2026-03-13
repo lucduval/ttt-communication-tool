@@ -622,6 +622,14 @@ export default function NewCampaignPage() {
                     ageMax: filters.ageMax ?? undefined,
                     ownerId: filters.ownerId || undefined,
                     industryId: filters.industryId || undefined,
+                    // Tax return filters (must match backend fetchMatchingContactsByTaxReturn)
+                    taxReturnMin: filters.taxReturnMin ?? undefined,
+                    taxReturnYear: filters.taxReturnYear ?? undefined,
+                    // ITA34 / income filters (must match backend fetchMatchingContactsWithITA34)
+                    incomeMin: filters.incomeMin ?? undefined,
+                    incomeMax: filters.incomeMax ?? undefined,
+                    retirementFundMin: filters.retirementFundMin ?? undefined,
+                    retirementFundMax: filters.retirementFundMax ?? undefined,
                 });
             } else {
                 if (campaignChannel === "email" || campaignChannel === "personalised") {

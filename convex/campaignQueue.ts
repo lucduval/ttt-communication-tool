@@ -705,17 +705,34 @@ export const processCampaignFilters = internalAction({
             return; // Or mark campaign as failed
         }
 
+        // Resolve ownerId for non-admins (scheduled action has no user context)
+        const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, { campaignId });
+        if (campaign) {
+            const user = await ctx.runQuery(internal.users.getCurrentUserInternal, { clerkId: campaign.createdBy });
+            if (user && user.role !== "admin" && user.dynamicsUserId) {
+                parsedFilters = { ...parsedFilters, ownerId: user.dynamicsUserId };
+            }
+        }
+
         console.log(`Processing filter-based campaign ${campaignId} with filters:`, parsedFilters);
 
         try {
-            // Import dynamically to avoid circular dependencies if any
-            const { fetchMatchingContacts } = await import("./lib/dynamics_util");
+            const { fetchMatchingContacts, fetchMatchingContactsByTaxReturn, fetchMatchingContactsWithITA34 } = await import("./lib/dynamics_util");
+
+            const hasTaxReturnFilters = parsedFilters.taxReturnMin != null;
+            const hasITA34Filters = parsedFilters.incomeMin != null || parsedFilters.incomeMax != null ||
+                parsedFilters.retirementFundMin != null || parsedFilters.retirementFundMax != null;
+
+            const fetchFn = hasTaxReturnFilters
+                ? fetchMatchingContactsByTaxReturn
+                : hasITA34Filters
+                    ? fetchMatchingContactsWithITA34
+                    : fetchMatchingContacts;
 
             // For personalised campaigns, pre-fetch contacts already sent this campaign
             // so we can filter them out as we stream chunks from Dynamics
             let excludedPersonalisedIds = new Set<string>();
-            if (channel === "personalised") {
-                const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, { campaignId });
+            if (channel === "personalised" && campaign) {
                 if (campaign?.name) {
                     const excludedArr = await ctx.runQuery(
                         internal.personalisedHistory.getContactIdsForCampaignName,
@@ -735,7 +752,7 @@ export const processCampaignFilters = internalAction({
             let totalProcessed = 0;
 
             // We use a callback to process each chunk immediately
-            await fetchMatchingContacts(parsedFilters, async (chunk: ShimmedContact[]) => {
+            await fetchFn(parsedFilters, async (chunk: ShimmedContact[]) => {
                 pageCount++;
                 if (chunk.length === 0) return;
 
