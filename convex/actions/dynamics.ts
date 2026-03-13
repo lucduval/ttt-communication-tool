@@ -154,9 +154,13 @@ export const fetchContacts = action({
         }
 
         // --- New Filters ---
+        // OptionSet fields require integer values; avoid Edm.String vs Edm.Int32 mismatch.
 
         if (clientType) {
-            filterExpression += ` and riivo_clienttypenew eq ${clientType}`; // clienttypenew is likely OptionSet (int) but we receive string/number
+            const n = parseInt(String(clientType), 10);
+            if (!Number.isNaN(n)) {
+                filterExpression += ` and riivo_clienttypenew eq ${n}`;
+            }
         }
 
         if (entityType !== undefined) {
@@ -315,7 +319,10 @@ export const getContactCount = action({
         }
 
         if (clientType) {
-            filterExpression += ` and riivo_clienttypenew eq ${clientType}`;
+            const n = parseInt(String(clientType), 10);
+            if (!Number.isNaN(n)) {
+                filterExpression += ` and riivo_clienttypenew eq ${n}`;
+            }
         }
 
         if (entityType !== undefined) {
@@ -416,7 +423,10 @@ export const fetchAllContactIds = action({
         }
 
         if (clientType) {
-            filterExpression += ` and riivo_clienttypenew eq ${clientType}`;
+            const n = parseInt(String(clientType), 10);
+            if (!Number.isNaN(n)) {
+                filterExpression += ` and riivo_clienttypenew eq ${n}`;
+            }
         }
 
         if (entityType !== undefined) {

@@ -68,7 +68,7 @@ export async function fetchMatchingContacts(
         filterExpression += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
     }
 
-    if (clientType) {
+    if (clientType !== undefined && clientType !== null) {
         filterExpression += ` and riivo_clienttypenew eq ${clientType}`;
     }
 

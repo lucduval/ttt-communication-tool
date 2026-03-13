@@ -216,12 +216,12 @@ export async function sendEmail(message: EmailMessage): Promise<{ success: boole
             };
         }
 
-        // For 429 (rate limit / IncomingBytes), use Retry-After or minimum 60s delay.
+        // For 429 (rate limit / IncomingBytes), use Retry-After or minimum 90s delay.
         // IncomingBytes limit resets over a 5-min window; short backoff is insufficient.
         let delayMs: number;
         if (response.status === 429) {
             const retryAfterSeconds = parseRetryAfter(response.headers.get("Retry-After"));
-            delayMs = Math.max((retryAfterSeconds ?? 60) * 1000, 60_000);
+            delayMs = Math.max((retryAfterSeconds ?? 90) * 1000, 90_000);
         } else {
             delayMs = baseDelayMs * Math.pow(2, attempt - 1);
         }

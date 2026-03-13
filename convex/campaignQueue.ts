@@ -284,8 +284,9 @@ export const processEmailBatch = internalAction({
                         });
                     }
 
-                    // Rate limiting: stay under Graph IncomingBytes (150 MB / 5 min). Default 600ms.
-                    const emailDelayMs = Math.max(100, parseInt(process.env.GRAPH_EMAIL_DELAY_MS ?? "600", 10) || 600);
+                    // Rate limiting: stay under Graph IncomingBytes (150 MB / 5 min per mailbox).
+                    // Default 1200ms (~0.8 emails/sec) to avoid overload on large campaigns (19k+).
+                    const emailDelayMs = Math.max(500, parseInt(process.env.GRAPH_EMAIL_DELAY_MS ?? "1200", 10) || 1200);
                     await new Promise((resolve) => setTimeout(resolve, emailDelayMs));
                 } catch (err) {
                     failedCount++;
@@ -327,10 +328,11 @@ export const processEmailBatch = internalAction({
                 });
             }
 
-            // Each worker self-schedules exactly one successor. With N workers running
-            // in parallel, this keeps the pool stable until the queue is drained.
+            // Each worker self-schedules exactly one successor. Add delay between batches
+            // to avoid Graph IncomingBytes overload (150 MB / 5 min per mailbox).
             if (hasMoreBatches) {
-                await ctx.scheduler.runAfter(500, internal.campaignQueue.processEmailBatch, {
+                const batchDelayMs = parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "3000", 10) || 3000;
+                await ctx.scheduler.runAfter(batchDelayMs, internal.campaignQueue.processEmailBatch, {
                     campaignId: args.campaignId,
                 });
             }
@@ -342,7 +344,9 @@ export const processEmailBatch = internalAction({
             });
 
             if (hasMoreBatches) {
-                await ctx.scheduler.runAfter(500, internal.campaignQueue.processEmailBatch, {
+                // Longer delay after error to let Graph recover
+                const batchDelayMs = parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "3000", 10) || 3000;
+                await ctx.scheduler.runAfter(Math.max(batchDelayMs, 10000), internal.campaignQueue.processEmailBatch, {
                     campaignId: args.campaignId,
                 });
             }
