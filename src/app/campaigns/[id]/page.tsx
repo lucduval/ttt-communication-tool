@@ -190,12 +190,12 @@ export default function CampaignDetailsPage() {
                 />
                 <StatCard
                     label="Sent"
-                    value={stats?.sent || campaign.sentCount}
+                    value={stats?.sent ?? 0}
                     color="bg-blue-50 border-blue-200"
                 />
                 <StatCard
                     label="Delivered"
-                    value={stats?.delivered || campaign.deliveredCount}
+                    value={stats?.delivered ?? 0}
                     color="bg-green-50 border-green-200"
                 />
                 <BouncedEmailsCard campaignId={campaign._id} />

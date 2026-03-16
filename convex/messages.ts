@@ -31,16 +31,48 @@ export const listByCampaign = query({
     },
 });
 
+/**
+ * Derive campaign stats from the messages table (source of truth) rather than
+ * the denormalized counters on the campaign document, which can drift due to
+ * batch recovery, double-counting, or partial flushes.
+ *
+ * Definitions:
+ *   total     – campaign.totalRecipients (set at creation / filter resolution)
+ *   sent      – messages with status "sent" (email accepted by Graph API)
+ *   delivered – messages with status "delivered" (confirmed delivery)
+ *   failed    – messages with status "failed"  (send error or bounce)
+ *   pending   – messages with status "pending" (not yet attempted)
+ */
 export const getCampaignStats = query({
     args: { campaignId: v.id("campaigns") },
     handler: async (ctx, args) => {
         const campaign = await ctx.db.get(args.campaignId);
         if (!campaign) return null;
+
+        // Count each status using the by_campaign_status compound index
+        const countStatus = async (status: string) => {
+            const rows = await ctx.db
+                .query("messages")
+                .withIndex("by_campaign_status", (q) =>
+                    q.eq("campaignId", args.campaignId).eq("status", status)
+                )
+                .collect();
+            return rows.length;
+        };
+
+        const [sent, delivered, failed, pending] = await Promise.all([
+            countStatus("sent"),
+            countStatus("delivered"),
+            countStatus("failed"),
+            countStatus("pending"),
+        ]);
+
         return {
             total: campaign.totalRecipients,
-            sent: campaign.sentCount || 0,
-            delivered: campaign.deliveredCount || 0,
-            failed: campaign.failedCount || 0,
+            sent: sent + delivered, // "Sent" = successfully sent (includes delivered)
+            delivered,
+            failed,
+            pending,
         };
     },
 });
