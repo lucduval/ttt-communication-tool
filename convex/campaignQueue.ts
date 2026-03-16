@@ -145,10 +145,36 @@ export const processEmailBatch = internalAction({
             return;
         }
 
+        // Fetch recipients already sent for this campaign so we can skip them.
+        // This makes batch processing idempotent: if a batch is recovered after a
+        // crash/timeout, we won't re-send to recipients whose status was already
+        // flushed to the DB.
+        const alreadySentArr = await ctx.runQuery(internal.messages.getSentRecipientIds, {
+            campaignId: args.campaignId,
+        });
+        const alreadySent = new Set(alreadySentArr);
+
         let successCount = 0;
         let failedCount = 0;
         const results: Array<{ recipientId: string; success: boolean; error?: string }> = [];
         const crmQueue: Array<{ recipientId: string; subject: string; body: string }> = [];
+
+        // Flush pending results to the DB every FLUSH_INTERVAL recipients so that
+        // partial progress survives action crashes/timeouts.
+        const FLUSH_INTERVAL = 25;
+        const flushResults = async () => {
+            if (results.length === 0) return;
+            await ctx.runMutation(internal.messages.updateStatusBatch, {
+                campaignId: args.campaignId,
+                updates: results.map((r) => ({
+                    recipientId: r.recipientId,
+                    status: r.success ? "sent" : "failed",
+                    sentAt: r.success ? Date.now() : undefined,
+                    errorMessage: r.error,
+                })),
+            });
+            results.length = 0; // clear after flush
+        };
 
         try {
             // Import sendEmail function dynamically
@@ -198,7 +224,13 @@ export const processEmailBatch = internalAction({
             }
 
             // Process each recipient in the batch
+            let processedInFlush = 0;
             for (const recipient of batch.recipients) {
+                // Skip recipients already sent (e.g. after stuck-batch recovery).
+                if (alreadySent.has(recipient.id)) {
+                    continue;
+                }
+
                 // Strip whitespace and Unicode space characters (e.g. \u00a0 from Dynamics CRM)
                 // that pass a truthiness check but are rejected by the Graph API.
                 const cleanEmail = recipient.email?.replace(/[\u00a0\u200B-\u200D\uFEFF\s]/g, "");
@@ -210,6 +242,11 @@ export const processEmailBatch = internalAction({
                         success: false,
                         error: `Invalid email address: "${recipient.email}"`,
                     });
+                    processedInFlush++;
+                    if (processedInFlush >= FLUSH_INTERVAL) {
+                        await flushResults();
+                        processedInFlush = 0;
+                    }
                     continue;
                 }
 
@@ -297,18 +334,16 @@ export const processEmailBatch = internalAction({
                     });
                 }
 
+                // Flush progress incrementally so partial work survives crashes
+                processedInFlush++;
+                if (processedInFlush >= FLUSH_INTERVAL) {
+                    await flushResults();
+                    processedInFlush = 0;
+                }
             }
 
-            // Batch update message statuses
-            await ctx.runMutation(internal.messages.updateStatusBatch, {
-                campaignId: args.campaignId,
-                updates: results.map((r) => ({
-                    recipientId: r.recipientId,
-                    status: r.success ? "sent" : "failed",
-                    sentAt: r.success ? Date.now() : undefined,
-                    errorMessage: r.error,
-                })),
-            });
+            // Flush any remaining results
+            await flushResults();
 
             // Mark batch complete
             const { hasMoreBatches } = await ctx.runMutation(

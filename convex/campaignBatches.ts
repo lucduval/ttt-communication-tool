@@ -456,11 +456,16 @@ export const updateTotalRecipients = internalMutation({
 /**
  * Recover batches stuck in "processing" state (e.g. after an action crash/timeout).
  * Resets them to "pending" so they can be retried, and re-schedules batch processing.
+ *
+ * Safety: only schedules ONE worker per campaign (not per batch) to prevent the
+ * cascading worker-multiplication that caused duplicate sends in the past.
+ * Individual recipient dedup in processEmailBatch ensures recovered batches
+ * don't re-send to recipients whose status was already flushed.
  */
 export const recoverStuckBatches = internalMutation({
     args: {},
     handler: async (ctx) => {
-        const stuckThreshold = Date.now() - 15 * 60 * 1000; // 15 minutes
+        const stuckThreshold = Date.now() - 20 * 60 * 1000; // 20 minutes
 
         const processingBatches = await ctx.db
             .query("campaignBatches")
@@ -480,23 +485,42 @@ export const recoverStuckBatches = internalMutation({
             }
         }
 
-        // Re-schedule batch processing for each affected campaign
+        // Re-schedule ONE worker per affected campaign.
+        // Check that there are no OTHER batches still actively processing for this
+        // campaign — if there are, the existing worker chain will pick up the
+        // recovered batch naturally without us spawning a duplicate.
         for (const campaignId of recoveredCampaignIds) {
             const campaign = await ctx.db.get(campaignId);
-            if (campaign && (campaign.status === "processing" || campaign.status === "queued")) {
-                if (campaign.channel === "personalised") {
-                    await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
-                        campaignId,
-                    });
-                } else if (campaign.channel === "email") {
-                    await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
-                        campaignId,
-                    });
-                } else {
-                    await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
-                        campaignId,
-                    });
-                }
+            if (!campaign || (campaign.status !== "processing" && campaign.status !== "queued")) {
+                continue;
+            }
+
+            // If another batch for this campaign is still processing, the active
+            // worker chain will pick up the recovered (now pending) batch after it
+            // finishes.  Don't spawn a second chain.
+            const stillProcessing = await ctx.db
+                .query("campaignBatches")
+                .withIndex("by_campaign_status", (q) =>
+                    q.eq("campaignId", campaignId).eq("status", "processing")
+                )
+                .first();
+            if (stillProcessing) {
+                console.log(`Skipping worker schedule for campaign ${campaignId} — another batch is still processing`);
+                continue;
+            }
+
+            if (campaign.channel === "personalised") {
+                await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
+                    campaignId,
+                });
+            } else if (campaign.channel === "email") {
+                await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
+                    campaignId,
+                });
+            } else {
+                await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
+                    campaignId,
+                });
             }
         }
 

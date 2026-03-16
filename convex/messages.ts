@@ -146,6 +146,30 @@ export const createBatch = internalMutation({
     },
 });
 
+/**
+ * Return the set of recipientIds whose message status is already "sent" or
+ * "delivered" for a given campaign.  Used by processEmailBatch to skip
+ * recipients that were already sent (e.g. after a stuck-batch recovery).
+ */
+export const getSentRecipientIds = internalQuery({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (ctx, args) => {
+        const sent = await ctx.db
+            .query("messages")
+            .withIndex("by_campaign_status", (q) =>
+                q.eq("campaignId", args.campaignId).eq("status", "sent")
+            )
+            .collect();
+        const delivered = await ctx.db
+            .query("messages")
+            .withIndex("by_campaign_status", (q) =>
+                q.eq("campaignId", args.campaignId).eq("status", "delivered")
+            )
+            .collect();
+        return [...sent, ...delivered].map((m) => m.recipientId);
+    },
+});
+
 // Batch update message statuses - much more efficient than per-message updates
 export const updateStatusBatch = internalMutation({
     args: {
