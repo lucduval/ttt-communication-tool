@@ -780,6 +780,9 @@ export const processCampaignFilters = internalAction({
                 }
             }
 
+            // Build set of contact IDs the user explicitly excluded via individual unchecks
+            const excludeContactIds = new Set<string>(parsedFilters.excludeContactIds ?? []);
+
             // We'll fetch in chunks of 500 to match email batch size
             // This loop handles fetching ALL matching contacts from Dynamics
             // and creating batches incrementally
@@ -791,9 +794,9 @@ export const processCampaignFilters = internalAction({
                 pageCount++;
                 if (chunk.length === 0) return;
 
-                // Map to recipient format, filtering out dedup exclusions for personalised campaigns
+                // Map to recipient format, filtering out dedup exclusions and user-excluded contacts
                 const recipients = chunk
-                    .filter((c) => !excludedPersonalisedIds.has(c.id))
+                    .filter((c) => !excludedPersonalisedIds.has(c.id) && !excludeContactIds.has(c.id))
                     .map(c => ({
                         id: c.id,
                         email: c.email ?? undefined,

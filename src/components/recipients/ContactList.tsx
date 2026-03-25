@@ -39,6 +39,10 @@ interface ContactListProps {
     showITA34Columns?: boolean;
     showSarsColumn?: boolean;
     isSelectAllActive?: boolean;
+    /** IDs excluded from select-all (allows unchecking individuals without losing the rest) */
+    deselectedIds?: Set<string>;
+    onDeselectOne?: (id: string) => void;
+    onReselectOne?: (id: string) => void;
     onSelectAll?: () => void;
     onClearAll?: () => void;
     personalisedHistory?: Record<string, { campaignName: string; sentAt: number }[]>;
@@ -58,21 +62,26 @@ export function ContactList({
     showITA34Columns = false,
     showSarsColumn = false,
     isSelectAllActive = false,
+    deselectedIds = new Set(),
+    onDeselectOne,
+    onReselectOne,
     onSelectAll,
     onClearAll,
     personalisedHistory,
 }: ContactListProps) {
     const toggleSelection = (id: string) => {
-        if (!onSelectionChange) return;
-        // If select-all is active and user unchecks one, clear select-all mode first
-        if (isSelectAllActive && onClearAll) {
-            onClearAll();
-            // Select all current page contacts except the toggled one
-            const newSelection = new Set(contacts.map((c) => c.id));
-            newSelection.delete(id);
-            onSelectionChange(newSelection);
+        // When select-all is active, track exclusions instead of dropping the whole selection
+        if (isSelectAllActive) {
+            if (deselectedIds.has(id)) {
+                // Re-include a previously excluded contact
+                onReselectOne?.(id);
+            } else {
+                // Exclude this contact from the select-all
+                onDeselectOne?.(id);
+            }
             return;
         }
+        if (!onSelectionChange) return;
         const newSelection = new Set(selectedIds);
         if (newSelection.has(id)) {
             newSelection.delete(id);
@@ -133,7 +142,7 @@ export function ContactList({
                             <th className="px-4 py-4 w-12">
                                 <input
                                     type="checkbox"
-                                    checked={isSelectAllActive || (selectedIds.size === contacts.length && contacts.length > 0)}
+                                    checked={(isSelectAllActive && deselectedIds.size === 0) || (!isSelectAllActive && selectedIds.size === contacts.length && contacts.length > 0)}
                                     onChange={toggleAll}
                                     className="rounded border-gray-300"
                                 />
@@ -162,14 +171,14 @@ export function ContactList({
                     {contacts.map((contact) => (
                         <tr
                             key={contact.id}
-                            className={`hover:bg-gray-50 transition-colors ${(isSelectAllActive || selectedIds.has(contact.id)) ? "bg-blue-50" : ""
+                            className={`hover:bg-gray-50 transition-colors ${((isSelectAllActive && !deselectedIds.has(contact.id)) || selectedIds.has(contact.id)) ? "bg-blue-50" : ""
                                 }`}
                         >
                             {showSelection && (
                                 <td className="px-4 py-4">
                                     <input
                                         type="checkbox"
-                                        checked={isSelectAllActive || selectedIds.has(contact.id)}
+                                        checked={(isSelectAllActive && !deselectedIds.has(contact.id)) || selectedIds.has(contact.id)}
                                         onChange={() => toggleSelection(contact.id)}
                                         className="rounded border-gray-300"
                                     />

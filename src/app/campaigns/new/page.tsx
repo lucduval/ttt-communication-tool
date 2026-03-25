@@ -413,6 +413,8 @@ export default function NewCampaignPage() {
     const [isSelectingAll, setIsSelectingAll] = useState(false);
     const [isSelectAllActive, setIsSelectAllActive] = useState(false);
     const [virtualTotalCount, setVirtualTotalCount] = useState<number | null>(null);
+    // Tracks contacts explicitly excluded while select-all is active
+    const [deselectedIds, setDeselectedIds] = useState<Set<string>>(new Set());
 
     // Keep a stable ref to loadContacts so the filter-change effect doesn't need it as a dep
     // (Convex useAction hooks return a new function reference on every render, which would
@@ -421,11 +423,18 @@ export default function NewCampaignPage() {
     useEffect(() => { loadContactsRef.current = loadContacts; });
 
     // Reload contacts when filters or step changes — reset to fresh first batch
+    // Also clear any active selection so counts stay consistent with the new filter
     useEffect(() => {
         if (currentStep === "recipients") {
             setNextPageToken(null);
             setClientSideOffset(LOAD_MORE_SIZE);
             allFilteredContactsRef.current = [];
+            // Clear stale selections from the previous filter
+            setSelectedIds(new Set());
+            setSelectedContacts([]);
+            setIsSelectAllActive(false);
+            setVirtualTotalCount(null);
+            setDeselectedIds(new Set());
             const timer = setTimeout(() => loadContactsRef.current(false), 300);
             return () => clearTimeout(timer);
         }
@@ -630,6 +639,8 @@ export default function NewCampaignPage() {
                     incomeMax: filters.incomeMax ?? undefined,
                     retirementFundMin: filters.retirementFundMin ?? undefined,
                     retirementFundMax: filters.retirementFundMax ?? undefined,
+                    // Contacts explicitly excluded via individual unchecks
+                    excludeContactIds: deselectedIds.size > 0 ? [...deselectedIds] : undefined,
                 });
             } else {
                 if (campaignChannel === "email" || campaignChannel === "personalised") {
@@ -812,9 +823,10 @@ export default function NewCampaignPage() {
                 // Set select all mode active
                 setIsSelectAllActive(true);
 
-                // Clear specific selections as we are now selecting everything matching the filter
+                // Clear specific selections / exclusions as we are now selecting everything matching the filter
                 setSelectedIds(new Set());
                 setSelectedContacts([]);
+                setDeselectedIds(new Set());
 
                 // Store the total count for display
                 setVirtualTotalCount(countResult.count);
@@ -832,6 +844,7 @@ export default function NewCampaignPage() {
         setSelectedContacts([]);
         setIsSelectAllActive(false);
         setVirtualTotalCount(null);
+        setDeselectedIds(new Set());
     };
 
     const handleLoadMore = () => {
@@ -1018,9 +1031,11 @@ export default function NewCampaignPage() {
                                         <div className="flex items-center gap-3">
                                             {(selectedIds.size > 0 || isSelectAllActive) && (
                                                 <div className="flex flex-col items-end">
-                                                    <Badge status={isSelectAllActive && virtualTotalCount === 5000 ? "warning" : "success"}>
-                                                        {isSelectAllActive ? virtualTotalCount : selectedIds.size} selected
-                                                        {isSelectAllActive && virtualTotalCount === 5000 && "+"}
+                                                    <Badge status={isSelectAllActive && virtualTotalCount !== null && virtualTotalCount >= 5000 ? "warning" : "success"}>
+                                                        {isSelectAllActive
+                                                            ? (virtualTotalCount ?? 0) - deselectedIds.size
+                                                            : selectedIds.size} selected
+                                                        {isSelectAllActive && virtualTotalCount !== null && virtualTotalCount >= 5000 && "+"}
                                                     </Badge>
                                                 </div>
                                             )}
@@ -1131,6 +1146,17 @@ export default function NewCampaignPage() {
                                 showITA34Columns={campaignChannel === "personalised" && hasITA34Filters}
                                 showSarsColumn={campaignChannel === "personalised" && hasTaxReturnFilters}
                                 isSelectAllActive={isSelectAllActive}
+                                deselectedIds={deselectedIds}
+                                onDeselectOne={(id) => {
+                                    setDeselectedIds(prev => new Set(prev).add(id));
+                                }}
+                                onReselectOne={(id) => {
+                                    setDeselectedIds(prev => {
+                                        const next = new Set(prev);
+                                        next.delete(id);
+                                        return next;
+                                    });
+                                }}
                                 onSelectAll={handleSelectAll}
                                 onClearAll={handleClearSelection}
                                 personalisedHistory={campaignChannel === "personalised" ? (personalisedHistory ?? {}) : undefined}

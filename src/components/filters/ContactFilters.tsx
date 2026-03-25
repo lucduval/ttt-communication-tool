@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Button, Badge } from "@/components/ui";
 import { Search, Filter, X, Check, ChevronsUpDown } from "lucide-react";
 import { useAction } from "convex/react";
@@ -68,49 +68,56 @@ export function ContactFilters({
     const [ownerOptions, setOwnerOptions] = useState<Option[]>([]);
     const [industryOptions, setIndustryOptions] = useState<Option[]>([]);
 
-    // -- API Actions --
+    // -- API Actions (stabilised via refs so the metadata effect only runs once) --
     const getAttributeOptions = useAction(api.actions.dynamics.getAttributeOptionSet);
     const getGlobalOptions = useAction(api.actions.dynamics.getGlobalOptionSet);
-
     const getOwnerOptions = useAction(api.actions.dynamics.fetchUsers);
     const getIndustryOptions = useAction(api.actions.dynamics.fetchIndustries);
 
-    // -- Fetch Metadata on Mount --
+    const getAttributeOptionsRef = useRef(getAttributeOptions);
+    const getOwnerOptionsRef = useRef(getOwnerOptions);
+    const getIndustryOptionsRef = useRef(getIndustryOptions);
+    useEffect(() => { getAttributeOptionsRef.current = getAttributeOptions; });
+    useEffect(() => { getOwnerOptionsRef.current = getOwnerOptions; });
+    useEffect(() => { getIndustryOptionsRef.current = getIndustryOptions; });
+
+    // -- Fetch Metadata on Mount (runs once) --
     useEffect(() => {
+        let cancelled = false;
         const fetchMetadata = async () => {
             try {
-                // Client Type (riivo_clienttypenew)
-                const clientTypes = await getAttributeOptions({ entityName: "contact", attributeName: "riivo_clienttypenew" });
+                const clientTypes = await getAttributeOptionsRef.current({ entityName: "contact", attributeName: "riivo_clienttypenew" });
+                if (cancelled) return;
                 setClientTypeOptions(clientTypes.options);
 
-                // Entity Type (riivo_clienttypeindbus)
-                // Note: user said this is "riivo_clienttypeindbus" with values 0,1,2,3,4,5
-                const entityTypes = await getAttributeOptions({ entityName: "contact", attributeName: "riivo_clienttypeindbus" });
+                const entityTypes = await getAttributeOptionsRef.current({ entityName: "contact", attributeName: "riivo_clienttypeindbus" });
+                if (cancelled) return;
                 setEntityTypeOptions(entityTypes.options);
 
-                // Bank (ttt_bank)
-                const banks = await getAttributeOptions({ entityName: "contact", attributeName: "ttt_bank" });
+                const banks = await getAttributeOptionsRef.current({ entityName: "contact", attributeName: "ttt_bank" });
+                if (cancelled) return;
                 setBankOptions(banks.options);
 
-                // Source Code (riivo_sourcecode) -> MultiSelect
-                const sources = await getAttributeOptions({ entityName: "contact", attributeName: "riivo_sourcecode" });
+                const sources = await getAttributeOptionsRef.current({ entityName: "contact", attributeName: "riivo_sourcecode" });
+                if (cancelled) return;
                 setSourceCodeOptions(sources.options);
 
-                // Owners (Consultants)
-                const owners = await getOwnerOptions({});
+                const owners = await getOwnerOptionsRef.current({});
+                if (cancelled) return;
                 setOwnerOptions(owners.map(o => ({ value: o.id, label: o.name })));
 
-                // Industries
-                const industries = await getIndustryOptions();
+                const industries = await getIndustryOptionsRef.current();
+                if (cancelled) return;
                 setIndustryOptions(industries.map((i: any) => ({ value: i.id, label: i.name })));
 
             } catch (err) {
-                console.error("Failed to load filter metadata:", err);
+                if (!cancelled) console.error("Failed to load filter metadata:", err);
             }
         };
 
         fetchMetadata();
-    }, [getAttributeOptions]);
+        return () => { cancelled = true; };
+    }, []);
 
 
     const updateFilter = <K extends keyof FilterState>(
@@ -119,6 +126,28 @@ export function ContactFilters({
     ) => {
         onFiltersChange({ ...filters, [key]: value });
     };
+
+    // Debounced search: local state updates instantly, parent filters update after 500ms
+    const [localSearch, setLocalSearch] = useState(filters.search);
+    const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    // Sync local search when filters are reset externally (e.g. "Clear all")
+    useEffect(() => {
+        setLocalSearch(filters.search);
+    }, [filters.search]);
+
+    const handleSearchChange = useCallback((value: string) => {
+        setLocalSearch(value);
+        if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+        searchTimerRef.current = setTimeout(() => {
+            onFiltersChange({ ...filters, search: value });
+        }, 500);
+    }, [filters, onFiltersChange]);
+
+    // Cleanup timer on unmount
+    useEffect(() => {
+        return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current); };
+    }, []);
 
     const clearFilters = () => {
         onFiltersChange({
@@ -180,8 +209,8 @@ export function ContactFilters({
                     <input
                         type="text"
                         placeholder="Search by name or email..."
-                        value={filters.search}
-                        onChange={(e) => updateFilter("search", e.target.value)}
+                        value={localSearch}
+                        onChange={(e) => handleSearchChange(e.target.value)}
                         className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-md text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10"
                     />
                 </div>

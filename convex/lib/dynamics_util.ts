@@ -38,6 +38,8 @@ export interface CampaignFilters {
     incomeMax?: number;
     retirementFundMin?: number;
     retirementFundMax?: number;
+    // Contact IDs explicitly excluded by the user (individual unchecks during select-all)
+    excludeContactIds?: string[];
 }
 
 /**
