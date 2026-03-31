@@ -243,6 +243,35 @@ export function EmailComposer({
         }
     }, [htmlContent]);
 
+    // Handle paste: strip external font-size styles so the editor's fontSize applies
+    useEffect(() => {
+        const editor = editorRef.current;
+        if (!editor) return;
+
+        const handlePaste = (e: ClipboardEvent) => {
+            e.preventDefault();
+            const html = e.clipboardData?.getData("text/html");
+            const plain = e.clipboardData?.getData("text/plain") || "";
+
+            if (html) {
+                // Strip font-size from pasted HTML so the editor container's fontSize takes effect
+                const cleaned = html
+                    .replace(/font-size\s*:\s*[^;"']+;?/gi, "")
+                    .replace(/\s*style="\s*"/gi, "")
+                    // Replace <font size="..."> tags with plain <span> tags
+                    .replace(/<font[^>]*>/gi, "<span>")
+                    .replace(/<\/font>/gi, "</span>");
+                document.execCommand("insertHTML", false, cleaned);
+            } else {
+                document.execCommand("insertText", false, plain);
+            }
+            updateContent();
+        };
+
+        editor.addEventListener("paste", handlePaste);
+        return () => editor.removeEventListener("paste", handlePaste);
+    }, []);
+
     // Handle clicks on images for selection
     useEffect(() => {
         const editor = editorRef.current;
@@ -273,6 +302,37 @@ export function EmailComposer({
         // Focus the editor first to ensure commands work
         editorRef.current?.focus();
         document.execCommand(command, false, value);
+        updateContent();
+    };
+
+    // Apply font-size inline to the current selection, or all content if nothing is selected
+    const applyFontSizeToSelection = (size: string) => {
+        const editor = editorRef.current;
+        if (!editor) return;
+        editor.focus();
+
+        const selection = window.getSelection();
+        if (selection && !selection.isCollapsed && editor.contains(selection.anchorNode)) {
+            // Use execCommand('fontSize') as a marker, then replace <font> tags with styled spans
+            document.execCommand("fontSize", false, "1");
+            const fontTags = editor.querySelectorAll('font[size="1"]');
+            fontTags.forEach((font) => {
+                const span = document.createElement("span");
+                span.style.fontSize = size;
+                span.innerHTML = font.innerHTML;
+                font.replaceWith(span);
+            });
+        } else {
+            // No selection: apply to all text nodes by setting it on every block element
+            const blocks = editor.querySelectorAll("p, li, div, span, td, h1, h2, h3, h4, h5, h6");
+            if (blocks.length > 0) {
+                blocks.forEach((el) => {
+                    (el as HTMLElement).style.fontSize = size;
+                });
+            }
+            // Also set on the container for any bare text nodes
+            editor.style.fontSize = size;
+        }
         updateContent();
     };
 
@@ -476,6 +536,7 @@ export function EmailComposer({
                                 <button
                                     key={size}
                                     onClick={() => {
+                                        applyFontSizeToSelection(size);
                                         if (onFontSizeChange) onFontSizeChange(size);
                                         setIsFontSizePopoverOpen(false);
                                     }}

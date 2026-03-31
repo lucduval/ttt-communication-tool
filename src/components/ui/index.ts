@@ -4,6 +4,7 @@ export { Badge } from "./Badge";
 export { Pagination } from "./Pagination";
 export { ConfirmationModal } from "./ConfirmationModal";
 export { Input } from "./Input";
+export { LoadingScreen } from "./LoadingScreen";
 export { Popover, PopoverTrigger, PopoverContent } from "./popover";
 export {
     Command,

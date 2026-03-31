@@ -1,9 +1,12 @@
+import { v } from "convex/values";
 import { query } from "./_generated/server";
 import { checkAccessHelper } from "./users";
 
 export const getDashboardStats = query({
-    args: {},
-    handler: async (ctx) => {
+    args: {
+        excludeUserIds: v.optional(v.array(v.string())),
+    },
+    handler: async (ctx, args) => {
         const access = await checkAccessHelper(ctx);
         if (!access.hasAccess || !access.user) throw new Error("Unauthorized");
 
@@ -21,13 +24,17 @@ export const getDashboardStats = query({
         const startOf14DaysAgoMs = startOf14DaysAgo.getTime();
 
         // Admins see all campaigns; regular users only see their own
-        const campaigns = isAdmin
+        const excludeSet = new Set(args.excludeUserIds ?? []);
+        const allCampaigns = isAdmin
             ? await ctx.db.query("campaigns").order("desc").collect()
             : await ctx.db
                 .query("campaigns")
                 .withIndex("by_user", (q) => q.eq("createdBy", clerkId!))
                 .order("desc")
                 .collect();
+        const campaigns = excludeSet.size > 0
+            ? allCampaigns.filter((c) => !excludeSet.has(c.createdBy))
+            : allCampaigns;
 
         let sentThisMonth = 0;
         let totalDelivered = 0;
@@ -89,5 +96,18 @@ export const getDashboardStats = query({
             recentCampaigns,
             isAdmin,
         };
+    },
+});
+
+export const getDashboardUsers = query({
+    args: {},
+    handler: async (ctx) => {
+        const access = await checkAccessHelper(ctx);
+        if (!access.hasAccess || !access.user) throw new Error("Unauthorized");
+
+        const users = await ctx.db.query("users").collect();
+        return users
+            .filter((u) => u.status === "active" && u.clerkId)
+            .map((u) => ({ clerkId: u.clerkId!, name: u.name ?? u.email, email: u.email }));
     },
 });

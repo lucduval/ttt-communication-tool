@@ -28,6 +28,7 @@ export interface Contact {
     ita34RetirementFund?: number | null;
     ita34Year?: number | null;
     sarsReimbursement?: number | null;
+    industry?: string | null;
 }
 
 interface ContactListProps {
@@ -188,6 +189,11 @@ export function ContactList({
                                 <div className="font-medium text-gray-900">
                                     {contact.fullName}
                                 </div>
+                                {contact.industry && (
+                                    <div className="text-xs text-gray-500 mt-0.5">
+                                        {contact.industry}
+                                    </div>
+                                )}
                             </td>
                             <td className="px-4 py-4">
                                 <div className="space-y-1">
@@ -208,18 +214,22 @@ export function ContactList({
                             <td className="px-4 py-4">
                                 <Badge
                                     status={
-                                        contact.clientType === "1"
-                                            ? "info"
-                                            : contact.clientType === "employee"
-                                                ? "success"
-                                                : "default"
+                                        contact.clientType === "lead"
+                                            ? "warning"
+                                            : contact.clientType === "1"
+                                                ? "info"
+                                                : contact.clientType === "employee"
+                                                    ? "success"
+                                                    : "default"
                                     }
                                 >
-                                    {contact.clientType === "1"
-                                        ? "Business"
-                                        : contact.clientType === "employee"
-                                            ? "Employee"
-                                            : "Individual"}
+                                    {contact.clientType === "lead"
+                                        ? "Lead"
+                                        : contact.clientType === "1"
+                                            ? "Business"
+                                            : contact.clientType === "employee"
+                                                ? "Employee"
+                                                : "Individual"}
                                 </Badge>
                             </td>
                             {showITA34Columns && (

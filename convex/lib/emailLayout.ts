@@ -5,7 +5,7 @@
  * Only touches elements that do NOT already have an inline style attribute,
  * so explicitly-styled elements (e.g. unsubscribe footer) are left untouched.
  */
-function inlineContentStyles(html: string): string {
+function inlineContentStyles(html: string, fontSize: string = "15px"): string {
   // Helper: add a style attribute only to tags that don't already have one.
   const addStyleIfMissing = (tag: string, styles: string) =>
     html.replace(
@@ -13,10 +13,10 @@ function inlineContentStyles(html: string): string {
       `<${tag} style="${styles}"`
     );
 
-  html = addStyleIfMissing("p", "margin:0 0 6px 0;padding:0");
-  html = addStyleIfMissing("ul", "margin:8px 0;padding-left:24px");
-  html = addStyleIfMissing("ol", "margin:8px 0;padding-left:24px");
-  html = addStyleIfMissing("li", "margin:0 0 4px 0");
+  html = addStyleIfMissing("p", `margin:0 0 6px 0;padding:0;font-size:${fontSize}`);
+  html = addStyleIfMissing("ul", `margin:8px 0;padding-left:24px;font-size:${fontSize}`);
+  html = addStyleIfMissing("ol", `margin:8px 0;padding-left:24px;font-size:${fontSize}`);
+  html = addStyleIfMissing("li", `margin:0 0 4px 0;font-size:${fontSize}`);
   html = addStyleIfMissing("h1", "margin:0 0 12px 0;padding:0");
   html = addStyleIfMissing("h2", "margin:0 0 10px 0;padding:0");
   html = addStyleIfMissing("h3", "margin:0 0 8px 0;padding:0");
@@ -25,8 +25,8 @@ function inlineContentStyles(html: string): string {
   return html;
 }
 
-export const wrapEmail = (content: string, title: string = "Notification"): string => {
-  const processedContent = inlineContentStyles(content);
+export const wrapEmail = (content: string, title: string = "Notification", fontSize: string = "15px"): string => {
+  const processedContent = inlineContentStyles(content, fontSize);
 
   return `
 <!DOCTYPE html>
@@ -75,7 +75,7 @@ export const wrapEmail = (content: string, title: string = "Notification"): stri
           <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" class="email-container" style="max-width:600px;background-color:#ffffff;border-radius:8px;overflow:hidden;">
             <!-- Content -->
             <tr>
-              <td class="email-content" style="padding:20px 24px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.45;color:#333333;">
+              <td class="email-content" style="padding:20px 24px;font-family:Arial,Helvetica,sans-serif;font-size:${fontSize};line-height:1.45;color:#333333;">
                 ${processedContent}
               </td>
             </tr>

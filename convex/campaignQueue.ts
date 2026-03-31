@@ -275,7 +275,8 @@ export const processEmailBatch = internalAction({
                     const { wrapEmail } = await import("./lib/emailLayout");
                     let emailBody = wrapEmail(
                         mergedHtmlBody + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : ""),
-                        campaign.subject || "Notification"
+                        campaign.subject || "Notification",
+                        campaign.fontSize || "15px"
                     );
 
                     // Link rewriting and open tracking

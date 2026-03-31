@@ -353,6 +353,7 @@ export const startCampaign = mutation({
         aiPrompt: v.optional(v.string()),
         aiSystemPrompt: v.optional(v.string()),
         createOpportunities: v.optional(v.boolean()),
+        fontSize: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const identity = await ctx.auth.getUserIdentity();
@@ -405,6 +406,7 @@ export const startCampaign = mutation({
             aiPrompt: args.aiPrompt,
             aiSystemPrompt: args.aiSystemPrompt,
             createOpportunities: args.createOpportunities,
+            fontSize: args.fontSize,
         });
 
         // Messages are now created downstream in createBatches for both direct and filtered campaigns.

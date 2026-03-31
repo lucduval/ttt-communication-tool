@@ -32,6 +32,8 @@ export interface FilterState {
     taxReturnYear: number | null;
     // Personalised campaign history filter (client-side)
     personalisedCampaignFilter: "all" | "sent" | "not_sent";
+    // Bad debt filter (client-side)
+    badDebtFilter: "all" | "has_debt" | "no_debt";
 }
 
 interface Option {
@@ -172,6 +174,7 @@ export function ContactFilters({
             taxReturnMin: null,
             taxReturnYear: null,
             personalisedCampaignFilter: "all",
+            badDebtFilter: "all",
         });
     };
 
@@ -195,7 +198,8 @@ export function ContactFilters({
         filters.retirementFundMax !== null ||
         filters.taxReturnMin !== null ||
         filters.taxReturnYear !== null ||
-        filters.personalisedCampaignFilter !== "all";
+        filters.personalisedCampaignFilter !== "all" ||
+        filters.badDebtFilter !== "all";
 
     return (
         <div className="space-y-4">
@@ -478,6 +482,35 @@ export function ContactFilters({
                         </div>
                     </div>
 
+                    {/* Bad Debt / Open Invoices filter */}
+                    <div className="mt-4 pt-4 border-t border-red-200 bg-red-50/50 -mx-4 px-4 pb-3 rounded-b-lg">
+                        <h4 className="font-semibold text-sm text-red-900 mb-3 flex items-center gap-1.5">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>
+                            Bad Debt / Open Invoices
+                        </h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                    Invoice Status
+                                </label>
+                                <select
+                                    value={filters.badDebtFilter}
+                                    onChange={(e) =>
+                                        updateFilter(
+                                            "badDebtFilter",
+                                            e.target.value as FilterState["badDebtFilter"]
+                                        )
+                                    }
+                                    className="w-full bg-white border border-red-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-red-500/20"
+                                >
+                                    <option value="all">All clients</option>
+                                    <option value="has_debt">Has open invoices (bad debt)</option>
+                                    <option value="no_debt">No open invoices</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
                     {/* Personalised Campaign History filter — shown whenever history data is available */}
                     {personalisedCampaignNames !== undefined && (
                         <div className="mt-4 pt-4 border-t border-purple-200 bg-purple-50/50 -mx-4 px-4 pb-3 rounded-b-lg">
@@ -687,6 +720,16 @@ export function ContactFilters({
                                 <Badge status="warning">
                                     SARS Refund: min R{filters.taxReturnMin.toLocaleString()}
                                     {filters.taxReturnYear ? ` (${filters.taxReturnYear})` : ""}
+                                </Badge>
+                            )}
+                            {filters.badDebtFilter === "has_debt" && (
+                                <Badge status="error">
+                                    Has open invoices
+                                </Badge>
+                            )}
+                            {filters.badDebtFilter === "no_debt" && (
+                                <Badge status="success">
+                                    No open invoices
                                 </Badge>
                             )}
                             {filters.personalisedCampaignFilter === "sent" && (

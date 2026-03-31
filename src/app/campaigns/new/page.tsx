@@ -5,7 +5,7 @@ import { useAction, useQuery, useMutation } from "convex/react";
 import { ConvexError } from "convex/values";
 import { api } from "@/../convex/_generated/api";
 import { Header } from "@/components/layout";
-import { Button, Card, Badge, ConfirmationModal } from "@/components/ui";
+import { Button, Card, Badge, ConfirmationModal, LoadingScreen } from "@/components/ui";
 import { EmailComposer, EmailPreview, TestEmailModal, MailboxSelector, LivePreviewModal, PersonalisedComposer, PersonalisedPreview } from "@/components/email";
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, DEFAULT_SUBJECT as DEFAULT_PERSONALISED_SUBJECT } from "@/components/email/PersonalisedComposer";
 import {
@@ -20,6 +20,8 @@ import {
     type FilterState,
     EmployeeFilters,
     type EmployeeFilterState,
+    LeadFilters,
+    type LeadFilterState,
 } from "@/components/filters";
 import { ContactList, type Contact } from "@/components/recipients";
 import {
@@ -74,6 +76,7 @@ const INITIAL_FILTERS: FilterState = {
     taxReturnMin: null,
     taxReturnYear: null,
     personalisedCampaignFilter: "all",
+    badDebtFilter: "all",
 };
 
 interface UploadedImage {
@@ -103,10 +106,19 @@ export default function NewCampaignPage() {
     const [nextPageToken, setNextPageToken] = useState<string | null>(null);
     const [clientSideOffset, setClientSideOffset] = useState(LOAD_MORE_SIZE);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
-    const [audience, setAudience] = useState<"clients" | "employees">("clients");
+    const [audience, setAudience] = useState<"clients" | "employees" | "leads">("clients");
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
         status: "all",
+    });
+    const [leadFilters, setLeadFilters] = useState<LeadFilterState>({
+        search: "",
+        status: "active",
+        province: null,
+        emailOptIn: null,
+        whatsappOptIn: null,
+        ownerId: null,
+        industryId: null,
     });
     const [allEmployees, setAllEmployees] = useState<Contact[]>([]);
     // Holds the full client-side dataset for employee/ITA34/TaxReturn modes so Load More can slice it
@@ -197,6 +209,9 @@ export default function NewCampaignPage() {
     const sendTestWhatsApp = useAction(api.actions.whatsapp.sendTestWhatsApp);
     const sendBulkWhatsApp = useAction(api.actions.whatsapp.sendBulkWhatsApp);
     const fetchEmployees = useAction(api.actions.dynamics.fetchUsers);
+    const fetchLeads = useAction(api.actions.dynamics.fetchLeads);
+    const getLeadCount = useAction(api.actions.dynamics.getLeadCount);
+    const fetchContactsByBadDebt = useAction(api.actions.dynamics.fetchContactsByBadDebt);
 
     // Build channel-appropriate filter
     const getChannelFilter = useCallback(() => {
@@ -221,6 +236,7 @@ export default function NewCampaignPage() {
         filters.retirementFundMin !== null || filters.retirementFundMax !== null;
 
     const hasTaxReturnFilters = filters.taxReturnMin !== null;
+    const hasBadDebtFilter = filters.badDebtFilter === "has_debt";
 
     const loadContacts = useCallback(async (append: boolean = false) => {
         try {
@@ -287,6 +303,81 @@ export default function NewCampaignPage() {
                     setContacts(filtered.slice(0, LOAD_MORE_SIZE));
                 } else {
                     // Load More: append next slice from already-fetched data
+                    setClientSideOffset(prev => {
+                        const newOffset = prev + LOAD_MORE_SIZE;
+                        setContacts(allFilteredContactsRef.current.slice(0, newOffset));
+                        return newOffset;
+                    });
+                }
+            } else if (audience === "leads") {
+                if (!append) {
+                    const [leadsResult, countResult] = await Promise.all([
+                        fetchLeads({
+                            search: leadFilters.search || undefined,
+                            top: LOAD_MORE_SIZE,
+                            province: leadFilters.province || undefined,
+                            emailOptIn: leadFilters.emailOptIn ?? undefined,
+                            whatsappOptIn: leadFilters.whatsappOptIn ?? undefined,
+                            ownerId: leadFilters.ownerId || undefined,
+                            status: leadFilters.status,
+                            industryId: leadFilters.industryId || undefined,
+                        }),
+                        getLeadCount({
+                            search: leadFilters.search || undefined,
+                            province: leadFilters.province || undefined,
+                            emailOptIn: leadFilters.emailOptIn ?? undefined,
+                            whatsappOptIn: leadFilters.whatsappOptIn ?? undefined,
+                            ownerId: leadFilters.ownerId || undefined,
+                            status: leadFilters.status,
+                            industryId: leadFilters.industryId || undefined,
+                        }),
+                    ]);
+                    const allLeads = leadsResult.contacts as Contact[];
+                    allFilteredContactsRef.current = allLeads;
+                    setTotalCount(countResult.count);
+                    setClientSideOffset(LOAD_MORE_SIZE);
+                    setContacts(allLeads.slice(0, LOAD_MORE_SIZE));
+                    setNextPageToken(leadsResult.nextPage ?? null);
+                } else {
+                    // Load more leads using next page token
+                    if (nextPageToken) {
+                        const leadsResult = await fetchLeads({
+                            search: leadFilters.search || undefined,
+                            top: LOAD_MORE_SIZE,
+                            skipToken: nextPageToken,
+                            province: leadFilters.province || undefined,
+                            emailOptIn: leadFilters.emailOptIn ?? undefined,
+                            whatsappOptIn: leadFilters.whatsappOptIn ?? undefined,
+                            ownerId: leadFilters.ownerId || undefined,
+                            status: leadFilters.status,
+                            industryId: leadFilters.industryId || undefined,
+                        });
+                        setContacts(prev => [...prev, ...leadsResult.contacts as Contact[]]);
+                        setNextPageToken(leadsResult.nextPage ?? null);
+                    }
+                }
+            } else if (hasBadDebtFilter) {
+                if (!append) {
+                    const channelFilter = getChannelFilter();
+                    const result = await fetchContactsByBadDebt({
+                        filter: channelFilter,
+                        search: filters.search || undefined,
+                        clientType: filters.clientType || undefined,
+                        entityType: filters.entityType ?? undefined,
+                        bank: filters.bank ?? undefined,
+                        sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                        province: filters.province || undefined,
+                        ageMin: filters.ageMin ?? undefined,
+                        ageMax: filters.ageMax ?? undefined,
+                        ownerId: filters.ownerId || undefined,
+                        industryId: filters.industryId || undefined,
+                    });
+                    const allContacts = result.contacts as Contact[];
+                    allFilteredContactsRef.current = allContacts;
+                    setTotalCount(result.totalCount);
+                    setClientSideOffset(LOAD_MORE_SIZE);
+                    setContacts(allContacts.slice(0, LOAD_MORE_SIZE));
+                } else {
                     setClientSideOffset(prev => {
                         const newOffset = prev + LOAD_MORE_SIZE;
                         setContacts(allFilteredContactsRef.current.slice(0, newOffset));
@@ -407,7 +498,7 @@ export default function NewCampaignPage() {
             setIsLoadingContacts(false);
             setIsLoadingMore(false);
         }
-    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, filters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, nextPageToken]);
+    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, fetchContactsByBadDebt, fetchLeads, getLeadCount, filters, leadFilters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, hasBadDebtFilter, nextPageToken]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -438,7 +529,7 @@ export default function NewCampaignPage() {
             const timer = setTimeout(() => loadContactsRef.current(false), 300);
             return () => clearTimeout(timer);
         }
-    }, [currentStep, filters, audience, employeeFilters]);
+    }, [currentStep, filters, audience, employeeFilters, leadFilters]);
 
     // Update selected contacts when moving forward from recipients
     useEffect(() => {
@@ -714,6 +805,7 @@ export default function NewCampaignPage() {
                 createOpportunities: campaignChannel === "personalised" ? createOpportunities : undefined,
                 ccEmail: campaignChannel === "personalised" ? ccEmail || undefined : undefined,
                 bccEmail: campaignChannel === "personalised" ? bccEmail || undefined : undefined,
+                fontSize: (campaignChannel === "email" || campaignChannel === "personalised") ? fontSize : undefined,
             });
 
             // Queue batches and start processing (async - returns immediately)
@@ -1095,7 +1187,7 @@ export default function NewCampaignPage() {
                                                 : "text-gray-500 hover:text-gray-700"
                                                 }`}
                                         >
-                                            Clients (External)
+                                            Clients
                                         </button>
                                         <button
                                             onClick={() => {
@@ -1109,6 +1201,27 @@ export default function NewCampaignPage() {
                                                 }`}
                                         >
                                             Employees (Internal)
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                setAudience("leads");
+                                                setLeadFilters({
+                                                    search: "",
+                                                    status: "active",
+                                                    province: null,
+                                                    emailOptIn: null,
+                                                    whatsappOptIn: null,
+                                                    ownerId: null,
+                                                    industryId: null,
+                                                });
+                                                handleClearSelection();
+                                            }}
+                                            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${audience === "leads"
+                                                ? "bg-white text-[#1E3A5F] shadow-sm"
+                                                : "text-gray-500 hover:text-gray-700"
+                                                }`}
+                                        >
+                                            Leads
                                         </button>
                                     </div>
 
@@ -1134,33 +1247,45 @@ export default function NewCampaignPage() {
                                             totalCount={totalCount}
                                         />
                                     )}
+
+                                    {audience === "leads" && (
+                                        <LeadFilters
+                                            filters={leadFilters}
+                                            onFiltersChange={setLeadFilters}
+                                            totalCount={totalCount}
+                                        />
+                                    )}
                                 </div>
                             </Card>
 
-                            <ContactList
-                                contacts={displayedContacts}
-                                isLoading={isLoadingContacts && contacts.length === 0}
-                                selectedIds={selectedIds}
-                                onSelectionChange={setSelectedIds}
-                                showSelection={true}
-                                showITA34Columns={campaignChannel === "personalised" && hasITA34Filters}
-                                showSarsColumn={campaignChannel === "personalised" && hasTaxReturnFilters}
-                                isSelectAllActive={isSelectAllActive}
-                                deselectedIds={deselectedIds}
-                                onDeselectOne={(id) => {
-                                    setDeselectedIds(prev => new Set(prev).add(id));
-                                }}
-                                onReselectOne={(id) => {
-                                    setDeselectedIds(prev => {
-                                        const next = new Set(prev);
-                                        next.delete(id);
-                                        return next;
-                                    });
-                                }}
-                                onSelectAll={handleSelectAll}
-                                onClearAll={handleClearSelection}
-                                personalisedHistory={campaignChannel === "personalised" ? (personalisedHistory ?? {}) : undefined}
-                            />
+                            {isLoadingContacts && <LoadingScreen />}
+
+                            {!isLoadingContacts && (
+                                <ContactList
+                                    contacts={displayedContacts}
+                                    isLoading={false}
+                                    selectedIds={selectedIds}
+                                    onSelectionChange={setSelectedIds}
+                                    showSelection={true}
+                                    showITA34Columns={campaignChannel === "personalised" && hasITA34Filters}
+                                    showSarsColumn={campaignChannel === "personalised" && hasTaxReturnFilters}
+                                    isSelectAllActive={isSelectAllActive}
+                                    deselectedIds={deselectedIds}
+                                    onDeselectOne={(id) => {
+                                        setDeselectedIds(prev => new Set(prev).add(id));
+                                    }}
+                                    onReselectOne={(id) => {
+                                        setDeselectedIds(prev => {
+                                            const next = new Set(prev);
+                                            next.delete(id);
+                                            return next;
+                                        });
+                                    }}
+                                    onSelectAll={handleSelectAll}
+                                    onClearAll={handleClearSelection}
+                                    personalisedHistory={campaignChannel === "personalised" ? (personalisedHistory ?? {}) : undefined}
+                                />
+                            )}
 
                             {/* Load More footer — mb-24 clears the fixed Back/Next buttons */}
                             {!isLoadingContacts && (

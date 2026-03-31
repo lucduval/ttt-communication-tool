@@ -48,6 +48,8 @@ export default defineSchema({
         aiSystemPrompt: v.optional(v.string()),
         // Opportunity creation
         createOpportunities: v.optional(v.boolean()),
+        // Font size for email content
+        fontSize: v.optional(v.string()),
     })
         .index("by_status", ["status"])
         .index("by_user", ["createdBy"])

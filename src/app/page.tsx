@@ -2,15 +2,20 @@
 
 import { Header } from "@/components/layout";
 import { Button, Card, Badge } from "@/components/ui";
-import { ArrowUpRight, ArrowDownRight, Mail, MessageSquare, Plus, Users, Send } from "lucide-react";
+import { ArrowUpRight, ArrowDownRight, Mail, MessageSquare, Plus, Users, Send, X } from "lucide-react";
 import Link from "next/link";
+import { useState, useRef, useEffect } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 
 
 
 export default function DashboardPage() {
-  const data = useQuery(api.dashboard.getDashboardStats);
+  const [excludeUserIds, setExcludeUserIds] = useState<string[]>([]);
+  const data = useQuery(api.dashboard.getDashboardStats, {
+    excludeUserIds: excludeUserIds.length > 0 ? excludeUserIds : undefined,
+  });
+  const users = useQuery(api.dashboard.getDashboardUsers);
 
   const stats = [
     {
@@ -63,6 +68,15 @@ export default function DashboardPage() {
               </Button>
             </Link>
           </div>
+
+          {/* User Filter */}
+          {users && users.length > 1 && (
+            <UserFilter
+              users={users}
+              excludeUserIds={excludeUserIds}
+              onChange={setExcludeUserIds}
+            />
+          )}
 
           {/* Stats Grid */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
@@ -207,6 +221,100 @@ export default function DashboardPage() {
         </div>
       </section>
     </>
+  );
+}
+
+function UserFilter({
+  users,
+  excludeUserIds,
+  onChange,
+}: {
+  users: { clerkId: string; name: string; email: string }[];
+  excludeUserIds: string[];
+  onChange: (ids: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
+
+  const toggle = (clerkId: string) => {
+    onChange(
+      excludeUserIds.includes(clerkId)
+        ? excludeUserIds.filter((id) => id !== clerkId)
+        : [...excludeUserIds, clerkId]
+    );
+  };
+
+  return (
+    <div className="flex items-center gap-3">
+      <div className="relative" ref={ref}>
+        <button
+          onClick={() => setOpen(!open)}
+          className={`flex items-center gap-2 px-3 py-1.5 text-sm border rounded-lg transition-colors ${
+            excludeUserIds.length > 0
+              ? "border-blue-300 bg-blue-50 text-blue-700"
+              : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+          }`}
+        >
+          <Users size={14} />
+          Exclude Users
+          {excludeUserIds.length > 0 && (
+            <span className="bg-blue-200 text-blue-800 text-xs font-medium px-1.5 py-0.5 rounded-full">
+              {excludeUserIds.length}
+            </span>
+          )}
+        </button>
+        {open && (
+          <div className="absolute top-full left-0 mt-1 w-64 bg-white border border-gray-200 rounded-lg shadow-lg z-10 py-1">
+            {users.map((u) => (
+              <label
+                key={u.clerkId}
+                className="flex items-center gap-2 px-3 py-2 hover:bg-gray-50 cursor-pointer text-sm"
+              >
+                <input
+                  type="checkbox"
+                  checked={excludeUserIds.includes(u.clerkId)}
+                  onChange={() => toggle(u.clerkId)}
+                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="truncate text-gray-700">{u.name}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </div>
+      {excludeUserIds.length > 0 && (
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {excludeUserIds.map((id) => {
+            const user = users.find((u) => u.clerkId === id);
+            return (
+              <span
+                key={id}
+                className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 text-gray-700 text-xs rounded-full"
+              >
+                {user?.name ?? "Unknown"}
+                <button onClick={() => toggle(id)} className="hover:text-red-500">
+                  <X size={12} />
+                </button>
+              </span>
+            );
+          })}
+          <button
+            onClick={() => onChange([])}
+            className="text-xs text-gray-400 hover:text-gray-600 ml-1"
+          >
+            Clear all
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
