@@ -40,7 +40,18 @@ export const list = query({
         }
 
         return campaigns.map((c) => ({
-            ...c,
+            _id: c._id,
+            _creationTime: c._creationTime,
+            name: c.name,
+            channel: c.channel,
+            status: c.status,
+            totalRecipients: c.totalRecipients,
+            sentCount: c.sentCount,
+            deliveredCount: c.deliveredCount,
+            failedCount: c.failedCount,
+            opensCount: c.opensCount,
+            clicksCount: c.clicksCount,
+            createdBy: c.createdBy,
             creatorName: userMap.get(c.createdBy)?.name,
             creatorEmail: userMap.get(c.createdBy)?.email ?? "—",
         }));

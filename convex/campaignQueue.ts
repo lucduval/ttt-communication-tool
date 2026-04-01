@@ -49,7 +49,17 @@ export const queueCampaignBatches = action({
             return { success: true };
         }
 
-        if (args.recipients && args.recipients.length > 0) {
+        if (!args.recipients || args.recipients.length === 0) {
+            // No recipients and no filters — mark campaign as failed
+            await ctx.runMutation(internal.campaigns.updateStatus, {
+                campaignId: args.campaignId,
+                status: "failed",
+            });
+            console.error(`Campaign ${args.campaignId} has no recipients and no filters — marked as failed`);
+            return { success: false, error: "No recipients provided" };
+        }
+
+        if (args.recipients.length > 0) {
             let recipients = args.recipients;
 
             // For personalised campaigns, filter out contacts already sent this campaign name

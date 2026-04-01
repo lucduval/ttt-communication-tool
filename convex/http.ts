@@ -14,6 +14,45 @@ import { Id } from "./_generated/dataModel";
 const http = httpRouter();
 
 /**
+ * GET /image?id=<storageId>
+ * Serves an image from Convex storage. Used to host campaign images as URLs
+ * instead of embedding them as base64 CID attachments in every email.
+ */
+http.route({
+    path: "/image",
+    method: "GET",
+    handler: httpAction(async (ctx, request) => {
+        const url = new URL(request.url);
+        const storageId = url.searchParams.get("id");
+
+        if (!storageId) {
+            return new Response("Missing id parameter", { status: 400 });
+        }
+
+        const fileUrl = await ctx.storage.getUrl(storageId as Id<"_storage">);
+        if (!fileUrl) {
+            return new Response("Image not found", { status: 404 });
+        }
+
+        const response = await fetch(fileUrl);
+        if (!response.ok) {
+            return new Response("Failed to fetch image", { status: 502 });
+        }
+
+        const contentType = response.headers.get("Content-Type") || "image/png";
+        const body = await response.arrayBuffer();
+
+        return new Response(body, {
+            status: 200,
+            headers: {
+                "Content-Type": contentType,
+                "Cache-Control": "public, max-age=31536000, immutable",
+            },
+        });
+    }),
+});
+
+/**
  * GET /logo
  * Serves the TTT Group logo PNG for use in emails.
  */

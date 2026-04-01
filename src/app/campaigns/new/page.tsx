@@ -754,10 +754,6 @@ export default function NewCampaignPage() {
                 }
             }
 
-            const { processedHtml, inlineAttachments } = campaignChannel === "email"
-                ? extractAndConvertBase64Images(htmlContent, true)
-                : { processedHtml: undefined, inlineAttachments: [] };
-
             // 1. Process attachments: upload files to Storage if present
             const backendAttachments = [];
 
@@ -779,13 +775,54 @@ export default function NewCampaignPage() {
                         isInline: false, // Explicitly not inline
                     });
                 }
+            }
 
-                const inlineImages = inlineAttachments.map(img => ({ ...img, isInline: true }));
-                backendAttachments.push(...inlineImages);
-            } else if (campaignChannel === "email") {
-                // Just inline images
-                const inlineImages = inlineAttachments.map(img => ({ ...img, isInline: true }));
-                backendAttachments.push(...inlineImages);
+            // Upload inline images to Convex storage and replace base64 src with
+            // hosted URLs. This keeps images out of every email payload, cutting
+            // per-email size from ~1-2 MB to ~20-50 KB and avoiding the Graph API
+            // IncomingBytes rate limit (150 MB / 5 min).
+            const siteUrl = process.env.NEXT_PUBLIC_CONVEX_SITE_URL || "";
+            let processedHtml: string | undefined = undefined;
+            if (campaignChannel === "email") {
+                let html = htmlContent;
+
+                // Find all base64 images, upload each to storage, replace with URL
+                const base64ImgRegex = /<img([^>]+)src="data:(image\/[^;]+);base64,([^"]+)"([^>]*)>/gi;
+                let match;
+                const replacements: Array<{ full: string; replacement: string }> = [];
+
+                while ((match = base64ImgRegex.exec(html)) !== null) {
+                    const [fullMatch, beforeSrc, contentType, base64Data, afterSrc] = match;
+                    const ext = contentType.split("/")[1] || "png";
+
+                    // Convert base64 to blob and upload to Convex storage
+                    const byteString = atob(base64Data);
+                    const bytes = new Uint8Array(byteString.length);
+                    for (let i = 0; i < byteString.length; i++) {
+                        bytes[i] = byteString.charCodeAt(i);
+                    }
+                    const blob = new Blob([bytes], { type: contentType });
+
+                    const postUrl = await generateUploadUrl();
+                    const result = await fetch(postUrl, {
+                        method: "POST",
+                        headers: { "Content-Type": contentType },
+                        body: blob,
+                    });
+                    const { storageId } = await result.json();
+
+                    const imageUrl = `${siteUrl}/image?id=${storageId}`;
+                    replacements.push({
+                        full: fullMatch,
+                        replacement: `<img${beforeSrc}src="${imageUrl}"${afterSrc}>`,
+                    });
+                }
+
+                for (const { full, replacement } of replacements) {
+                    html = html.replace(full, replacement);
+                }
+
+                processedHtml = `<div style="font-size: ${fontSize}; font-family: Arial, sans-serif; color: #333; line-height: 1.45; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%;">${html}</div>`;
             }
 
             const campaignId = await startCampaign({
@@ -815,6 +852,7 @@ export default function NewCampaignPage() {
                 recipients: isSelectAllActive ? undefined : recipients,
                 filters: filtersJson,
                 channel: campaignChannel,
+                attachments: backendAttachments,
             });
 
             // Redirect to campaign detail page for progress tracking
