@@ -1151,21 +1151,15 @@ export default function NewCampaignPage() {
                                                 {campaignChannel === "whatsapp"
                                                     ? "Showing contacts with phone numbers and WhatsApp opt-in"
                                                     : "Showing contacts with valid email addresses"}
-                                                {isSelectAllActive && virtualTotalCount === 5000 && (
-                                                    <span className="block text-amber-600 mt-1">
-                                                        Note: Count limited to 5,000 for display, but ALL matching contacts will be processed.
-                                                    </span>
-                                                )}
                                             </p>
                                         </div>
                                         <div className="flex items-center gap-3">
                                             {(selectedIds.size > 0 || isSelectAllActive) && (
                                                 <div className="flex flex-col items-end">
-                                                    <Badge status={isSelectAllActive && virtualTotalCount !== null && virtualTotalCount >= 5000 ? "warning" : "success"}>
+                                                    <Badge status="success">
                                                         {isSelectAllActive
                                                             ? (virtualTotalCount ?? 0) - deselectedIds.size
                                                             : selectedIds.size} selected
-                                                        {isSelectAllActive && virtualTotalCount !== null && virtualTotalCount >= 5000 && "+"}
                                                     </Badge>
                                                 </div>
                                             )}
@@ -1469,9 +1463,6 @@ export default function NewCampaignPage() {
                                                 : whatsappRecipientCount}
                                         </div>
                                         <div className="text-sm text-gray-600">Recipients</div>
-                                        {isSelectAllActive && virtualTotalCount === 5000 && (
-                                            <div className="text-xs text-amber-600 mt-1">5,000+ matching contacts</div>
-                                        )}
                                     </div>
                                     <div className="p-4 bg-purple-50 rounded-lg">
                                         <div className="text-lg font-semibold text-purple-700 capitalize">

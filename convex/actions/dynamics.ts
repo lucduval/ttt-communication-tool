@@ -357,13 +357,30 @@ export const getContactCount = action({
 
         console.log(`[getContactCount] Filter Expression: ${filterExpression}`);
 
-        const endpoint = `contacts?$filter=${filterExpression}&$count=true&$top=5`;
+        // Dynamics @odata.count caps at 5000 in many environments.
+        // When the count hits that ceiling, paginate with only contactid
+        // to get the true total.
+        const initialEndpoint = `contacts?$filter=${filterExpression}&$count=true&$top=1&$select=contactid`;
+        const initialResponse = await dynamicsRequest<ContactsResponse>(initialEndpoint);
+        const odataCount = initialResponse["@odata.count"] || 0;
 
-        const response = await dynamicsRequest<ContactsResponse>(endpoint);
+        if (odataCount < 5000) {
+            return { count: odataCount };
+        }
 
-        return {
-            count: response["@odata.count"] || 0,
-        };
+        // Count exceeded 5000 — paginate to get the real number
+        let total = 0;
+        let countUrl = `contacts?$filter=${filterExpression}&$select=contactid&$count=true` as string | null;
+        for (let p = 0; countUrl && p < 200; p++) {
+            const url = countUrl.startsWith("http")
+                ? countUrl.replace(/^.*\/api\/data\/v9\.2\//, "")
+                : countUrl;
+            const page: ContactsResponse = await dynamicsRequest(url);
+            total += (page.value?.length ?? 0);
+            countUrl = page["@odata.nextLink"] ?? null;
+        }
+
+        return { count: total };
     },
 });
 

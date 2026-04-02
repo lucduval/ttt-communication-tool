@@ -394,18 +394,24 @@ export const startCampaign = mutation({
             failedCount: 0,
             createdBy: identity.subject,
             subject: args.subject,
-            htmlBody: args.htmlBody,
-            attachments: args.attachments,
             whatsappTemplateId: args.whatsappTemplateId,
-            variableValues: args.variableValues,
             createDynamicsActivity: args.createDynamicsActivity,
             fromMailbox: args.fromMailbox,
             ccEmail: args.ccEmail,
             bccEmail: args.bccEmail,
+            createOpportunities: args.createOpportunities,
+        });
+
+        // Store large content fields separately to keep campaign docs lightweight
+        // for list/dashboard queries.
+        await ctx.db.insert("campaignContent", {
+            campaignId,
+            htmlBody: args.htmlBody,
+            attachments: args.attachments,
             filters: args.filters,
+            variableValues: args.variableValues,
             aiPrompt: args.aiPrompt,
             aiSystemPrompt: args.aiSystemPrompt,
-            createOpportunities: args.createOpportunities,
             fontSize: args.fontSize,
         });
 
@@ -420,6 +426,38 @@ export const getCampaign = internalQuery({
     args: { campaignId: v.id("campaigns") },
     handler: async (ctx, args) => {
         return await ctx.db.get(args.campaignId);
+    },
+});
+
+/**
+ * Fetches the large content fields for a campaign.
+ * Falls back to reading from the campaign document itself for campaigns
+ * created before the campaignContent table was introduced.
+ */
+export const getCampaignContent = internalQuery({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (ctx, args) => {
+        const content = await ctx.db
+            .query("campaignContent")
+            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
+            .first();
+        if (content) return content;
+
+        // Backward compat: old campaigns stored content on the campaign doc
+        const campaign = await ctx.db.get(args.campaignId);
+        if (!campaign) return null;
+        return {
+            campaignId: args.campaignId,
+            htmlBody: (campaign as any).htmlBody as string | undefined,
+            attachments: (campaign as any).attachments as any[] | undefined,
+            content: (campaign as any).content as string | undefined,
+            filters: (campaign as any).filters as string | undefined,
+            filterCriteria: (campaign as any).filterCriteria as string | undefined,
+            variableValues: (campaign as any).variableValues as string | undefined,
+            aiPrompt: (campaign as any).aiPrompt as string | undefined,
+            aiSystemPrompt: (campaign as any).aiSystemPrompt as string | undefined,
+            fontSize: (campaign as any).fontSize as string | undefined,
+        };
     },
 });
 

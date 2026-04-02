@@ -16,13 +16,13 @@ export const list = query({
             campaigns = await ctx.db
                 .query("campaigns")
                 .order("desc")
-                .collect();
+                .take(200);
         } else {
             campaigns = await ctx.db
                 .query("campaigns")
                 .withIndex("by_user", (q) => q.eq("createdBy", access.user!.clerkId!))
                 .order("desc")
-                .collect();
+                .take(200);
         }
 
         // Resolve creator names from users table
@@ -72,7 +72,29 @@ export const get = query({
             return null;
         }
 
-        return campaign;
+        // Join large content fields from the separate table (falls back to
+        // inline fields for campaigns created before the split).
+        const content = await ctx.db
+            .query("campaignContent")
+            .withIndex("by_campaign", (q) => q.eq("campaignId", args.id))
+            .first();
+
+        return {
+            ...campaign,
+            // Overlay content fields — new campaigns have them here,
+            // old campaigns still have them on the campaign doc itself.
+            ...(content ? {
+                htmlBody: content.htmlBody,
+                attachments: content.attachments,
+                content: content.content,
+                filters: content.filters,
+                filterCriteria: content.filterCriteria,
+                variableValues: content.variableValues,
+                aiPrompt: content.aiPrompt,
+                aiSystemPrompt: content.aiSystemPrompt,
+                fontSize: content.fontSize,
+            } : {}),
+        };
     },
 });
 

@@ -57,6 +57,29 @@ export default defineSchema({
             searchField: "name",
         }),
 
+    // Large campaign content split out so list/dashboard queries stay lightweight.
+    // Only fetched when processing batches or viewing a single campaign.
+    campaignContent: defineTable({
+        campaignId: v.id("campaigns"),
+        htmlBody: v.optional(v.string()),
+        attachments: v.optional(v.array(v.object({
+            name: v.string(),
+            contentType: v.string(),
+            contentBase64: v.optional(v.string()),
+            contentId: v.optional(v.string()),
+            storageId: v.optional(v.id("_storage")),
+            isInline: v.optional(v.boolean()),
+        }))),
+        content: v.optional(v.string()),
+        filters: v.optional(v.string()),
+        filterCriteria: v.optional(v.string()),
+        variableValues: v.optional(v.string()),
+        aiPrompt: v.optional(v.string()),
+        aiSystemPrompt: v.optional(v.string()),
+        fontSize: v.optional(v.string()),
+    })
+        .index("by_campaign", ["campaignId"]),
+
     // Batch queue for processing large campaigns
     campaignBatches: defineTable({
         campaignId: v.id("campaigns"),

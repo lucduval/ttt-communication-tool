@@ -131,6 +131,11 @@ export const processEmailBatch = internalAction({
             return;
         }
 
+        // Fetch large content fields from the separate content table
+        const campaignContent = await ctx.runQuery(internal.campaignBatches.getCampaignContent, {
+            campaignId: args.campaignId,
+        });
+
         // Get next pending batch
         const batch = await ctx.runQuery(internal.campaignBatches.getNextPendingBatchInternal, {
             campaignId: args.campaignId,
@@ -201,8 +206,8 @@ export const processEmailBatch = internalAction({
                 isInline?: boolean;
                 contentId?: string;
             }> = [];
-            if (campaign.attachments) {
-                for (const att of campaign.attachments) {
+            if (campaignContent?.attachments) {
+                for (const att of campaignContent.attachments) {
                     let contentBase64 = att.contentBase64;
 
                     if (att.storageId && !contentBase64) {
@@ -279,14 +284,14 @@ export const processEmailBatch = internalAction({
                         : "";
 
                     // Apply merge fields to body before wrapping
-                    const mergedHtmlBody = applyMergeFields(campaign.htmlBody || "");
+                    const mergedHtmlBody = applyMergeFields(campaignContent?.htmlBody || "");
 
                     // Generate full email HTML with wrapper
                     const { wrapEmail } = await import("./lib/emailLayout");
                     let emailBody = wrapEmail(
                         mergedHtmlBody + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : ""),
                         campaign.subject || "Notification",
-                        campaign.fontSize || "15px"
+                        campaignContent?.fontSize || "15px"
                     );
 
                     // Link rewriting and open tracking
@@ -320,7 +325,7 @@ export const processEmailBatch = internalAction({
                             crmQueue.push({
                                 recipientId: recipient.id,
                                 subject: campaign.subject || "",
-                                body: campaign.htmlBody || "",
+                                body: campaignContent?.htmlBody || "",
                             });
                         }
                     } else {
@@ -800,7 +805,13 @@ export const processCampaignFilters = internalAction({
             let pageCount = 0;
             let totalProcessed = 0;
 
-            // We use a callback to process each chunk immediately
+            // We use a callback to process each chunk immediately.
+            // Each Dynamics page can return up to 5000 contacts, which means
+            // createBatches would insert thousands of documents in one mutation.
+            // To stay under Convex's 4 MB/s write limit we sub-chunk into groups
+            // of 500 and add a short delay between mutations.
+            const SUB_CHUNK_SIZE = 500;
+
             await fetchFn(parsedFilters, async (chunk: ShimmedContact[]) => {
                 pageCount++;
                 if (chunk.length === 0) return;
@@ -815,17 +826,24 @@ export const processCampaignFilters = internalAction({
                         name: c.fullName,
                         variables: JSON.stringify({
                             referralCode: c.referralCode,
-                        }), // Include referral code in variables
+                        }),
                     }));
 
                 if (recipients.length === 0) return;
 
-                // Create a batch for this chunk
-                await ctx.runMutation(internal.campaignBatches.createBatches, {
-                    campaignId,
-                    recipients,
-                    channel,
-                });
+                // Write in sub-chunks to avoid hitting Convex write limits
+                for (let i = 0; i < recipients.length; i += SUB_CHUNK_SIZE) {
+                    const subChunk = recipients.slice(i, i + SUB_CHUNK_SIZE);
+                    await ctx.runMutation(internal.campaignBatches.createBatches, {
+                        campaignId,
+                        recipients: subChunk,
+                        channel,
+                    });
+                    // Brief pause between sub-chunks to spread writes
+                    if (i + SUB_CHUNK_SIZE < recipients.length) {
+                        await new Promise((resolve) => setTimeout(resolve, 500));
+                    }
+                }
 
                 totalProcessed += recipients.length;
                 console.log(`Processed chunk ${pageCount}: ${recipients.length} contacts (Total: ${totalProcessed})`);
@@ -896,6 +914,11 @@ export const processPersonalisedBatch = internalAction({
             console.log("Campaign paused, stopping batch processing:", args.campaignId);
             return;
         }
+
+        // Fetch large content fields from the separate content table
+        const campaignContent = await ctx.runQuery(internal.campaignBatches.getCampaignContent, {
+            campaignId: args.campaignId,
+        });
 
         const batch = await ctx.runQuery(internal.campaignBatches.getNextPendingBatchInternal, {
             campaignId: args.campaignId,
@@ -1001,8 +1024,8 @@ export const processPersonalisedBatch = internalAction({
                     // 3. Generate AI copy
                     const targetYear = new Date().getFullYear() + 1;
                     const copy = await generatePersonalisedCopy({
-                        systemPrompt: campaign.aiSystemPrompt || DEFAULT_SYS_PROMPT,
-                        userPrompt: campaign.aiPrompt || "",
+                        systemPrompt: campaignContent?.aiSystemPrompt || DEFAULT_SYS_PROMPT,
+                        userPrompt: campaignContent?.aiPrompt || "",
                         scenarios: {
                             recipientName: recipientFirstName,
                             yearOfAssessment: scenarios.yearOfAssessment,

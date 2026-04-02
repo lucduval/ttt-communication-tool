@@ -76,7 +76,10 @@ export async function fetchMatchingContacts(
     }
 
     if (clientType !== undefined && clientType !== null) {
-        filterExpression += ` and riivo_clienttypenew eq ${clientType}`;
+        const clientTypeNum = parseInt(String(clientType), 10);
+        if (!Number.isNaN(clientTypeNum)) {
+            filterExpression += ` and riivo_clienttypenew eq ${clientTypeNum}`;
+        }
     }
 
     if (entityType !== undefined) {

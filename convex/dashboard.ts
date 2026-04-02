@@ -23,15 +23,16 @@ export const getDashboardStats = query({
         startOf14DaysAgo.setHours(0, 0, 0, 0);
         const startOf14DaysAgoMs = startOf14DaysAgo.getTime();
 
-        // Admins see all campaigns; regular users only see their own
+        // Admins see all campaigns; regular users only see their own.
+        // Limit to most recent 200 to stay well under Convex read limits.
         const excludeSet = new Set(args.excludeUserIds ?? []);
         const allCampaigns = isAdmin
-            ? await ctx.db.query("campaigns").order("desc").collect()
+            ? await ctx.db.query("campaigns").order("desc").take(200)
             : await ctx.db
                 .query("campaigns")
                 .withIndex("by_user", (q) => q.eq("createdBy", clerkId!))
                 .order("desc")
-                .collect();
+                .take(200);
         const campaigns = excludeSet.size > 0
             ? allCampaigns.filter((c) => !excludeSet.has(c.createdBy))
             : allCampaigns;
