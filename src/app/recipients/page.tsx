@@ -60,6 +60,8 @@ export default function RecipientsPage() {
         taxReturnYear: null,
         personalisedCampaignFilter: "all",
         badDebtFilter: "all",
+        nameRangeStart: null,
+        nameRangeEnd: null,
     };
 
     const [audience, setAudience] = useState<AudienceType>("clients");

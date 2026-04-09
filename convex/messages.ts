@@ -182,10 +182,38 @@ export const createBatch = internalMutation({
  * Return the set of recipientIds whose message status is already "sent" or
  * "delivered" for a given campaign.  Used by processEmailBatch to skip
  * recipients that were already sent (e.g. after a stuck-batch recovery).
+ *
+ * Accepts an optional `recipientIds` array to scope the check to only the
+ * current batch's recipients.  This avoids an unbounded `.collect()` that
+ * would pull every sent/delivered message for the entire campaign — which
+ * hits Convex query limits once ~8-10k messages have already been sent.
  */
 export const getSentRecipientIds = internalQuery({
-    args: { campaignId: v.id("campaigns") },
+    args: {
+        campaignId: v.id("campaigns"),
+        recipientIds: v.optional(v.array(v.string())),
+    },
     handler: async (ctx, args) => {
+        // Fast path: check only the supplied recipients via the compound index.
+        // Each lookup is O(1) against by_campaign_recipient, so 250 lookups
+        // (one email batch) is trivially fast.
+        if (args.recipientIds) {
+            const sentIds: string[] = [];
+            for (const recipientId of args.recipientIds) {
+                const msg = await ctx.db
+                    .query("messages")
+                    .withIndex("by_campaign_recipient", (q) =>
+                        q.eq("campaignId", args.campaignId).eq("recipientId", recipientId)
+                    )
+                    .first();
+                if (msg && (msg.status === "sent" || msg.status === "delivered")) {
+                    sentIds.push(recipientId);
+                }
+            }
+            return sentIds;
+        }
+
+        // Legacy fallback: collect all sent/delivered (only safe for small campaigns)
         const sent = await ctx.db
             .query("messages")
             .withIndex("by_campaign_status", (q) =>

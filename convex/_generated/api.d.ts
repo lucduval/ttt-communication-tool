@@ -39,6 +39,7 @@ import type * as lib_taxCalculator from "../lib/taxCalculator.js";
 import type * as lib_tracking_utils from "../lib/tracking_utils.js";
 import type * as lib_whatsapp from "../lib/whatsapp.js";
 import type * as messages from "../messages.js";
+import type * as migrations_migrateCampaignContent from "../migrations/migrateCampaignContent.js";
 import type * as notifications from "../notifications.js";
 import type * as opportunities from "../opportunities.js";
 import type * as personalisedHistory from "../personalisedHistory.js";
@@ -86,6 +87,7 @@ declare const fullApi: ApiFromModules<{
   "lib/tracking_utils": typeof lib_tracking_utils;
   "lib/whatsapp": typeof lib_whatsapp;
   messages: typeof messages;
+  "migrations/migrateCampaignContent": typeof migrations_migrateCampaignContent;
   notifications: typeof notifications;
   opportunities: typeof opportunities;
   personalisedHistory: typeof personalisedHistory;

@@ -38,6 +38,9 @@ export interface CampaignFilters {
     incomeMax?: number;
     retirementFundMin?: number;
     retirementFundMax?: number;
+    // Alphabetical name range for batch sending
+    nameRangeStart?: string; // e.g. "A"
+    nameRangeEnd?: string;   // e.g. "F"
     // Contact IDs explicitly excluded by the user (individual unchecks during select-all)
     excludeContactIds?: string[];
 }
@@ -115,6 +118,15 @@ export async function fetchMatchingContacts(
 
     if (industryId) {
         filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
+    }
+
+    // Alphabetical name range: include contacts whose fullname falls within [start, end]
+    if (filters.nameRangeStart) {
+        filterExpression += ` and fullname ge '${filters.nameRangeStart}'`;
+    }
+    if (filters.nameRangeEnd && filters.nameRangeEnd !== "Z") {
+        const nextChar = String.fromCharCode(filters.nameRangeEnd.charCodeAt(0) + 1);
+        filterExpression += ` and fullname lt '${nextChar}'`;
     }
 
     console.log(`[fetchMatchingContacts] Filter Expression: ${filterExpression}`);
@@ -213,6 +225,11 @@ function buildExtraContactFilter(filters: CampaignFilters): string {
     if (ageMax !== undefined) extraFilter += ` and riivo_age le ${ageMax}`;
     if (ownerId) extraFilter += ` and _ownerid_value eq '${ownerId}'`;
     if (industryId) extraFilter += ` and _riivo_industryid_value eq '${industryId}'`;
+    if (filters.nameRangeStart) extraFilter += ` and fullname ge '${filters.nameRangeStart}'`;
+    if (filters.nameRangeEnd && filters.nameRangeEnd !== "Z") {
+        const nextChar = String.fromCharCode(filters.nameRangeEnd.charCodeAt(0) + 1);
+        extraFilter += ` and fullname lt '${nextChar}'`;
+    }
     return extraFilter;
 }
 

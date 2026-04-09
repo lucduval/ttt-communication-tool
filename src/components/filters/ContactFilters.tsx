@@ -34,6 +34,9 @@ export interface FilterState {
     personalisedCampaignFilter: "all" | "sent" | "not_sent";
     // Bad debt filter (client-side)
     badDebtFilter: "all" | "has_debt" | "no_debt";
+    // Alphabetical name range for batch sending (e.g. "A" to "F")
+    nameRangeStart: string | null;
+    nameRangeEnd: string | null;
 }
 
 interface Option {
@@ -175,6 +178,8 @@ export function ContactFilters({
             taxReturnYear: null,
             personalisedCampaignFilter: "all",
             badDebtFilter: "all",
+            nameRangeStart: null,
+            nameRangeEnd: null,
         });
     };
 
@@ -199,7 +204,9 @@ export function ContactFilters({
         filters.taxReturnMin !== null ||
         filters.taxReturnYear !== null ||
         filters.personalisedCampaignFilter !== "all" ||
-        filters.badDebtFilter !== "all";
+        filters.badDebtFilter !== "all" ||
+        filters.nameRangeStart !== null ||
+        filters.nameRangeEnd !== null;
 
     return (
         <div className="space-y-4">
@@ -482,6 +489,78 @@ export function ContactFilters({
                         </div>
                     </div>
 
+                    {/* Alphabetical Range — for batch sending */}
+                    <div className="mt-4 pt-4 border-t border-blue-200 bg-blue-50/50 -mx-4 px-4 pb-3 rounded-b-lg">
+                        <h4 className="font-semibold text-sm text-blue-900 mb-1 flex items-center gap-1.5">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4h13M3 8h9m-9 4h6m4 0l4-4m0 0l4 4m-4-4v12" /></svg>
+                            Alphabetical Range
+                        </h4>
+                        <p className="text-xs text-blue-700 mb-3">
+                            Send to a subset of contacts by name range. Useful for splitting large campaigns into manageable batches (e.g. A-F, then G-L).
+                        </p>
+                        <div className="flex flex-wrap gap-2 mb-3">
+                            {[
+                                { label: "A – F", start: "A", end: "F" },
+                                { label: "G – L", start: "G", end: "L" },
+                                { label: "M – R", start: "M", end: "R" },
+                                { label: "S – Z", start: "S", end: "Z" },
+                            ].map((range) => {
+                                const isActive = filters.nameRangeStart === range.start && filters.nameRangeEnd === range.end;
+                                return (
+                                    <button
+                                        key={range.label}
+                                        onClick={() => {
+                                            if (isActive) {
+                                                onFiltersChange({ ...filters, nameRangeStart: null, nameRangeEnd: null });
+                                            } else {
+                                                onFiltersChange({ ...filters, nameRangeStart: range.start, nameRangeEnd: range.end });
+                                            }
+                                        }}
+                                        className={`px-3 py-1.5 rounded-md text-sm font-medium border transition-all ${
+                                            isActive
+                                                ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                                                : "bg-white text-blue-800 border-blue-300 hover:bg-blue-100"
+                                        }`}
+                                    >
+                                        {range.label}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">
+                                    From Letter
+                                </label>
+                                <select
+                                    value={filters.nameRangeStart ?? ""}
+                                    onChange={(e) => updateFilter("nameRangeStart", e.target.value || null)}
+                                    className="w-full bg-white border border-blue-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500/20"
+                                >
+                                    <option value="">All</option>
+                                    {"ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map((l) => (
+                                        <option key={l} value={l}>{l}</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">
+                                    To Letter
+                                </label>
+                                <select
+                                    value={filters.nameRangeEnd ?? ""}
+                                    onChange={(e) => updateFilter("nameRangeEnd", e.target.value || null)}
+                                    className="w-full bg-white border border-blue-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-blue-500/20"
+                                >
+                                    <option value="">All</option>
+                                    {"ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").map((l) => (
+                                        <option key={l} value={l}>{l}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
                     {/* Bad Debt / Open Invoices filter */}
                     <div className="mt-4 pt-4 border-t border-red-200 bg-red-50/50 -mx-4 px-4 pb-3 rounded-b-lg">
                         <h4 className="font-semibold text-sm text-red-900 mb-3 flex items-center gap-1.5">
@@ -742,6 +821,11 @@ export function ContactFilters({
                                     Personalised: not yet sent
                                 </Badge>
                             )}
+                            {(filters.nameRangeStart || filters.nameRangeEnd) && (
+                                <Badge status="info">
+                                    Names: {filters.nameRangeStart || "A"} – {filters.nameRangeEnd || "Z"}
+                                </Badge>
+                            )}
                         </div>
                     )}
                 </div>
@@ -864,6 +948,18 @@ export function buildODataFilter(filters: FilterState): string | undefined {
         conditions.push(
             `icon_sendemailclientnotifications eq ${filters.emailEnabled ? "true" : "false"}`
         );
+    }
+
+    // Alphabetical name range: fullname ge 'A' and fullname lt 'G' (for A-F)
+    // We use lt on the char AFTER nameRangeEnd so "F" includes all names starting with F.
+    if (filters.nameRangeStart) {
+        conditions.push(`fullname ge '${filters.nameRangeStart}'`);
+    }
+    if (filters.nameRangeEnd && filters.nameRangeEnd !== "Z") {
+        // Next letter after the end letter (e.g. F → G) so names starting with the end letter are included.
+        // Skip for Z — no upper bound needed since Z is the last letter.
+        const nextChar = String.fromCharCode(filters.nameRangeEnd.charCodeAt(0) + 1);
+        conditions.push(`fullname lt '${nextChar}'`);
     }
 
     return conditions.length > 0 ? conditions.join(" and ") : undefined;

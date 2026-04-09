@@ -160,12 +160,15 @@ export const processEmailBatch = internalAction({
             return;
         }
 
-        // Fetch recipients already sent for this campaign so we can skip them.
+        // Fetch recipients already sent *for this batch* so we can skip them.
         // This makes batch processing idempotent: if a batch is recovered after a
         // crash/timeout, we won't re-send to recipients whose status was already
         // flushed to the DB.
+        // We scope the query to only the current batch's recipient IDs to avoid
+        // an unbounded .collect() that would fail on large campaigns (8k+).
         const alreadySentArr = await ctx.runQuery(internal.messages.getSentRecipientIds, {
             campaignId: args.campaignId,
+            recipientIds: batch.recipients.map((r: { id: string }) => r.id),
         });
         const alreadySent = new Set(alreadySentArr);
 
