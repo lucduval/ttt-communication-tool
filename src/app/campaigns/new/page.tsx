@@ -77,6 +77,8 @@ const INITIAL_FILTERS: FilterState = {
     taxReturnYear: null,
     personalisedCampaignFilter: "all",
     badDebtFilter: "all",
+    nameRangeStart: null,
+    nameRangeEnd: null,
 };
 
 interface UploadedImage {
@@ -514,22 +516,27 @@ export default function NewCampaignPage() {
     useEffect(() => { loadContactsRef.current = loadContacts; });
 
     // Reload contacts when filters or step changes — reset to fresh first batch
-    // Also clear any active selection so counts stay consistent with the new filter
     useEffect(() => {
         if (currentStep === "recipients") {
             setNextPageToken(null);
             setClientSideOffset(LOAD_MORE_SIZE);
             allFilteredContactsRef.current = [];
-            // Clear stale selections from the previous filter
+            const timer = setTimeout(() => loadContactsRef.current(false), 300);
+            return () => clearTimeout(timer);
+        }
+    }, [currentStep, filters, audience, employeeFilters, leadFilters]);
+
+    // Clear selection when audience changes or when navigating TO the recipients step
+    // (but NOT when search/filter text changes while already on the recipients step)
+    useEffect(() => {
+        if (currentStep === "recipients") {
             setSelectedIds(new Set());
             setSelectedContacts([]);
             setIsSelectAllActive(false);
             setVirtualTotalCount(null);
             setDeselectedIds(new Set());
-            const timer = setTimeout(() => loadContactsRef.current(false), 300);
-            return () => clearTimeout(timer);
         }
-    }, [currentStep, filters, audience, employeeFilters, leadFilters]);
+    }, [currentStep, audience]);
 
     // Update selected contacts when moving forward from recipients
     useEffect(() => {
@@ -730,6 +737,9 @@ export default function NewCampaignPage() {
                     incomeMax: filters.incomeMax ?? undefined,
                     retirementFundMin: filters.retirementFundMin ?? undefined,
                     retirementFundMax: filters.retirementFundMax ?? undefined,
+                    // Alphabetical range for batch sending
+                    nameRangeStart: filters.nameRangeStart ?? undefined,
+                    nameRangeEnd: filters.nameRangeEnd ?? undefined,
                     // Contacts explicitly excluded via individual unchecks
                     excludeContactIds: deselectedIds.size > 0 ? [...deselectedIds] : undefined,
                 });
