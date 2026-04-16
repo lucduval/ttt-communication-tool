@@ -1758,10 +1758,10 @@ export default function NewCampaignPage() {
                     )}
 
                     {currentStep === "send" && (
-                        <div className="space-y-6">
+                        <div className="space-y-6 pb-24">
                             {!sendComplete ? (
                                 <Card>
-                                    <div className="text-center py-8 space-y-6">
+                                    <div className="text-center py-6 sm:py-8 space-y-6 overflow-hidden">
                                         <div className={`w-16 h-16 ${campaignChannel === "personalised" ? "bg-amber-600" : campaignChannel === "email" ? "bg-[#1E3A5F]" : "bg-green-600"} text-white rounded-full flex items-center justify-center mx-auto`}>
                                             {campaignChannel === "personalised" ? <Sparkles size={32} /> : campaignChannel === "email" ? <Mail size={32} /> : <MessageSquare size={32} />}
                                         </div>
@@ -1782,7 +1782,7 @@ export default function NewCampaignPage() {
                                             </p>
                                         </div>
 
-                                        <div className="w-full max-w-md mx-auto text-left bg-gray-50 border border-gray-200 rounded-lg p-3 sm:p-4 space-y-4">
+                                        <div className="w-full max-w-md mx-auto text-left bg-gray-50 border border-gray-200 rounded-lg p-3 sm:p-4 space-y-4 min-w-0">
                                             <div className="flex gap-2">
                                                 <button
                                                     type="button"
@@ -1821,7 +1821,7 @@ export default function NewCampaignPage() {
                                                                 value={scheduleDate}
                                                                 min={todayInSAST()}
                                                                 onChange={(e) => setScheduleDate(e.target.value)}
-                                                                className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]"
+                                                                className="w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] box-border"
                                                             />
                                                         </div>
                                                         <div>
@@ -1833,7 +1833,7 @@ export default function NewCampaignPage() {
                                                                 type="time"
                                                                 value={scheduleTime}
                                                                 onChange={(e) => setScheduleTime(e.target.value)}
-                                                                className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]"
+                                                                className="w-full min-w-0 px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] box-border"
                                                             />
                                                         </div>
                                                     </div>
