@@ -35,10 +35,30 @@ export const queueCampaignBatches = action({
         ),
         channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
         filters: v.optional(v.string()),
+        scheduledAt: v.optional(v.number()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
         if (!access.hasAccess) throw new Error("Unauthorized");
+
+        // If a future scheduledAt is set, defer batch creation/processing until then.
+        // The campaign row itself was already inserted with status "scheduled" by
+        // startCampaign, so the user can see it pending in the UI.
+        if (args.scheduledAt && args.scheduledAt > Date.now()) {
+            await ctx.scheduler.runAt(
+                args.scheduledAt,
+                internal.campaignQueue.kickoffScheduledCampaign,
+                {
+                    campaignId: args.campaignId,
+                    recipients: args.recipients,
+                    attachments: args.attachments,
+                    channel: args.channel,
+                    filters: args.filters,
+                }
+            );
+            return { success: true, scheduled: true, scheduledAt: args.scheduledAt };
+        }
+
         if (args.filters) {
             await ctx.scheduler.runAfter(0, internal.campaignQueue.processCampaignFilters, {
                 campaignId: args.campaignId,
@@ -104,6 +124,123 @@ export const queueCampaignBatches = action({
                     campaignId: args.campaignId,
                 });
             }
+        }
+
+        return { success: true };
+    },
+});
+
+/**
+ * Internal entrypoint fired by the Convex scheduler when a scheduled campaign
+ * reaches its send time. Mirrors queueCampaignBatches' work (no auth check, since
+ * the user is no longer present) and flips the campaign from "scheduled" → "queued".
+ */
+export const kickoffScheduledCampaign = internalAction({
+    args: {
+        campaignId: v.id("campaigns"),
+        recipients: v.optional(v.array(v.object({
+            id: v.string(),
+            email: v.optional(v.string()),
+            phone: v.optional(v.string()),
+            name: v.string(),
+            variables: v.optional(v.string()),
+        }))),
+        attachments: v.optional(
+            v.array(
+                v.object({
+                    name: v.string(),
+                    contentType: v.string(),
+                    storageId: v.optional(v.id("_storage")),
+                    contentBase64: v.optional(v.string()),
+                    isInline: v.optional(v.boolean()),
+                    contentId: v.optional(v.string()),
+                })
+            )
+        ),
+        channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
+        filters: v.optional(v.string()),
+    },
+    handler: async (ctx, args): Promise<{ success: boolean; error?: string }> => {
+        // Bail out if the campaign was paused/cancelled while waiting.
+        const campaign: { status: string; name: string } | null = await ctx.runQuery(
+            internal.campaignBatches.getCampaign,
+            { campaignId: args.campaignId }
+        );
+        if (!campaign) {
+            console.warn(`Scheduled kickoff: campaign ${args.campaignId} no longer exists`);
+            return { success: false, error: "Campaign not found" };
+        }
+        if (campaign.status !== "scheduled") {
+            console.warn(
+                `Scheduled kickoff: campaign ${args.campaignId} is in status "${campaign.status}", skipping`
+            );
+            return { success: false, error: `Unexpected status ${campaign.status}` };
+        }
+
+        // Move into the regular queued state so the rest of the pipeline behaves
+        // exactly like an immediate send.
+        await ctx.runMutation(internal.campaigns.updateStatus, {
+            campaignId: args.campaignId,
+            status: "queued",
+        });
+
+        if (args.filters) {
+            await ctx.scheduler.runAfter(0, internal.campaignQueue.processCampaignFilters, {
+                campaignId: args.campaignId,
+                filters: args.filters,
+                channel: args.channel,
+                attachments: args.attachments,
+            });
+            return { success: true };
+        }
+
+        if (!args.recipients || args.recipients.length === 0) {
+            await ctx.runMutation(internal.campaigns.updateStatus, {
+                campaignId: args.campaignId,
+                status: "failed",
+            });
+            console.error(
+                `Scheduled campaign ${args.campaignId} has no recipients and no filters — marked as failed`
+            );
+            return { success: false, error: "No recipients provided" };
+        }
+
+        let recipients = args.recipients;
+
+        if (args.channel === "personalised" && campaign.name) {
+            const excludedArr = await ctx.runQuery(
+                internal.personalisedHistory.getContactIdsForCampaignName,
+                { campaignName: campaign.name }
+            );
+            const excludedIds = new Set(excludedArr);
+            const before = recipients.length;
+            recipients = recipients.filter((r) => !excludedIds.has(r.id));
+            const excluded = before - recipients.length;
+            if (excluded > 0) {
+                console.log(`Dedup: excluded ${excluded} contacts already sent "${campaign.name}"`);
+            }
+        }
+
+        await ctx.runMutation(internal.campaignBatches.createBatches, {
+            campaignId: args.campaignId,
+            recipients,
+            channel: args.channel,
+            // @ts-ignore - schema validator may need updating, mirrors queueCampaignBatches
+            attachments: args.attachments,
+        });
+
+        if (args.channel === "personalised") {
+            await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
+                campaignId: args.campaignId,
+            });
+        } else if (args.channel === "email") {
+            await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
+                campaignId: args.campaignId,
+            });
+        } else {
+            await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
+                campaignId: args.campaignId,
+            });
         }
 
         return { success: true };
@@ -330,6 +467,33 @@ export const processEmailBatch = internalAction({
                                 subject: campaign.subject || "",
                                 body: campaignContent?.htmlBody || "",
                             });
+                        }
+
+                        // Create CRM opportunity if enabled (mirrors processPersonalisedBatch).
+                        // Failures here are logged but don't affect the send result — the email
+                        // is already on its way.
+                        if (campaign.createOpportunities) {
+                            try {
+                                const opportunityId = await ctx.runAction(
+                                    internal.actions.dynamics.createOpportunity,
+                                    {
+                                        contactId: recipient.id,
+                                        contactName: recipient.name,
+                                        campaignId: args.campaignId,
+                                        ownerId: undefined,
+                                    }
+                                );
+
+                                if (opportunityId) {
+                                    await ctx.runMutation(internal.messages.setOpportunityId, {
+                                        campaignId: args.campaignId,
+                                        recipientId: recipient.id,
+                                        opportunityId,
+                                    });
+                                }
+                            } catch (oppErr) {
+                                console.error(`Failed to create opportunity for ${recipient.id}:`, oppErr);
+                            }
                         }
                     } else {
                         failedCount++;

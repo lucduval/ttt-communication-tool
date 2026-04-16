@@ -49,6 +49,23 @@ interface ContactFiltersProps {
     onFiltersChange: (filters: FilterState) => void;
     totalCount?: number | null;
     isPersonalised?: boolean;
+    /**
+     * When true, render the ITA34 income / retirement-fund inputs even outside a
+     * personalised campaign. The SARS tax-return inputs remain gated on
+     * `isPersonalised`. Defaults to `isPersonalised` for backwards compatibility.
+     */
+    showITA34Filters?: boolean;
+    /**
+     * When true, the bad-debt segmentation is currently active — disable the
+     * ITA34 inputs and show a helper note explaining only one segmentation can
+     * be applied at a time.
+     */
+    badDebtActive?: boolean;
+    /**
+     * When true, the ITA34 segmentation is currently active — disable the
+     * bad-debt control and show the equivalent helper note.
+     */
+    ita34Active?: boolean;
     /** When set, the consultant filter is locked to this Dynamics systemuser ID and cannot be changed */
     lockedConsultantId?: string;
     /** When provided, shows the personalised campaign filter and lists known campaign names */
@@ -60,9 +77,14 @@ export function ContactFilters({
     onFiltersChange,
     totalCount,
     isPersonalised = false,
+    showITA34Filters,
+    badDebtActive = false,
+    ita34Active = false,
     lockedConsultantId,
     personalisedCampaignNames,
 }: ContactFiltersProps) {
+    // Default ITA34 visibility to the personalised flag so existing call sites keep working.
+    const ita34Visible = showITA34Filters ?? isPersonalised;
     const [showAdvanced, setShowAdvanced] = useState(false);
 
     // -- Dynamic Options State --
@@ -562,7 +584,7 @@ export function ContactFilters({
                     </div>
 
                     {/* Bad Debt / Open Invoices filter */}
-                    <div className="mt-4 pt-4 border-t border-red-200 bg-red-50/50 -mx-4 px-4 pb-3 rounded-b-lg">
+                    <div className={`mt-4 pt-4 border-t border-red-200 bg-red-50/50 -mx-4 px-4 pb-3 rounded-b-lg ${ita34Active ? "opacity-50" : ""}`}>
                         <h4 className="font-semibold text-sm text-red-900 mb-3 flex items-center gap-1.5">
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>
                             Bad Debt / Open Invoices
@@ -580,12 +602,18 @@ export function ContactFilters({
                                             e.target.value as FilterState["badDebtFilter"]
                                         )
                                     }
-                                    className="w-full bg-white border border-red-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-red-500/20"
+                                    disabled={ita34Active}
+                                    className={`w-full bg-white border border-red-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-red-500/20 ${ita34Active ? "cursor-not-allowed bg-gray-100" : ""}`}
                                 >
                                     <option value="all">All clients</option>
                                     <option value="has_debt">Has open invoices (bad debt)</option>
                                     <option value="no_debt">No open invoices</option>
                                 </select>
+                                {ita34Active && (
+                                    <p className="text-xs text-red-700 mt-1">
+                                        Disabled while the ITA34 filter is active — only one segmentation can be applied at a time.
+                                    </p>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -639,12 +667,17 @@ export function ContactFilters({
                         </div>
                     )}
 
-                    {isPersonalised && (
-                        <div className="mt-4 pt-4 border-t border-amber-200 bg-amber-50/50 -mx-4 px-4 pb-2 rounded-b-lg">
+                    {ita34Visible && (
+                        <div className={`mt-4 pt-4 border-t border-amber-200 bg-amber-50/50 -mx-4 px-4 pb-2 rounded-b-lg ${badDebtActive ? "opacity-50" : ""}`}>
                             <h4 className="font-semibold text-sm text-amber-800 mb-3 flex items-center gap-1.5">
                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
                                 ITA34 Tax Data Filters
                             </h4>
+                            {badDebtActive && (
+                                <p className="text-xs text-amber-700 mb-3">
+                                    Disabled while the Bad Debt filter is active — only one segmentation can be applied at a time.
+                                </p>
+                            )}
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 <div>
                                     <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
@@ -656,7 +689,8 @@ export function ContactFilters({
                                             placeholder="Min"
                                             value={filters.incomeMin ?? ""}
                                             onChange={(e) => updateFilter("incomeMin", e.target.value ? Number(e.target.value) : null)}
-                                            className="w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                            disabled={badDebtActive}
+                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                         />
                                         <span className="text-gray-400">-</span>
                                         <input
@@ -664,7 +698,8 @@ export function ContactFilters({
                                             placeholder="Max"
                                             value={filters.incomeMax ?? ""}
                                             onChange={(e) => updateFilter("incomeMax", e.target.value ? Number(e.target.value) : null)}
-                                            className="w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                            disabled={badDebtActive}
+                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                         />
                                     </div>
                                 </div>
@@ -679,7 +714,8 @@ export function ContactFilters({
                                             placeholder="Min"
                                             value={filters.retirementFundMin ?? ""}
                                             onChange={(e) => updateFilter("retirementFundMin", e.target.value ? Number(e.target.value) : null)}
-                                            className="w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                            disabled={badDebtActive}
+                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                         />
                                         <span className="text-gray-400">-</span>
                                         <input
@@ -687,51 +723,56 @@ export function ContactFilters({
                                             placeholder="Max"
                                             value={filters.retirementFundMax ?? ""}
                                             onChange={(e) => updateFilter("retirementFundMax", e.target.value ? Number(e.target.value) : null)}
-                                            className="w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
+                                            disabled={badDebtActive}
+                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                         />
                                     </div>
                                 </div>
                             </div>
 
-                            {/* Tax Return (SARS Reimbursement) Filters */}
-                            <div className="mt-4 pt-4 border-t border-amber-200">
-                                <h4 className="font-semibold text-sm text-amber-800 mb-3 flex items-center gap-1.5">
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                                    SARS Tax Return Filter
-                                </h4>
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                    <div>
-                                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
-                                            Min SARS Reimbursement (R)
-                                        </label>
-                                        <input
-                                            type="number"
-                                            placeholder="e.g. 5000"
-                                            value={filters.taxReturnMin ?? ""}
-                                            onChange={(e) => updateFilter("taxReturnMin", e.target.value ? Number(e.target.value) : null)}
-                                            className="w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
-                                        />
-                                        <p className="text-xs text-amber-700 mt-1">
-                                            Filters contacts with a SARS refund above this amount
-                                        </p>
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
-                                            Tax Return Year
-                                        </label>
-                                        <input
-                                            type="number"
-                                            placeholder={`${new Date().getFullYear() - 1} (previous year)`}
-                                            value={filters.taxReturnYear ?? ""}
-                                            onChange={(e) => updateFilter("taxReturnYear", e.target.value ? Number(e.target.value) : null)}
-                                            className="w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20"
-                                        />
-                                        <p className="text-xs text-amber-700 mt-1">
-                                            Leave blank to default to {new Date().getFullYear() - 1}
-                                        </p>
+                            {/* Tax Return (SARS Reimbursement) Filters — personalised campaigns only */}
+                            {isPersonalised && (
+                                <div className="mt-4 pt-4 border-t border-amber-200">
+                                    <h4 className="font-semibold text-sm text-amber-800 mb-3 flex items-center gap-1.5">
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                                        SARS Tax Return Filter
+                                    </h4>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                        <div>
+                                            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                                Min SARS Reimbursement (R)
+                                            </label>
+                                            <input
+                                                type="number"
+                                                placeholder="e.g. 5000"
+                                                value={filters.taxReturnMin ?? ""}
+                                                onChange={(e) => updateFilter("taxReturnMin", e.target.value ? Number(e.target.value) : null)}
+                                                disabled={badDebtActive}
+                                                className={`w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                            />
+                                            <p className="text-xs text-amber-700 mt-1">
+                                                Filters contacts with a SARS refund above this amount
+                                            </p>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                                Tax Return Year
+                                            </label>
+                                            <input
+                                                type="number"
+                                                placeholder={`${new Date().getFullYear() - 1} (previous year)`}
+                                                value={filters.taxReturnYear ?? ""}
+                                                onChange={(e) => updateFilter("taxReturnYear", e.target.value ? Number(e.target.value) : null)}
+                                                disabled={badDebtActive}
+                                                className={`w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                            />
+                                            <p className="text-xs text-amber-700 mt-1">
+                                                Leave blank to default to {new Date().getFullYear() - 1}
+                                            </p>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
+                            )}
                         </div>
                     )}
 

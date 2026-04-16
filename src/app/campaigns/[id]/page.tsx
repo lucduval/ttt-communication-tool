@@ -119,9 +119,11 @@ export default function CampaignDetailsPage() {
                                         ? "bg-red-100 text-red-800"
                                         : campaign.status === "paused"
                                             ? "bg-amber-100 text-amber-800"
-                                            : campaign.status === "processing" || campaign.status === "queued"
-                                                ? "bg-yellow-100 text-yellow-800"
-                                                : "bg-gray-100 text-gray-800"
+                                            : campaign.status === "scheduled"
+                                                ? "bg-purple-100 text-purple-800"
+                                                : campaign.status === "processing" || campaign.status === "queued"
+                                                    ? "bg-yellow-100 text-yellow-800"
+                                                    : "bg-gray-100 text-gray-800"
                                     }`}
                             >
                                 {isProcessing && <Loader2 className="w-3 h-3 animate-spin" />}

@@ -354,6 +354,7 @@ export const startCampaign = mutation({
         aiSystemPrompt: v.optional(v.string()),
         createOpportunities: v.optional(v.boolean()),
         fontSize: v.optional(v.string()),
+        scheduledAt: v.optional(v.number()),
     },
     handler: async (ctx, args) => {
         const identity = await ctx.auth.getUserIdentity();
@@ -384,10 +385,13 @@ export const startCampaign = mutation({
 
         const recipients = args.recipients || [];
 
+        const isScheduled =
+            args.scheduledAt !== undefined && args.scheduledAt > Date.now();
+
         const campaignId = await ctx.db.insert("campaigns", {
             name: args.name,
             channel: args.channel,
-            status: "queued",
+            status: isScheduled ? "scheduled" : "queued",
             totalRecipients: recipients.length,
             sentCount: 0,
             deliveredCount: 0,
@@ -400,6 +404,7 @@ export const startCampaign = mutation({
             ccEmail: args.ccEmail,
             bccEmail: args.bccEmail,
             createOpportunities: args.createOpportunities,
+            scheduledAt: args.scheduledAt,
         });
 
         // Store large content fields separately to keep campaign docs lightweight

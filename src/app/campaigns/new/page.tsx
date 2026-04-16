@@ -39,6 +39,8 @@ import {
     AlertTriangle,
     DollarSign,
     Sparkles,
+    Calendar,
+    Clock,
 } from "lucide-react";
 import type { Doc, Id } from "@/../convex/_generated/dataModel";
 
@@ -86,6 +88,47 @@ interface UploadedImage {
     contentType: string;
     contentBase64: string;
     contentId?: string;
+}
+
+// South Africa Standard Time is a fixed +02:00 offset (no daylight saving).
+// We treat the user's date/time inputs as SAST regardless of their browser timezone.
+const SAST_OFFSET = "+02:00";
+
+function todayInSAST(): string {
+    const sastNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const y = sastNow.getUTCFullYear();
+    const m = String(sastNow.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(sastNow.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+}
+
+function tomorrowInSAST(): string {
+    const sastNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    sastNow.setUTCDate(sastNow.getUTCDate() + 1);
+    const y = sastNow.getUTCFullYear();
+    const m = String(sastNow.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(sastNow.getUTCDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+}
+
+function sastDateTimeToUtcMs(dateStr: string, timeStr: string): number {
+    return new Date(`${dateStr}T${timeStr}:00${SAST_OFFSET}`).getTime();
+}
+
+function formatSastForDisplay(dateStr: string, timeStr: string): string {
+    const ms = sastDateTimeToUtcMs(dateStr, timeStr);
+    if (Number.isNaN(ms)) return "";
+    // Render in the user's local timezone with an explicit SAST tag so the user
+    // sees what we'll actually send to the backend.
+    const utc = new Date(ms);
+    const sast = new Date(utc.getTime() + 2 * 60 * 60 * 1000);
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const day = sast.getUTCDate();
+    const month = months[sast.getUTCMonth()];
+    const year = sast.getUTCFullYear();
+    const hh = String(sast.getUTCHours()).padStart(2, "0");
+    const mm = String(sast.getUTCMinutes()).padStart(2, "0");
+    return `${day} ${month} ${year}, ${hh}:${mm} SAST`;
 }
 
 export default function NewCampaignPage() {
@@ -167,6 +210,24 @@ export default function NewCampaignPage() {
     // Validation state
     const [showValidationErrors, setShowValidationErrors] = useState(false);
     const [showConfirmation, setShowConfirmation] = useState(false);
+
+    // Scheduling state — when sendMode === "schedule", the campaign is queued in
+    // the DB but Convex's scheduler defers batch creation until scheduledAt (SAST).
+    const [sendMode, setSendMode] = useState<"now" | "schedule">("now");
+    const [scheduleDate, setScheduleDate] = useState<string>(tomorrowInSAST());
+    const [scheduleTime, setScheduleTime] = useState<string>("10:00");
+
+    const scheduledAtMs = useMemo(() => {
+        if (sendMode !== "schedule") return undefined;
+        if (!scheduleDate || !scheduleTime) return undefined;
+        const ms = sastDateTimeToUtcMs(scheduleDate, scheduleTime);
+        return Number.isNaN(ms) ? undefined : ms;
+    }, [sendMode, scheduleDate, scheduleTime]);
+
+    const scheduleIsInPast =
+        sendMode === "schedule" && scheduledAtMs !== undefined && scheduledAtMs <= Date.now();
+    const scheduleIsValid =
+        sendMode === "now" || (scheduledAtMs !== undefined && !scheduleIsInPast);
 
     // Queries
     const whatsappTemplates = useQuery(api.whatsappTemplates.list, {});
@@ -416,7 +477,11 @@ export default function NewCampaignPage() {
                         return newOffset;
                     });
                 }
-            } else if (campaignChannel === "personalised" && hasITA34Filters) {
+            } else if (
+                ((campaignChannel === "personalised") ||
+                    (campaignChannel === "email" && canAccessPersonalised))
+                && hasITA34Filters
+            ) {
                 if (!append) {
                     const channelFilter = getChannelFilter();
                     const result = await fetchContactsWithITA34({
@@ -500,7 +565,7 @@ export default function NewCampaignPage() {
             setIsLoadingContacts(false);
             setIsLoadingMore(false);
         }
-    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, fetchContactsByBadDebt, fetchLeads, getLeadCount, filters, leadFilters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, hasBadDebtFilter, nextPageToken]);
+    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, fetchContactsByBadDebt, fetchLeads, getLeadCount, filters, leadFilters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, hasBadDebtFilter, nextPageToken, canAccessPersonalised]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -538,14 +603,16 @@ export default function NewCampaignPage() {
         }
     }, [currentStep, audience]);
 
-    // Update selected contacts when moving forward from recipients
+    // Update selected contacts when moving forward from recipients.
+    // In client-side filter modes (bad debt, ITA34, tax return) the full matching set
+    // lives in allFilteredContactsRef while `contacts` only holds the current page
+    // (LOAD_MORE_SIZE). Use the full ref when available so Select All sends to everyone.
     useEffect(() => {
         if ((currentStep === "compose" || currentStep === "preview") && !isSelectAllActive) {
-            // Only update from current page if we haven't done a "Select All"
-            // Note: This still has the bug of losing selections from other pages if not using Select All,
-            // but fixing that fully is out of scope for this specific task.
-            // For now, we ensure Select All works.
-            setSelectedContacts(contacts.filter((c) => selectedIds.has(c.id)));
+            const source = allFilteredContactsRef.current.length > 0
+                ? allFilteredContactsRef.current
+                : contacts;
+            setSelectedContacts(source.filter((c) => selectedIds.has(c.id)));
         }
     }, [currentStep, contacts, selectedIds, isSelectAllActive]);
 
@@ -849,20 +916,27 @@ export default function NewCampaignPage() {
                 fromMailbox: (campaignChannel === "email" || campaignChannel === "personalised") ? selectedMailbox || undefined : undefined,
                 aiPrompt: campaignChannel === "personalised" ? aiUserPrompt : undefined,
                 aiSystemPrompt: campaignChannel === "personalised" ? aiSystemPrompt : undefined,
-                createOpportunities: campaignChannel === "personalised" ? createOpportunities : undefined,
+                createOpportunities:
+                    campaignChannel === "personalised" || campaignChannel === "email"
+                        ? createOpportunities
+                        : undefined,
                 ccEmail: campaignChannel === "personalised" ? ccEmail || undefined : undefined,
                 bccEmail: campaignChannel === "personalised" ? bccEmail || undefined : undefined,
                 fontSize: (campaignChannel === "email" || campaignChannel === "personalised") ? fontSize : undefined,
+                scheduledAt: scheduledAtMs,
             });
 
             // Queue batches and start processing (async - returns immediately)
-            // If filters are provided, queueCampaignBatches will handle generation
+            // If filters are provided, queueCampaignBatches will handle generation.
+            // If scheduledAt is set, queueCampaignBatches will defer all work
+            // (fetching/batching/sending) until that time via the Convex scheduler.
             await queueBatches({
                 campaignId,
                 recipients: isSelectAllActive ? undefined : recipients,
                 filters: filtersJson,
                 channel: campaignChannel,
                 attachments: backendAttachments,
+                scheduledAt: scheduledAtMs,
             });
 
             // Redirect to campaign detail page for progress tracking
@@ -942,6 +1016,19 @@ export default function NewCampaignPage() {
                 setSelectedIds(allIds);
                 setSelectedContacts(displayedContacts);
                 // Do NOT set isSelectAllActive — that would bypass the client-side filter
+            } else if (
+                hasBadDebtFilter ||
+                ((campaignChannel === "personalised" || (campaignChannel === "email" && canAccessPersonalised)) && hasITA34Filters) ||
+                (campaignChannel === "personalised" && hasTaxReturnFilters)
+            ) {
+                // Client-side filtered modes (bad debt, ITA34, tax return) — the full
+                // matching set is already in allFilteredContactsRef. Select them all
+                // directly; calling getContactCount would return a broader count because
+                // it doesn't apply these specialized filters.
+                const all = allFilteredContactsRef.current;
+                const allIds = new Set(all.map(c => c.id));
+                setSelectedIds(allIds);
+                setSelectedContacts(all);
             } else {
                 const channelFilter = getChannelFilter();
 
@@ -991,9 +1078,13 @@ export default function NewCampaignPage() {
         loadContacts(true);
     };
 
-    // Derived: whether more contacts are available to load
+    // Derived: whether more contacts are available to load.
+    // Bad debt, ITA34, and tax return filters all fetch into allFilteredContactsRef
+    // and paginate client-side, so they share the same "client-side" mode.
     const isClientSideMode = audience === "employees" ||
-        (campaignChannel === "personalised" && (hasITA34Filters || hasTaxReturnFilters));
+        hasBadDebtFilter ||
+        (campaignChannel === "personalised" && (hasITA34Filters || hasTaxReturnFilters)) ||
+        (campaignChannel === "email" && canAccessPersonalised && hasITA34Filters);
     const hasMore = isClientSideMode
         ? contacts.length < allFilteredContactsRef.current.length
         : nextPageToken !== null;
@@ -1277,6 +1368,12 @@ export default function NewCampaignPage() {
                                                     : totalCount
                                             }
                                             isPersonalised={campaignChannel === "personalised"}
+                                            showITA34Filters={
+                                                canAccessPersonalised &&
+                                                (campaignChannel === "personalised" || campaignChannel === "email")
+                                            }
+                                            badDebtActive={hasBadDebtFilter}
+                                            ita34Active={hasITA34Filters}
                                             personalisedCampaignNames={personalisedCampaignNames}
                                         />
                                     )}
@@ -1309,7 +1406,11 @@ export default function NewCampaignPage() {
                                     selectedIds={selectedIds}
                                     onSelectionChange={setSelectedIds}
                                     showSelection={true}
-                                    showITA34Columns={campaignChannel === "personalised" && hasITA34Filters}
+                                    showITA34Columns={
+                                        ((campaignChannel === "personalised") ||
+                                            (campaignChannel === "email" && canAccessPersonalised))
+                                        && hasITA34Filters
+                                    }
                                     showSarsColumn={campaignChannel === "personalised" && hasTaxReturnFilters}
                                     isSelectAllActive={isSelectAllActive}
                                     deselectedIds={deselectedIds}
@@ -1424,6 +1525,39 @@ export default function NewCampaignPage() {
                                         />
                                     </Card>
 
+                                    <Card>
+                                        <div className="flex items-start gap-4">
+                                            <div className="flex-1">
+                                                <h3 className="text-base font-semibold text-gray-900">
+                                                    Create CRM Opportunities
+                                                </h3>
+                                                <p className="text-sm text-gray-500 mt-1">
+                                                    Automatically create a <strong>riivo_opportunity</strong> record in Dynamics for each recipient when the email is sent. Temperature updates to Warm on open and Hot on click.
+                                                </p>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                role="switch"
+                                                aria-checked={createOpportunities}
+                                                onClick={() => setCreateOpportunities(!createOpportunities)}
+                                                className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:ring-offset-2 ${createOpportunities ? "bg-[#1E3A5F]" : "bg-gray-200"
+                                                    }`}
+                                            >
+                                                <span
+                                                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${createOpportunities ? "translate-x-5" : "translate-x-0"
+                                                        }`}
+                                                />
+                                            </button>
+                                        </div>
+                                        {createOpportunities && (
+                                            <div className="mt-3 p-3 bg-blue-50 rounded-lg border border-blue-200">
+                                                <p className="text-xs text-blue-700">
+                                                    One opportunity will be created per recipient with <strong>riivo_automatedopportunity = true</strong> and initial temperature <strong>Pending</strong>. Temperature auto-upgrades: <strong>Warm</strong> on email open, <strong>Hot</strong> on link click. Unengaged opportunities are marked <strong>Cold</strong> after 30 days.
+                                                </p>
+                                            </div>
+                                        )}
+                                    </Card>
+
                                     <LivePreviewModal
                                         isOpen={showLivePreview}
                                         onClose={() => setShowLivePreview(false)}
@@ -1518,6 +1652,14 @@ export default function NewCampaignPage() {
                                                 </div>
                                                 <div className="text-sm text-gray-600">Attachments</div>
                                             </div>
+                                            {createOpportunities && (
+                                                <div className="p-4 bg-indigo-50 rounded-lg border border-indigo-200 col-span-full">
+                                                    <div className="text-sm font-semibold text-indigo-700">
+                                                        CRM opportunities will be created for each recipient
+                                                    </div>
+                                                    <div className="text-xs text-indigo-500 mt-0.5">Temperature: Pending → Warm (open) → Hot (click)</div>
+                                                </div>
+                                            )}
                                         </>
                                     ) : (
                                         <>
@@ -1643,15 +1785,92 @@ export default function NewCampaignPage() {
                                                 recipients.
                                             </p>
                                         </div>
+
+                                        <div className="max-w-md mx-auto text-left bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-4">
+                                            <div className="flex gap-2">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setSendMode("now")}
+                                                    className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm font-medium border transition-colors ${sendMode === "now"
+                                                        ? "bg-[#1E3A5F] text-white border-[#1E3A5F]"
+                                                        : "bg-white text-gray-700 border-gray-300 hover:bg-gray-100"
+                                                        }`}
+                                                >
+                                                    <Send size={16} />
+                                                    Send now
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setSendMode("schedule")}
+                                                    className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm font-medium border transition-colors ${sendMode === "schedule"
+                                                        ? "bg-[#1E3A5F] text-white border-[#1E3A5F]"
+                                                        : "bg-white text-gray-700 border-gray-300 hover:bg-gray-100"
+                                                        }`}
+                                                >
+                                                    <Calendar size={16} />
+                                                    Schedule
+                                                </button>
+                                            </div>
+
+                                            {sendMode === "schedule" && (
+                                                <div className="space-y-3">
+                                                    <div className="grid grid-cols-2 gap-3">
+                                                        <div>
+                                                            <label className="block text-xs font-medium text-gray-700 mb-1">
+                                                                <Calendar size={12} className="inline mr-1" />
+                                                                Date
+                                                            </label>
+                                                            <input
+                                                                type="date"
+                                                                value={scheduleDate}
+                                                                min={todayInSAST()}
+                                                                onChange={(e) => setScheduleDate(e.target.value)}
+                                                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-xs font-medium text-gray-700 mb-1">
+                                                                <Clock size={12} className="inline mr-1" />
+                                                                Time (SAST)
+                                                            </label>
+                                                            <input
+                                                                type="time"
+                                                                value={scheduleTime}
+                                                                onChange={(e) => setScheduleTime(e.target.value)}
+                                                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]"
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                    {scheduledAtMs !== undefined && !scheduleIsInPast && (
+                                                        <p className="text-xs text-gray-600">
+                                                            Will send at{" "}
+                                                            <strong>{formatSastForDisplay(scheduleDate, scheduleTime)}</strong>{" "}
+                                                            (South Africa Standard Time, GMT+2).
+                                                        </p>
+                                                    )}
+                                                    {scheduleIsInPast && (
+                                                        <p className="text-xs text-red-600">
+                                                            That time is in the past. Pick a future date and time.
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
                                         <Button
                                             onClick={handleSendCampaign}
-                                            disabled={isSending}
+                                            disabled={isSending || !scheduleIsValid}
                                             className="px-8 py-3 text-lg"
                                         >
                                             {isSending ? (
                                                 <>
                                                     <Loader2 size={20} className="animate-spin" />
-                                                    Sending...
+                                                    {sendMode === "schedule" ? "Scheduling..." : "Sending..."}
+                                                </>
+                                            ) : sendMode === "schedule" ? (
+                                                <>
+                                                    <Calendar size={20} />
+                                                    Schedule Campaign
                                                 </>
                                             ) : (
                                                 <>
@@ -1730,9 +1949,13 @@ export default function NewCampaignPage() {
                 isOpen={showConfirmation}
                 onClose={() => setShowConfirmation(false)}
                 onConfirm={confirmSend}
-                title="Send Campaign?"
-                description={`Are you sure you want to send this ${channelLabel.toLowerCase()} campaign to ${isSelectAllActive ? virtualTotalCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients? This action cannot be undone once processing starts.`}
-                confirmLabel="Yes, Send Campaign"
+                title={sendMode === "schedule" ? "Schedule Campaign?" : "Send Campaign?"}
+                description={
+                    sendMode === "schedule"
+                        ? `This ${channelLabel.toLowerCase()} campaign will be queued and sent automatically at ${formatSastForDisplay(scheduleDate, scheduleTime)} to ${isSelectAllActive ? virtualTotalCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients.`
+                        : `Are you sure you want to send this ${channelLabel.toLowerCase()} campaign to ${isSelectAllActive ? virtualTotalCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients? This action cannot be undone once processing starts.`
+                }
+                confirmLabel={sendMode === "schedule" ? "Yes, Schedule" : "Yes, Send Campaign"}
                 cancelLabel="Cancel"
                 isLoading={isSending}
                 variant="warning"
