@@ -447,6 +447,12 @@ export const processEmailBatch = internalAction({
                         subject: mergedSubject,
                         body: emailBody,
                         toRecipients: [{ email: cleanEmail, name: recipient.name }],
+                        ccRecipients: campaign.ccEmail
+                            ? [{ email: campaign.ccEmail }]
+                            : undefined,
+                        bccRecipients: campaign.bccEmail
+                            ? [{ email: campaign.bccEmail }]
+                            : undefined,
                         attachments: processedAttachments,
                         fromMailbox: campaign.fromMailbox,
                         headers: {

@@ -920,8 +920,8 @@ export default function NewCampaignPage() {
                     campaignChannel === "personalised" || campaignChannel === "email"
                         ? createOpportunities
                         : undefined,
-                ccEmail: campaignChannel === "personalised" ? ccEmail || undefined : undefined,
-                bccEmail: campaignChannel === "personalised" ? bccEmail || undefined : undefined,
+                ccEmail: (campaignChannel === "personalised" || campaignChannel === "email") ? ccEmail || undefined : undefined,
+                bccEmail: (campaignChannel === "personalised" || campaignChannel === "email") ? bccEmail || undefined : undefined,
                 fontSize: (campaignChannel === "email" || campaignChannel === "personalised") ? fontSize : undefined,
                 scheduledAt: scheduledAtMs,
             });
@@ -1180,40 +1180,36 @@ export default function NewCampaignPage() {
                                             selectedMailbox={selectedMailbox}
                                             onMailboxChange={setSelectedMailbox}
                                         />
-                                        {campaignChannel === "personalised" && (
-                                            <>
-                                                <div className="space-y-1 pt-2 border-t border-gray-100">
-                                                    <label className="text-sm font-medium text-gray-700">
-                                                        CC colleague <span className="text-gray-400 font-normal">(optional)</span>
-                                                    </label>
-                                                    <input
-                                                        type="email"
-                                                        value={ccEmail}
-                                                        onChange={(e) => setCcEmail(e.target.value)}
-                                                        placeholder="colleague@example.com"
-                                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:border-transparent"
-                                                    />
-                                                    <p className="text-xs text-gray-500">
-                                                        This address will be CC&apos;d on every personalised email sent in this campaign.
-                                                    </p>
-                                                </div>
-                                                <div className="space-y-1">
-                                                    <label className="text-sm font-medium text-gray-700">
-                                                        BCC colleague <span className="text-gray-400 font-normal">(optional)</span>
-                                                    </label>
-                                                    <input
-                                                        type="email"
-                                                        value={bccEmail}
-                                                        onChange={(e) => setBccEmail(e.target.value)}
-                                                        placeholder="colleague@example.com"
-                                                        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:border-transparent"
-                                                    />
-                                                    <p className="text-xs text-gray-500">
-                                                        This address will be BCC&apos;d on every personalised email sent in this campaign.
-                                                    </p>
-                                                </div>
-                                            </>
-                                        )}
+                                        <div className="space-y-1 pt-2 border-t border-gray-100">
+                                            <label className="text-sm font-medium text-gray-700">
+                                                CC <span className="text-gray-400 font-normal">(optional)</span>
+                                            </label>
+                                            <input
+                                                type="email"
+                                                value={ccEmail}
+                                                onChange={(e) => setCcEmail(e.target.value)}
+                                                placeholder="colleague@example.com"
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:border-transparent"
+                                            />
+                                            <p className="text-xs text-gray-500">
+                                                This address will be CC&apos;d on every email sent in this campaign.
+                                            </p>
+                                        </div>
+                                        <div className="space-y-1">
+                                            <label className="text-sm font-medium text-gray-700">
+                                                BCC <span className="text-gray-400 font-normal">(optional)</span>
+                                            </label>
+                                            <input
+                                                type="email"
+                                                value={bccEmail}
+                                                onChange={(e) => setBccEmail(e.target.value)}
+                                                placeholder="colleague@example.com"
+                                                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F] focus:border-transparent"
+                                            />
+                                            <p className="text-xs text-gray-500">
+                                                This address will be BCC&apos;d on every email sent in this campaign.
+                                            </p>
+                                        </div>
                                     </div>
                                 </Card>
                             )}
@@ -1786,12 +1782,12 @@ export default function NewCampaignPage() {
                                             </p>
                                         </div>
 
-                                        <div className="max-w-md mx-auto text-left bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-4">
+                                        <div className="w-full max-w-md mx-auto text-left bg-gray-50 border border-gray-200 rounded-lg p-3 sm:p-4 space-y-4">
                                             <div className="flex gap-2">
                                                 <button
                                                     type="button"
                                                     onClick={() => setSendMode("now")}
-                                                    className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm font-medium border transition-colors ${sendMode === "now"
+                                                    className={`flex-1 flex items-center justify-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-2.5 rounded-md text-sm font-medium border transition-colors ${sendMode === "now"
                                                         ? "bg-[#1E3A5F] text-white border-[#1E3A5F]"
                                                         : "bg-white text-gray-700 border-gray-300 hover:bg-gray-100"
                                                         }`}
@@ -1802,7 +1798,7 @@ export default function NewCampaignPage() {
                                                 <button
                                                     type="button"
                                                     onClick={() => setSendMode("schedule")}
-                                                    className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm font-medium border transition-colors ${sendMode === "schedule"
+                                                    className={`flex-1 flex items-center justify-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-2.5 rounded-md text-sm font-medium border transition-colors ${sendMode === "schedule"
                                                         ? "bg-[#1E3A5F] text-white border-[#1E3A5F]"
                                                         : "bg-white text-gray-700 border-gray-300 hover:bg-gray-100"
                                                         }`}
@@ -1814,7 +1810,7 @@ export default function NewCampaignPage() {
 
                                             {sendMode === "schedule" && (
                                                 <div className="space-y-3">
-                                                    <div className="grid grid-cols-2 gap-3">
+                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                                         <div>
                                                             <label className="block text-xs font-medium text-gray-700 mb-1">
                                                                 <Calendar size={12} className="inline mr-1" />
@@ -1825,7 +1821,7 @@ export default function NewCampaignPage() {
                                                                 value={scheduleDate}
                                                                 min={todayInSAST()}
                                                                 onChange={(e) => setScheduleDate(e.target.value)}
-                                                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]"
+                                                                className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]"
                                                             />
                                                         </div>
                                                         <div>
@@ -1837,7 +1833,7 @@ export default function NewCampaignPage() {
                                                                 type="time"
                                                                 value={scheduleTime}
                                                                 onChange={(e) => setScheduleTime(e.target.value)}
-                                                                className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]"
+                                                                className="w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]"
                                                             />
                                                         </div>
                                                     </div>
@@ -1860,7 +1856,7 @@ export default function NewCampaignPage() {
                                         <Button
                                             onClick={handleSendCampaign}
                                             disabled={isSending || !scheduleIsValid}
-                                            className="px-8 py-3 text-lg"
+                                            className="w-full sm:w-auto px-6 sm:px-8 py-3 text-base sm:text-lg"
                                         >
                                             {isSending ? (
                                                 <>
