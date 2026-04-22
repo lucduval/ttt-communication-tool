@@ -26,6 +26,7 @@ export interface CampaignFilters {
     bank?: number;
     sourceCode?: string | string[];
     province?: string;
+    geographicLocation?: number; // SA Provinces option set (riivo_geographiclocation)
     ageMin?: number;
     ageMax?: number;
     ownerId?: string;
@@ -60,6 +61,7 @@ export async function fetchMatchingContacts(
         bank,
         sourceCode,
         province,
+        geographicLocation,
         ageMin,
         ageMax,
         ownerId,
@@ -102,6 +104,10 @@ export async function fetchMatchingContacts(
     if (province) {
         const prov = province.replace(/'/g, "''");
         filterExpression += ` and address1_stateorprovince eq '${prov}'`;
+    }
+
+    if (geographicLocation !== undefined) {
+        filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
     }
 
     if (ageMin !== undefined) {
@@ -201,7 +207,7 @@ export async function fetchMatchingContacts(
  */
 function buildExtraContactFilter(filters: CampaignFilters): string {
     let extraFilter = "";
-    const { filter, search, clientType, entityType, bank, sourceCode, province, ageMin, ageMax, ownerId, industryId } = filters;
+    const { filter, search, clientType, entityType, bank, sourceCode, province, geographicLocation, ageMin, ageMax, ownerId, industryId } = filters;
     if (filter) extraFilter += ` and (${filter})`;
     if (search) {
         const s = search.replace(/'/g, "''");
@@ -221,6 +227,7 @@ function buildExtraContactFilter(filters: CampaignFilters): string {
         const prov = province.replace(/'/g, "''");
         extraFilter += ` and address1_stateorprovince eq '${prov}'`;
     }
+    if (geographicLocation !== undefined) extraFilter += ` and riivo_geographiclocation eq ${geographicLocation}`;
     if (ageMin !== undefined) extraFilter += ` and riivo_age ge ${ageMin}`;
     if (ageMax !== undefined) extraFilter += ` and riivo_age le ${ageMax}`;
     if (ownerId) extraFilter += ` and _ownerid_value eq '${ownerId}'`;

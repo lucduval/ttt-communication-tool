@@ -55,6 +55,7 @@ const CONTACT_SELECT_FIELDS = [
     "riivo_sourcecode",
     "address1_stateorprovince",
     "riivo_age",
+    "riivo_geographiclocation",
 ].join(",");
 
 export interface DynamicsContact {
@@ -80,6 +81,7 @@ export interface DynamicsContact {
     riivo_sourcecode: string | null;
     address1_stateorprovince: string | null;
     riivo_age: number | null;
+    riivo_geographiclocation: number | null;
 }
 
 interface ContactsResponse {
@@ -106,6 +108,7 @@ export const fetchContacts = action({
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())), // MultiSelect usually returns array or string, for input we take array
         province: v.optional(v.string()),
+        geographicLocation: v.optional(v.number()), // SA Provinces option set (riivo_geographiclocation)
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
@@ -126,6 +129,7 @@ export const fetchContacts = action({
             bank,
             sourceCode,
             province,
+            geographicLocation,
             ageMin,
             ageMax,
             industryId
@@ -180,6 +184,10 @@ export const fetchContacts = action({
         if (province) {
             const prov = province.replace(/'/g, "''");
             filterExpression += ` and address1_stateorprovince eq '${prov}'`;
+        }
+
+        if (geographicLocation !== undefined) {
+            filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
         }
 
         if (ageMin !== undefined) {
@@ -253,6 +261,7 @@ export const fetchContacts = action({
             bank: contact.ttt_bank,
             sourceCode: contact.riivo_sourcecode,
             province: contact.address1_stateorprovince,
+            geographicLocation: contact.riivo_geographiclocation,
             age: contact.riivo_age,
             industryId: (contact as any)._riivo_industryid_value,
             createdOn: contact.createdon,
@@ -281,6 +290,7 @@ export const getContactCount = action({
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
         province: v.optional(v.string()),
+        geographicLocation: v.optional(v.number()),
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
@@ -296,6 +306,7 @@ export const getContactCount = action({
             bank,
             sourceCode,
             province,
+            geographicLocation,
             ageMin,
             ageMax,
             industryId
@@ -335,6 +346,10 @@ export const getContactCount = action({
         if (province) {
             const prov = province.replace(/'/g, "''");
             filterExpression += ` and address1_stateorprovince eq '${prov}'`;
+        }
+
+        if (geographicLocation !== undefined) {
+            filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
         }
 
         if (ageMin !== undefined) {
@@ -399,6 +414,7 @@ export const fetchAllContactIds = action({
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
         province: v.optional(v.string()),
+        geographicLocation: v.optional(v.number()),
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
@@ -414,6 +430,7 @@ export const fetchAllContactIds = action({
             bank,
             sourceCode,
             province,
+            geographicLocation,
             ageMin,
             ageMax,
             industryId
@@ -453,6 +470,10 @@ export const fetchAllContactIds = action({
         if (province) {
             const prov = province.replace(/'/g, "''");
             filterExpression += ` and address1_stateorprovince eq '${prov}'`;
+        }
+
+        if (geographicLocation !== undefined) {
+            filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
         }
 
         if (ageMin !== undefined) {
@@ -884,6 +905,7 @@ export const fetchContactsWithITA34 = action({
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
         province: v.optional(v.string()),
+        geographicLocation: v.optional(v.number()),
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
@@ -978,6 +1000,9 @@ export const fetchContactsWithITA34 = action({
             const prov = resolvedArgs.province.replace(/'/g, "''");
             extraFilter += ` and address1_stateorprovince eq '${prov}'`;
         }
+        if (resolvedArgs.geographicLocation !== undefined) {
+            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
+        }
         if (resolvedArgs.ageMin !== undefined) {
             extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
         }
@@ -1069,6 +1094,7 @@ export const fetchContactsByTaxReturn = action({
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
         province: v.optional(v.string()),
+        geographicLocation: v.optional(v.number()),
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
@@ -1153,6 +1179,9 @@ export const fetchContactsByTaxReturn = action({
         if (resolvedArgs.province) {
             const prov = resolvedArgs.province.replace(/'/g, "''");
             extraFilter += ` and address1_stateorprovince eq '${prov}'`;
+        }
+        if (resolvedArgs.geographicLocation !== undefined) {
+            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
         }
         if (resolvedArgs.ageMin !== undefined) {
             extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
@@ -1505,6 +1534,7 @@ export const fetchContactsByBadDebt = action({
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
         province: v.optional(v.string()),
+        geographicLocation: v.optional(v.number()),
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
@@ -1593,6 +1623,9 @@ export const fetchContactsByBadDebt = action({
         if (resolvedArgs.province) {
             const prov = resolvedArgs.province.replace(/'/g, "''");
             extraFilter += ` and address1_stateorprovince eq '${prov}'`;
+        }
+        if (resolvedArgs.geographicLocation !== undefined) {
+            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
         }
         if (resolvedArgs.ageMin !== undefined) {
             extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;

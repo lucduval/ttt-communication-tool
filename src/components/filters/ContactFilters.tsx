@@ -19,6 +19,7 @@ export interface FilterState {
     bank: number | null;
     sourceCode: number[]; // MultiSelect
     province: string | null;
+    geographicLocation: number | null; // SA Provinces — riivo_geographiclocation option set
     ageMin: number | null;
     ageMax: number | null;
     ownerId: string | null;
@@ -92,6 +93,7 @@ export function ContactFilters({
     const [entityTypeOptions, setEntityTypeOptions] = useState<Option[]>([]);
     const [bankOptions, setBankOptions] = useState<Option[]>([]);
     const [sourceCodeOptions, setSourceCodeOptions] = useState<Option[]>([]);
+    const [geographicLocationOptions, setGeographicLocationOptions] = useState<Option[]>([]);
     const [ownerOptions, setOwnerOptions] = useState<Option[]>([]);
     const [industryOptions, setIndustryOptions] = useState<Option[]>([]);
 
@@ -128,6 +130,10 @@ export function ContactFilters({
                 const sources = await getAttributeOptionsRef.current({ entityName: "contact", attributeName: "riivo_sourcecode" });
                 if (cancelled) return;
                 setSourceCodeOptions(sources.options);
+
+                const geoLocations = await getAttributeOptionsRef.current({ entityName: "contact", attributeName: "riivo_geographiclocation" });
+                if (cancelled) return;
+                setGeographicLocationOptions(geoLocations.options);
 
                 const owners = await getOwnerOptionsRef.current({});
                 if (cancelled) return;
@@ -187,6 +193,7 @@ export function ContactFilters({
             bank: null,
             sourceCode: [],
             province: null,
+            geographicLocation: null,
             ageMin: null,
             ageMax: null,
             // Preserve the locked consultant — cannot be cleared
@@ -214,6 +221,7 @@ export function ContactFilters({
         filters.bank !== null ||
         filters.sourceCode.length > 0 ||
         filters.province !== null ||
+        filters.geographicLocation !== null ||
         filters.ageMin !== null ||
         filters.ageMax !== null ||
         // Only count ownerId as an active filter when it's user-applied (not locked)
@@ -419,6 +427,27 @@ export function ContactFilters({
                                 onChange={(e) => updateFilter("province", e.target.value || null)}
                                 className="w-full bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10"
                             />
+                        </div>
+
+                        {/* Geographic Location (SA Provinces option set) */}
+                        <div>
+                            <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                Geographic Location
+                            </label>
+                            <select
+                                value={filters.geographicLocation === null ? "" : filters.geographicLocation}
+                                onChange={(e) =>
+                                    updateFilter("geographicLocation", e.target.value === "" ? null : Number(e.target.value))
+                                }
+                                className="w-full bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10"
+                            >
+                                <option value="">All Provinces</option>
+                                {geographicLocationOptions.map((opt) => (
+                                    <option key={opt.value} value={opt.value}>
+                                        {opt.label}
+                                    </option>
+                                ))}
+                            </select>
                         </div>
 
                         {/* Source Code (MultiSelect) */}
@@ -802,6 +831,11 @@ export function ContactFilters({
                             {filters.province && (
                                 <Badge status="info">
                                     Province: {filters.province}
+                                </Badge>
+                            )}
+                            {filters.geographicLocation !== null && (
+                                <Badge status="info">
+                                    Geo: {geographicLocationOptions.find(o => o.value === filters.geographicLocation)?.label ?? filters.geographicLocation}
                                 </Badge>
                             )}
                             {(filters.ageMin || filters.ageMax) && (
