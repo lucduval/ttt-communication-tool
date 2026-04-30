@@ -2,12 +2,9 @@
 
 import { useState, useEffect, useRef } from "react";
 import { Button, Badge } from "@/components/ui";
-import { Filter, X, Check, ChevronsUpDown } from "lucide-react";
+import { Filter, X } from "lucide-react";
 import { useAction } from "convex/react";
 import { api } from "../../../convex/_generated/api";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem } from "@/components/ui/command";
-import { cn } from "@/lib/utils";
 
 export interface LeadFilterState {
     search: string;
@@ -216,18 +213,29 @@ export function LeadFilters({
                                 Consultant
                             </label>
                             {lockedConsultantId ? (
-                                <div className="w-full bg-gray-100 border border-gray-200 p-2 rounded text-sm text-gray-600">
-                                    {ownerOptions.find(o => o.value === lockedConsultantId)?.label ?? "Your clients"}
+                                <div className="w-full bg-gray-100 border border-gray-200 p-2 rounded text-sm text-gray-700 flex items-center gap-2">
+                                    <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                    </svg>
+                                    <span className="truncate">
+                                        {ownerOptions.find(o => o.value === lockedConsultantId)?.label ?? "Your clients"}
+                                    </span>
                                 </div>
                             ) : (
-                                <LookupCombobox
-                                    options={ownerOptions}
-                                    value={filters.ownerId}
-                                    onChange={(val) => updateFilter("ownerId", val)}
-                                    placeholder="All consultants"
-                                    searchPlaceholder="Search consultants..."
-                                    emptyText="No consultant found."
-                                />
+                                <select
+                                    value={filters.ownerId || ""}
+                                    onChange={(e) =>
+                                        updateFilter("ownerId", e.target.value || null)
+                                    }
+                                    className="w-full bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10"
+                                >
+                                    <option value="">All Consultants</option>
+                                    {ownerOptions.map((opt) => (
+                                        <option key={opt.value} value={opt.value}>
+                                            {opt.label}
+                                        </option>
+                                    ))}
+                                </select>
                             )}
                         </div>
 
@@ -307,76 +315,3 @@ export function LeadFilters({
     );
 }
 
-function LookupCombobox({
-    options,
-    value,
-    onChange,
-    placeholder,
-    searchPlaceholder,
-    emptyText,
-}: {
-    options: Option[];
-    value: string | null;
-    onChange: (val: string | null) => void;
-    placeholder: string;
-    searchPlaceholder: string;
-    emptyText: string;
-}) {
-    const [open, setOpen] = useState(false);
-
-    return (
-        <Popover open={open} onOpenChange={setOpen}>
-            <PopoverTrigger asChild>
-                <button
-                    type="button"
-                    role="combobox"
-                    aria-expanded={open}
-                    className="w-full justify-between bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10 flex items-center"
-                >
-                    <span className="truncate">
-                        {value
-                            ? options.find((o) => o.value === value)?.label ?? "Selected"
-                            : placeholder}
-                    </span>
-                    <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                </button>
-            </PopoverTrigger>
-            <PopoverContent className="w-[300px] p-0" align="start">
-                <Command>
-                    <CommandInput placeholder={searchPlaceholder} />
-                    <CommandEmpty>{emptyText}</CommandEmpty>
-                    <CommandGroup className="max-h-64 overflow-auto">
-                        <CommandItem
-                            value="__all__"
-                            onSelect={() => {
-                                onChange(null);
-                                setOpen(false);
-                            }}
-                        >
-                            <Check className={cn("mr-2 h-4 w-4", !value ? "opacity-100" : "opacity-0")} />
-                            {placeholder}
-                        </CommandItem>
-                        {options.map((option) => (
-                            <CommandItem
-                                key={option.value}
-                                value={option.label}
-                                onSelect={() => {
-                                    onChange(option.value);
-                                    setOpen(false);
-                                }}
-                            >
-                                <Check
-                                    className={cn(
-                                        "mr-2 h-4 w-4",
-                                        value === option.value ? "opacity-100" : "opacity-0"
-                                    )}
-                                />
-                                {option.label}
-                            </CommandItem>
-                        ))}
-                    </CommandGroup>
-                </Command>
-            </PopoverContent>
-        </Popover>
-    );
-}
