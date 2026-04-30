@@ -1017,6 +1017,31 @@ export default function NewCampaignPage() {
                 setSelectedContacts(contacts);
                 // We don't set isSelectAllActive to true for employees to avoid backend filtering logic
                 // Instead we just select all explicitly
+            } else if (audience === "leads") {
+                // Leads have no backend filter-based send path — paginate client-side
+                // and populate selectedContacts directly. Volume is expected to stay
+                // in the low hundreds.
+                const allLeads: Contact[] = [];
+                let skipToken: string | null = null;
+                do {
+                    const result = await fetchLeads({
+                        search: leadFilters.search || undefined,
+                        top: LOAD_MORE_SIZE,
+                        skipToken: skipToken ?? undefined,
+                        province: leadFilters.province || undefined,
+                        emailOptIn: leadFilters.emailOptIn ?? undefined,
+                        whatsappOptIn: leadFilters.whatsappOptIn ?? undefined,
+                        ownerId: leadFilters.ownerId || undefined,
+                        status: leadFilters.status,
+                        industryId: leadFilters.industryId || undefined,
+                    });
+                    allLeads.push(...(result.contacts as Contact[]));
+                    skipToken = result.nextPage ?? null;
+                } while (skipToken);
+
+                const allIds = new Set(allLeads.map(c => c.id));
+                setSelectedIds(allIds);
+                setSelectedContacts(allLeads);
             } else if (filters.personalisedCampaignFilter !== "all") {
                 // Client-side personalised history filter is active — select only the displayed subset
                 const allIds = new Set(displayedContacts.map(c => c.id));
@@ -1099,9 +1124,15 @@ export default function NewCampaignPage() {
 
     const channelLabel = campaignChannel === "personalised" ? "Personalised" : campaignChannel === "email" ? "Email" : "WhatsApp";
 
+    // Effective recipient count in Select All mode — the server-side count minus
+    // anything the user unchecked. Used everywhere we display "X recipients" so
+    // the preview, send-step, and confirmation modal stay in sync with the badge
+    // at the top of the recipients step.
+    const selectAllRecipientCount = Math.max(0, (virtualTotalCount ?? 0) - deselectedIds.size);
+
     // Estimated WhatsApp cost
     const whatsappRecipientCount = isSelectAllActive
-        ? (virtualTotalCount || 0)
+        ? selectAllRecipientCount
         : selectedContacts.filter((c) => c.internationalPhone || c.phone).length;
     // Assuming roughly R0.75 per message as a safe estimate, but displayed as Estimated
     const estimatedCost = ((Number(whatsappRecipientCount) || 0) * 0.75).toFixed(2);
@@ -1254,8 +1285,8 @@ export default function NewCampaignPage() {
                                             </h2>
                                             <p className="text-sm text-gray-500">
                                                 {campaignChannel === "whatsapp"
-                                                    ? "Showing contacts with phone numbers and WhatsApp opt-in"
-                                                    : "Showing contacts with valid email addresses"}
+                                                    ? `Showing ${audience === "leads" ? "leads" : "contacts"} with phone numbers and WhatsApp opt-in`
+                                                    : `Showing ${audience === "leads" ? "leads" : "contacts"} with valid email addresses`}
                                             </p>
                                         </div>
                                         <div className="flex items-center gap-3">
@@ -1263,7 +1294,7 @@ export default function NewCampaignPage() {
                                                 <div className="flex flex-col items-end">
                                                     <Badge status="success">
                                                         {isSelectAllActive
-                                                            ? (virtualTotalCount ?? 0) - deselectedIds.size
+                                                            ? selectAllRecipientCount
                                                             : selectedIds.size} selected
                                                     </Badge>
                                                 </div>
@@ -1439,8 +1470,8 @@ export default function NewCampaignPage() {
                                 <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 mb-24">
                                     <span className="text-sm text-gray-500">
                                         {filters.personalisedCampaignFilter !== "all"
-                                            ? `Showing ${displayedContacts.length} of ${contacts.length} loaded contacts (filtered)`
-                                            : `Showing ${contacts.length}${totalCount !== null ? ` of ${totalCount.toLocaleString()}` : ""} contacts`
+                                            ? `Showing ${displayedContacts.length} of ${contacts.length} loaded ${audience === "leads" ? "leads" : "contacts"} (filtered)`
+                                            : `Showing ${contacts.length}${totalCount !== null ? ` of ${totalCount.toLocaleString()}` : ""} ${audience === "leads" ? "leads" : "contacts"}`
                                         }
                                     </span>
                                     {hasMore && (
@@ -1606,7 +1637,7 @@ export default function NewCampaignPage() {
                                         <div className="text-3xl font-bold text-[#1E3A5F]">
                                             {campaignChannel === "email" || campaignChannel === "personalised"
                                                 ? isSelectAllActive
-                                                    ? (virtualTotalCount || 0)
+                                                    ? selectAllRecipientCount
                                                     : selectedContacts.filter((c) => c.email).length
                                                 : whatsappRecipientCount}
                                         </div>
@@ -1781,7 +1812,7 @@ export default function NewCampaignPage() {
                                                 You&apos;re about to send this {channelLabel.toLowerCase()} to{" "}
                                                 <strong>
                                                     {isSelectAllActive
-                                                        ? virtualTotalCount
+                                                        ? selectAllRecipientCount
                                                         : (campaignChannel === "email" || campaignChannel === "personalised")
                                                             ? selectedContacts.filter((c) => c.email).length
                                                             : whatsappRecipientCount}
@@ -1956,8 +1987,8 @@ export default function NewCampaignPage() {
                 title={sendMode === "schedule" ? "Schedule Campaign?" : "Send Campaign?"}
                 description={
                     sendMode === "schedule"
-                        ? `This ${channelLabel.toLowerCase()} campaign will be queued and sent automatically at ${formatSastForDisplay(scheduleDate, scheduleTime)} to ${isSelectAllActive ? virtualTotalCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients.`
-                        : `Are you sure you want to send this ${channelLabel.toLowerCase()} campaign to ${isSelectAllActive ? virtualTotalCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients? This action cannot be undone once processing starts.`
+                        ? `This ${channelLabel.toLowerCase()} campaign will be queued and sent automatically at ${formatSastForDisplay(scheduleDate, scheduleTime)} to ${isSelectAllActive ? selectAllRecipientCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients.`
+                        : `Are you sure you want to send this ${channelLabel.toLowerCase()} campaign to ${isSelectAllActive ? selectAllRecipientCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients? This action cannot be undone once processing starts.`
                 }
                 confirmLabel={sendMode === "schedule" ? "Yes, Schedule" : "Yes, Send Campaign"}
                 cancelLabel="Cancel"
