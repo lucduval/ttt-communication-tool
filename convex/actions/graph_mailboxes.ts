@@ -30,23 +30,26 @@ export const getAvailableMailboxes = action({
             })
         ),
         defaultMailbox: v.union(v.string(), v.null()),
+        isAdmin: v.boolean(),
     }),
     handler: async (ctx) => {
         const identity = await ctx.auth.getUserIdentity();
         if (!identity) {
-            return { mailboxes: [], defaultMailbox: null };
+            return { mailboxes: [], defaultMailbox: null, isAdmin: false };
         }
 
         // We need to fetch the user role from db, but this is an action, not a query.
         // So we call an internal query to get user details
-        const user = await ctx.runQuery(internal.users.getCurrentUserInternal, { clerkId: identity.subject });
+        const user = (await ctx.runQuery(internal.users.getCurrentUserInternal, { clerkId: identity.subject })) as
+            | { status: string; role: string; email: string; name?: string }
+            | null;
 
         if (!user || user.status !== "active") {
-            return { mailboxes: [], defaultMailbox: null };
+            return { mailboxes: [], defaultMailbox: null, isAdmin: false };
         }
 
-        const isAdmin = user.role === "admin";
-        const userEmail = user.email.toLowerCase();
+        const isAdmin: boolean = user.role === "admin";
+        const userEmail: string = user.email.toLowerCase();
 
         // Get configured shared mailboxes from environment
         const configuredMailboxesStr = process.env.SHARED_MAILBOX_ADDRESSES || process.env.SHARED_MAILBOX_ADDRESS || "";
@@ -55,6 +58,7 @@ export const getAvailableMailboxes = action({
             return {
                 mailboxes: [],
                 defaultMailbox: null,
+                isAdmin,
             };
         }
 
@@ -100,6 +104,7 @@ export const getAvailableMailboxes = action({
         return {
             mailboxes: allowedMailboxes,
             defaultMailbox: allowedMailboxes[0]?.mail ?? null,
+            isAdmin,
         };
     },
 });
