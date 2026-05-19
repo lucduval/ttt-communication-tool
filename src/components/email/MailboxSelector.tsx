@@ -32,12 +32,10 @@ export function MailboxSelector({
     const [showCustomInput, setShowCustomInput] = useState(false);
     const [customAddress, setCustomAddress] = useState("");
     const [customError, setCustomError] = useState<string | null>(null);
-    const [verifyingCustom, setVerifyingCustom] = useState(false);
     const buttonRef = useRef<HTMLButtonElement>(null);
     const dropdownRef = useRef<HTMLDivElement>(null);
 
     const getAvailableMailboxes = useAction(api.actions.graph_mailboxes.getAvailableMailboxes);
-    const verifyMailboxAccess = useAction(api.actions.graph_mailboxes.verifyMailboxAccess);
 
     useEffect(() => {
         const loadMailboxes = async () => {
@@ -117,31 +115,18 @@ export function MailboxSelector({
     const selectedIsCustom =
         !!selectedMailbox && !selectedMailboxInfo && isAdmin;
 
-    const submitCustomAddress = async () => {
+    const submitCustomAddress = () => {
         const trimmed = customAddress.trim();
         const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
         if (!emailPattern.test(trimmed)) {
             setCustomError("Please enter a valid email address");
             return;
         }
-
-        setVerifyingCustom(true);
+        onMailboxChange(trimmed);
+        setShowCustomInput(false);
+        setIsOpen(false);
+        setCustomAddress("");
         setCustomError(null);
-        try {
-            const result = await verifyMailboxAccess({ mailboxAddress: trimmed });
-            if (!result.hasAccess) {
-                setCustomError(result.error || "Unable to send from this address");
-                return;
-            }
-            onMailboxChange(trimmed);
-            setShowCustomInput(false);
-            setIsOpen(false);
-            setCustomAddress("");
-        } catch (err) {
-            setCustomError(err instanceof Error ? err.message : "Verification failed");
-        } finally {
-            setVerifyingCustom(false);
-        }
     };
 
     if (isLoading) {
@@ -285,7 +270,6 @@ export function MailboxSelector({
                                                 }
                                             }}
                                             placeholder="name@yourtenant.com"
-                                            disabled={verifyingCustom}
                                             className="w-full px-3 py-2 text-sm border border-gray-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]/20 focus:border-[#1E3A5F]"
                                         />
                                         {customError && (
@@ -295,13 +279,10 @@ export function MailboxSelector({
                                             <button
                                                 type="button"
                                                 onClick={submitCustomAddress}
-                                                disabled={verifyingCustom || !customAddress.trim()}
-                                                className="flex-1 px-3 py-1.5 text-sm font-medium text-white bg-[#1E3A5F] rounded-md hover:bg-[#152a48] disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                                                disabled={!customAddress.trim()}
+                                                className="flex-1 px-3 py-1.5 text-sm font-medium text-white bg-[#1E3A5F] rounded-md hover:bg-[#152a48] disabled:opacity-50 disabled:cursor-not-allowed"
                                             >
-                                                {verifyingCustom && (
-                                                    <Loader2 size={14} className="animate-spin" />
-                                                )}
-                                                {verifyingCustom ? "Verifying..." : "Use this address"}
+                                                Use this address
                                             </button>
                                             <button
                                                 type="button"
@@ -309,7 +290,6 @@ export function MailboxSelector({
                                                     setShowCustomInput(false);
                                                     setCustomError(null);
                                                 }}
-                                                disabled={verifyingCustom}
                                                 className="px-3 py-1.5 text-sm font-medium text-gray-600 hover:text-gray-900"
                                             >
                                                 Cancel
