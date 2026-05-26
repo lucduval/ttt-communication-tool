@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { query, mutation, internalQuery } from "./_generated/server";
+import { query, mutation, internalQuery, internalMutation } from "./_generated/server";
 import { checkAccessHelper } from "./users";
 
 // List templates visible to the current user:
@@ -76,6 +76,10 @@ export const create = mutation({
         headerType: v.optional(v.string()),
         headerText: v.optional(v.string()),
         headerUrl: v.optional(v.string()),
+        buttonType: v.optional(v.string()),
+        buttonText: v.optional(v.string()),
+        buttonUrl: v.optional(v.string()),
+        buttonUrlVariable: v.optional(v.string()),
         visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))),
     },
     handler: async (ctx, args) => {
@@ -110,6 +114,10 @@ export const update = mutation({
         headerType: v.optional(v.string()),
         headerText: v.optional(v.string()),
         headerUrl: v.optional(v.string()),
+        buttonType: v.optional(v.string()),
+        buttonText: v.optional(v.string()),
+        buttonUrl: v.optional(v.string()),
+        buttonUrlVariable: v.optional(v.string()),
         visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))),
     },
     handler: async (ctx, args) => {
@@ -126,12 +134,50 @@ export const update = mutation({
             Object.entries(updates).filter(([, value]) => value !== undefined)
         );
 
+        // Invalidate cached Meta media id if the header source changed — the
+        // uploaded bytes no longer match what the template is set to send.
+        const headerChanged =
+            (filteredUpdates.headerType !== undefined && filteredUpdates.headerType !== existing.headerType) ||
+            (filteredUpdates.headerUrl !== undefined && filteredUpdates.headerUrl !== existing.headerUrl);
+
         await ctx.db.patch(id, {
             ...filteredUpdates,
+            ...(headerChanged
+                ? {
+                      headerMediaId: undefined,
+                      headerMediaIdUploadedAt: undefined,
+                      headerMediaSourceUrl: undefined,
+                      headerMediaMimeType: undefined,
+                  }
+                : {}),
             lastUpdatedAt: Date.now(),
         });
 
         return id;
+    },
+});
+
+/**
+ * Persist the result of a Meta /media upload so subsequent sends can reference
+ * the media id instead of re-uploading. Stamped with the source URL so we can
+ * detect divergence between the cached id and the current header.
+ */
+export const setHeaderMediaCache = internalMutation({
+    args: {
+        id: v.id("whatsappTemplates"),
+        mediaId: v.string(),
+        mimeType: v.string(),
+        sourceUrl: v.string(),
+    },
+    handler: async (ctx, args) => {
+        const existing = await ctx.db.get(args.id);
+        if (!existing) throw new Error("Template not found");
+        await ctx.db.patch(args.id, {
+            headerMediaId: args.mediaId,
+            headerMediaIdUploadedAt: Date.now(),
+            headerMediaSourceUrl: args.sourceUrl,
+            headerMediaMimeType: args.mimeType,
+        });
     },
 });
 

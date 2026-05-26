@@ -1,16 +1,62 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useMutation } from "convex/react";
+import { useState, useEffect, useRef } from "react";
+import { useMutation, useConvex } from "convex/react";
 import { api } from "@/../convex/_generated/api";
 import { Button } from "@/components/ui";
-import { Globe, Lock, Loader2 } from "lucide-react";
+import { Globe, Lock, Loader2, Upload, X } from "lucide-react";
 import type { Doc, Id } from "@/../convex/_generated/dataModel";
 
 const CATEGORIES = ["marketing", "utility", "authentication"] as const;
 const LANGUAGES = ["en", "en_US", "en_GB", "af", "zu", "xh"] as const;
 const STATUSES = ["pending", "approved", "rejected"] as const;
 const HEADER_TYPES = ["none", "text", "image", "document", "video"] as const;
+const BUTTON_TYPES = ["none", "url"] as const;
+
+/**
+ * Per-category file constraints aligned with Meta's WhatsApp Cloud API limits.
+ * Source: https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media
+ * Validated client-side so we reject before uploading bytes that Meta would
+ * reject at send time.
+ */
+const HEADER_FILE_CONSTRAINTS: Record<
+    "video" | "image" | "document",
+    { mimeTypes: string[]; maxBytes: number; accept: string; label: string }
+> = {
+    video: {
+        mimeTypes: ["video/mp4", "video/3gp", "video/3gpp"],
+        maxBytes: 16 * 1024 * 1024,
+        accept: ".mp4,.3gp,video/mp4,video/3gp,video/3gpp",
+        label: "MP4 or 3GP · max 16 MB · H.264 + AAC",
+    },
+    image: {
+        mimeTypes: ["image/jpeg", "image/png"],
+        maxBytes: 5 * 1024 * 1024,
+        accept: ".jpg,.jpeg,.png,image/jpeg,image/png",
+        label: "JPG or PNG · max 5 MB",
+    },
+    document: {
+        mimeTypes: [
+            "application/pdf",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.ms-powerpoint",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "text/plain",
+        ],
+        accept: ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt",
+        maxBytes: 100 * 1024 * 1024,
+        label: "PDF / Office / TXT · max 100 MB",
+    },
+};
+
+function formatBytes(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    return `${bytes} B`;
+}
 
 interface TemplateFormProps {
     initialData?: Doc<"whatsappTemplates"> | null;
@@ -21,8 +67,13 @@ interface TemplateFormProps {
 export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormProps) {
     const createTemplate = useMutation(api.whatsappTemplates.create);
     const updateTemplate = useMutation(api.whatsappTemplates.update);
+    const generateUploadUrl = useMutation(api.files.generateUploadUrl);
+    const convex = useConvex();
 
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [isUploadingHeader, setIsUploadingHeader] = useState(false);
+    const [uploadError, setUploadError] = useState<string | null>(null);
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
     const [formData, setFormData] = useState({
         name: "",
         metaTemplateId: "",
@@ -34,6 +85,10 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
         headerType: "none" as typeof HEADER_TYPES[number],
         headerText: "",
         headerUrl: "",
+        buttonType: "none" as typeof BUTTON_TYPES[number],
+        buttonText: "",
+        buttonUrl: "",
+        buttonUrlVariable: "",
         visibility: "shared" as "private" | "shared",
     });
 
@@ -47,6 +102,7 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
         { label: "Account Number", value: "accountnumber" },
         { label: "Address", value: "address1_composite" },
         { label: "City", value: "address1_city" },
+        { label: "Referral Code", value: "riivo_referralcode" },
     ] as const;
 
     useEffect(() => {
@@ -71,6 +127,10 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                 headerType: (initialData.headerType as typeof HEADER_TYPES[number]) || "none",
                 headerText: initialData.headerText || "",
                 headerUrl: initialData.headerUrl || "",
+                buttonType: (initialData.buttonType as typeof BUTTON_TYPES[number]) || "none",
+                buttonText: initialData.buttonText || "",
+                buttonUrl: initialData.buttonUrl || "",
+                buttonUrlVariable: initialData.buttonUrlVariable || "",
                 visibility: (initialData.visibility as "private" | "shared") ?? "shared",
             });
         }
@@ -93,8 +153,81 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
         }));
     };
 
+    const handleHeaderFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        // Reset input so picking the same file again retriggers onChange.
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        if (!file) return;
+
+        const headerType = formData.headerType;
+        if (headerType !== "video" && headerType !== "image" && headerType !== "document") return;
+
+        const constraints = HEADER_FILE_CONSTRAINTS[headerType];
+        setUploadError(null);
+
+        // Some browsers leave file.type empty for less common extensions (e.g. 3gp);
+        // fall back to the extension check via the `accept` attribute on the input.
+        if (file.type && !constraints.mimeTypes.includes(file.type)) {
+            setUploadError(
+                `File type "${file.type}" not allowed for a ${headerType} header. Accepts: ${constraints.label}`
+            );
+            return;
+        }
+        if (file.size > constraints.maxBytes) {
+            setUploadError(
+                `File is ${formatBytes(file.size)} — exceeds Meta limit of ${formatBytes(constraints.maxBytes)} for ${headerType} headers.`
+            );
+            return;
+        }
+
+        setIsUploadingHeader(true);
+        try {
+            const uploadUrl = await generateUploadUrl();
+            const uploadResp = await fetch(uploadUrl, {
+                method: "POST",
+                headers: { "Content-Type": file.type || "application/octet-stream" },
+                body: file,
+            });
+            if (!uploadResp.ok) {
+                throw new Error(`Upload failed: HTTP ${uploadResp.status}`);
+            }
+            const { storageId } = (await uploadResp.json()) as { storageId: Id<"_storage"> };
+            const publicUrl = await convex.query(api.files.getDownloadUrl, { storageId });
+            if (!publicUrl) throw new Error("Convex returned no download URL");
+            setFormData((prev) => ({ ...prev, headerUrl: publicUrl }));
+        } catch (err) {
+            setUploadError(err instanceof Error ? err.message : "Upload failed");
+        } finally {
+            setIsUploadingHeader(false);
+        }
+    };
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+
+        // Block submission until any in-flight upload completes — otherwise we'd
+        // save an empty headerUrl while the file is still being uploaded.
+        if (isUploadingHeader) return;
+
+        const isMediaHeader =
+            formData.headerType === "image" ||
+            formData.headerType === "document" ||
+            formData.headerType === "video";
+        if (isMediaHeader && !formData.headerUrl) {
+            setUploadError(`Upload a ${formData.headerType} or paste a public URL.`);
+            return;
+        }
+
+        // Block submission of a dynamic URL button without a Dynamics field
+        // selected for {{1}} — at send time we'd send an empty suffix, which
+        // Meta would render as a broken URL.
+        const isDynamicButton =
+            formData.buttonType === "url" && formData.buttonUrl.includes("{{1}}");
+        if (isDynamicButton && !formData.buttonUrlVariable) {
+            setUploadError("Pick a Dynamics field to substitute for `{{1}}` in the button URL.");
+            return;
+        }
+
         setIsSubmitting(true);
 
         try {
@@ -114,6 +247,10 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                 headerType: formData.headerType,
                 headerText: formData.headerType === "text" ? formData.headerText : undefined,
                 headerUrl: ["image", "document", "video"].includes(formData.headerType) ? formData.headerUrl : undefined,
+                buttonType: formData.buttonType,
+                buttonText: formData.buttonType === "url" ? formData.buttonText : undefined,
+                buttonUrl: formData.buttonType === "url" ? formData.buttonUrl : undefined,
+                buttonUrlVariable: isDynamicButton ? formData.buttonUrlVariable : undefined,
                 visibility: formData.visibility,
             };
 
@@ -255,12 +392,18 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                         </label>
                         <select
                             value={formData.headerType}
-                            onChange={(e) =>
-                                setFormData({
-                                    ...formData,
-                                    headerType: e.target.value as typeof HEADER_TYPES[number],
-                                })
-                            }
+                            onChange={(e) => {
+                                const next = e.target.value as typeof HEADER_TYPES[number];
+                                setUploadError(null);
+                                setFormData((prev) => ({
+                                    ...prev,
+                                    headerType: next,
+                                    // Clear the URL when switching categories so a previously
+                                    // uploaded video URL doesn't accidentally get reused for
+                                    // an image header (and vice versa).
+                                    headerUrl: prev.headerType === next ? prev.headerUrl : "",
+                                }));
+                            }}
                             className="w-full px-3 py-2 border border-gray-200 rounded-md"
                         >
                             {HEADER_TYPES.map((type) => (
@@ -286,24 +429,104 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                             />
                         </div>
                     )}
-                    {["image", "document", "video"].includes(formData.headerType) && (
-                        <div>
+                    {(formData.headerType === "image" ||
+                        formData.headerType === "document" ||
+                        formData.headerType === "video") && (
+                        <div className="col-span-1">
                             <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Header URL
+                                Header File
                             </label>
                             <input
-                                type="url"
-                                value={formData.headerUrl}
-                                onChange={(e) =>
-                                    setFormData({ ...formData, headerUrl: e.target.value })
-                                }
-                                placeholder="https://example.com/image.jpg"
-                                className="w-full px-3 py-2 border border-gray-200 rounded-md"
-                                required={["image", "document", "video"].includes(formData.headerType)}
+                                ref={fileInputRef}
+                                type="file"
+                                accept={HEADER_FILE_CONSTRAINTS[formData.headerType].accept}
+                                onChange={handleHeaderFileChange}
+                                className="hidden"
+                                id="header-file-input"
                             />
+                            <div className="flex items-center gap-2">
+                                <Button
+                                    type="button"
+                                    variant="secondary"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    disabled={isUploadingHeader}
+                                    className="flex items-center gap-2"
+                                >
+                                    {isUploadingHeader ? (
+                                        <>
+                                            <Loader2 size={14} className="animate-spin" />
+                                            Uploading…
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Upload size={14} />
+                                            {formData.headerUrl ? "Replace file" : "Choose file"}
+                                        </>
+                                    )}
+                                </Button>
+                                {formData.headerUrl && !isUploadingHeader && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setFormData((prev) => ({ ...prev, headerUrl: "" }));
+                                            setUploadError(null);
+                                        }}
+                                        className="text-xs text-gray-500 hover:text-red-600 flex items-center gap-1"
+                                    >
+                                        <X size={12} />
+                                        Remove
+                                    </button>
+                                )}
+                            </div>
                             <p className="text-xs text-gray-400 mt-1">
-                                Must be a publicly accessible URL
+                                {HEADER_FILE_CONSTRAINTS[formData.headerType].label}
                             </p>
+                            {uploadError && (
+                                <p className="text-xs text-red-600 mt-1">{uploadError}</p>
+                            )}
+                            {formData.headerUrl && !isUploadingHeader && (
+                                <div className="mt-2">
+                                    {formData.headerType === "video" && (
+                                        <video
+                                            src={formData.headerUrl}
+                                            controls
+                                            className="max-h-32 rounded border border-gray-200"
+                                        />
+                                    )}
+                                    {formData.headerType === "image" && (
+                                        // eslint-disable-next-line @next/next/no-img-element
+                                        <img
+                                            src={formData.headerUrl}
+                                            alt="Header preview"
+                                            className="max-h-32 rounded border border-gray-200"
+                                        />
+                                    )}
+                                    {formData.headerType === "document" && (
+                                        <a
+                                            href={formData.headerUrl}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="text-xs text-blue-600 underline break-all"
+                                        >
+                                            {formData.headerUrl.split("/").pop() || "View document"}
+                                        </a>
+                                    )}
+                                </div>
+                            )}
+                            <details className="mt-2">
+                                <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-700">
+                                    Or paste a public URL
+                                </summary>
+                                <input
+                                    type="url"
+                                    value={formData.headerUrl}
+                                    onChange={(e) =>
+                                        setFormData({ ...formData, headerUrl: e.target.value })
+                                    }
+                                    placeholder="https://example.com/video.mp4"
+                                    className="w-full px-3 py-2 mt-1 border border-gray-200 rounded-md text-sm"
+                                />
+                            </details>
                         </div>
                     )}
                 </div>
@@ -320,7 +543,7 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                         setFormData({ ...formData, body: e.target.value })
                     }
                     placeholder="Hello {{name}}, your statement for {{month}} is ready."
-                    rows={4}
+                    rows={6}
                     className="w-full px-3 py-2 border border-gray-200 rounded-md font-mono text-sm"
                 />
                 <p className="text-xs text-gray-400 mt-1">
@@ -367,6 +590,121 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                     </div>
                 </div>
             )}
+
+            {/* Template Button */}
+            <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
+                <h4 className="text-sm font-semibold text-blue-900 mb-3">
+                    Template Button
+                </h4>
+                <p className="text-xs text-blue-700 mb-4">
+                    If your Meta template has a call-to-action URL button, configure it here. Use{" "}
+                    <span className="font-mono">{`{{1}}`}</span> in the URL where Meta should substitute a per-recipient value (dynamic link); leave it out for a static link.
+                </p>
+                <div className="grid grid-cols-2 gap-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Button Type
+                        </label>
+                        <select
+                            value={formData.buttonType}
+                            onChange={(e) => {
+                                const next = e.target.value as typeof BUTTON_TYPES[number];
+                                setFormData((prev) => ({
+                                    ...prev,
+                                    buttonType: next,
+                                    // Clear button fields when switching back to "none"
+                                    ...(next === "none"
+                                        ? { buttonText: "", buttonUrl: "", buttonUrlVariable: "" }
+                                        : {}),
+                                }));
+                            }}
+                            className="w-full px-3 py-2 border border-gray-200 rounded-md"
+                        >
+                            {BUTTON_TYPES.map((type) => (
+                                <option key={type} value={type}>
+                                    {type === "none" ? "None" : "URL"}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                    {formData.buttonType === "url" && (
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Button Label
+                            </label>
+                            <input
+                                type="text"
+                                value={formData.buttonText}
+                                onChange={(e) =>
+                                    setFormData({ ...formData, buttonText: e.target.value })
+                                }
+                                placeholder="e.g. Share with a friend"
+                                className="w-full px-3 py-2 border border-gray-200 rounded-md"
+                            />
+                            <p className="text-xs text-gray-400 mt-1">
+                                Must match the label approved in Meta.
+                            </p>
+                        </div>
+                    )}
+                </div>
+                {formData.buttonType === "url" && (
+                    <div className="mt-4">
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Button URL
+                        </label>
+                        <input
+                            type="text"
+                            value={formData.buttonUrl}
+                            onChange={(e) =>
+                                setFormData({
+                                    ...formData,
+                                    buttonUrl: e.target.value,
+                                    // Reset variable picker when URL drops the {{1}} placeholder
+                                    buttonUrlVariable: e.target.value.includes("{{1}}")
+                                        ? formData.buttonUrlVariable
+                                        : "",
+                                })
+                            }
+                            placeholder="https://riivo.io/refer?code={{1}}"
+                            className="w-full px-3 py-2 border border-gray-200 rounded-md font-mono text-sm"
+                        />
+                        <p className="text-xs text-gray-400 mt-1">
+                            Must match the URL approved in Meta. Include{" "}
+                            <span className="font-mono">{`{{1}}`}</span> for a dynamic suffix.
+                        </p>
+                        {formData.buttonUrl.includes("{{1}}") && (
+                            <div className="mt-3 flex items-center gap-3">
+                                <div className="w-1/3 flex items-center justify-end">
+                                    <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs font-mono font-medium">
+                                        {`{{1}}`}
+                                    </span>
+                                </div>
+                                <div className="text-gray-400">→</div>
+                                <div className="flex-1">
+                                    <select
+                                        value={formData.buttonUrlVariable}
+                                        onChange={(e) =>
+                                            setFormData({
+                                                ...formData,
+                                                buttonUrlVariable: e.target.value,
+                                            })
+                                        }
+                                        className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm"
+                                        required
+                                    >
+                                        <option value="">Select Dynamics Field...</option>
+                                        {DYNAMICS_FIELDS.map((field) => (
+                                            <option key={field.value} value={field.value}>
+                                                {field.label} ({field.value})
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
 
             {/* Visibility */}
             <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg border border-gray-100">

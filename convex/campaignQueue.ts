@@ -4,8 +4,18 @@ import { v } from "convex/values";
 import { action, internalAction } from "./_generated/server";
 import { internal, api } from "./_generated/api";
 import type { ShimmedContact, CampaignFilters } from "./lib/dynamics_util";
-import { getClickatellConfig, uploadClickatellMedia, normalizePhoneNumber } from "./lib/whatsapp";
-import { isRetryableHttpStatus } from "./lib/retry";
+import {
+    getMetaWhatsAppConfig,
+    normalizeToE164Digits,
+    buildTemplateRequestBody,
+    sendTemplateWithRetry,
+    isTemplatePermanentError,
+    isMediaHeaderType,
+    shouldRefreshMediaId,
+    uploadWhatsAppMedia,
+    RateLimiter,
+    type TemplateLike,
+} from "./lib/whatsapp";
 import { logEmailActivity, logWhatsAppActivity } from "./lib/dynamics_logging";
 
 /**
@@ -332,8 +342,12 @@ export const processEmailBatch = internalAction({
         };
 
         try {
-            // Import sendEmail function dynamically
-            const { sendEmail } = await import("./lib/graph_client");
+            // Hoist imports out of the per-recipient loop. These were previously
+            // dynamic-imported inside the loop, which V8 caches but still serialises
+            // the loop body on each await.
+            const { sendEmailBatch } = await import("./lib/graph_client");
+            const { wrapEmail } = await import("./lib/emailLayout");
+            const { rewriteEmailLinks } = await import("./lib/tracking_utils");
 
             // Resolve attachments once per batch (not once per recipient).
             // Fetching from Convex storage on every recipient was the primary cause of
@@ -378,38 +392,46 @@ export const processEmailBatch = internalAction({
                 }
             }
 
-            // Process each recipient in the batch
+            // Phase 1: validate + render every recipient that hasn't already been
+            // sent. Invalid recipients are recorded as failures up-front so they
+            // never reach the $batch call.
+            const siteUrl = process.env.CONVEX_SITE_URL || "";
+            type PreparedSend = {
+                recipient: { id: string; email?: string; name: string };
+                message: Parameters<typeof sendEmailBatch>[0][number];
+            };
+            const prepared: PreparedSend[] = [];
             let processedInFlush = 0;
+
             for (const recipient of batch.recipients) {
-                // Skip recipients already sent (e.g. after stuck-batch recovery).
-                if (alreadySent.has(recipient.id)) {
-                    continue;
-                }
+                if (alreadySent.has(recipient.id)) continue;
 
                 // Strip whitespace and Unicode space characters (e.g. \u00a0 from Dynamics CRM)
                 // that pass a truthiness check but are rejected by the Graph API.
                 const cleanEmail = recipient.email?.replace(/[\u00a0\u200B-\u200D\uFEFF\s]/g, "");
 
-                if (!cleanEmail || !cleanEmail.includes("@")) {
+                // Lead email fields in Dynamics sometimes hold multiple comma-separated
+                // addresses; Graph rejects the whole string as one recipient. Split into
+                // individual addresses so they go on the TO line as separate recipients.
+                const emailAddresses = (cleanEmail ?? "")
+                    .split(",")
+                    .map((e) => e.trim())
+                    .filter((e) => e.length > 0 && e.includes("@"));
+
+                if (emailAddresses.length === 0) {
                     failedCount++;
                     results.push({
                         recipientId: recipient.id,
                         success: false,
                         error: `Invalid email address: "${recipient.email}"`,
                     });
-                    processedInFlush++;
-                    if (processedInFlush >= FLUSH_INTERVAL) {
-                        await flushResults();
-                        processedInFlush = 0;
-                    }
                     continue;
                 }
 
                 try {
-                    // Resolve merge field values for this recipient
                     const recipientFirstName = recipient.name?.split(" ")[0] || recipient.name || "";
                     const recipientFullName = recipient.name || "";
-                    const recipientEmail = cleanEmail;
+                    const recipientEmail = emailAddresses[0];
 
                     const applyMergeFields = (text: string) =>
                         text
@@ -417,56 +439,73 @@ export const processEmailBatch = internalAction({
                             .replace(/\{fullName\}/g, recipientFullName)
                             .replace(/\{email\}/g, recipientEmail);
 
-                    // Append unsubscribe footer for marketing compliance
-                    const siteUrl = process.env.CONVEX_SITE_URL || "";
                     const unsubscribeUrl = siteUrl
                         ? `${siteUrl}/unsubscribe?id=${recipient.id}`
                         : "";
 
-                    // Apply merge fields to body before wrapping
                     const mergedHtmlBody = applyMergeFields(campaignContent?.htmlBody || "");
 
-                    // Generate full email HTML with wrapper
-                    const { wrapEmail } = await import("./lib/emailLayout");
                     let emailBody = wrapEmail(
                         mergedHtmlBody + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : ""),
                         campaign.subject || "Notification",
                         campaignContent?.fontSize || "15px"
                     );
 
-                    // Link rewriting and open tracking
                     if (siteUrl) {
-                        const { rewriteEmailLinks } = await import("./lib/tracking_utils");
                         emailBody = (await rewriteEmailLinks(emailBody, siteUrl, args.campaignId, recipient.id)) as string;
                     }
 
-                    // Apply merge fields to the subject too
                     const mergedSubject = applyMergeFields(campaign.subject || "");
 
-                    const result = await sendEmail({
-                        subject: mergedSubject,
-                        body: emailBody,
-                        toRecipients: [{ email: cleanEmail, name: recipient.name }],
-                        ccRecipients: campaign.ccEmail
-                            ? [{ email: campaign.ccEmail }]
-                            : undefined,
-                        bccRecipients: campaign.bccEmail
-                            ? [{ email: campaign.bccEmail }]
-                            : undefined,
-                        attachments: processedAttachments,
-                        fromMailbox: campaign.fromMailbox,
-                        headers: {
-                            "X-Campaign-ID": args.campaignId,
-                            "X-Recipient-ID": recipient.id,
+                    prepared.push({
+                        recipient,
+                        message: {
+                            subject: mergedSubject,
+                            body: emailBody,
+                            toRecipients: emailAddresses.map((email) => ({ email, name: recipient.name })),
+                            ccRecipients: campaign.ccEmail ? [{ email: campaign.ccEmail }] : undefined,
+                            bccRecipients: campaign.bccEmail ? [{ email: campaign.bccEmail }] : undefined,
+                            attachments: processedAttachments,
+                            fromMailbox: campaign.fromMailbox,
+                            headers: {
+                                "X-Campaign-ID": args.campaignId,
+                                "X-Recipient-ID": recipient.id,
+                            },
                         },
                     });
+                } catch (err) {
+                    failedCount++;
+                    results.push({
+                        recipientId: recipient.id,
+                        success: false,
+                        error: err instanceof Error ? err.message : "Unknown error during render",
+                    });
+                }
+            }
 
-                    if (result.success) {
+            // Phase 2: send in chunks of 20 via Microsoft Graph $batch.
+            // Graph caps $batch at 20 sub-requests per call and forwards 4 at a
+            // time to Outlook. Per-item 429/5xx retries are handled inside
+            // sendEmailBatch — the outer batch returns 200 even when sub-items
+            // fail, so we cannot rely on the SDK's HTTP-level retries.
+            const SUB_BATCH = 20;
+            const interBatchDelayMs = Math.max(
+                0,
+                parseInt(process.env.GRAPH_EMAIL_INTER_BATCH_DELAY_MS ?? "200", 10) || 0
+            );
+
+            for (let i = 0; i < prepared.length; i += SUB_BATCH) {
+                const slice = prepared.slice(i, i + SUB_BATCH);
+                const sendResults = await sendEmailBatch(slice.map((p) => p.message));
+
+                for (let j = 0; j < slice.length; j++) {
+                    const { recipient } = slice[j];
+                    const r = sendResults[j];
+
+                    if (r.success) {
                         successCount++;
                         results.push({ recipientId: recipient.id, success: true });
 
-                        // Queue CRM logging — written to Dynamics in a background job
-                        // after this batch completes so it doesn't block the send loop.
                         if (campaign.createDynamicsActivity) {
                             crmQueue.push({
                                 recipientId: recipient.id,
@@ -475,9 +514,6 @@ export const processEmailBatch = internalAction({
                             });
                         }
 
-                        // Create CRM opportunity if enabled (mirrors processPersonalisedBatch).
-                        // Failures here are logged but don't affect the send result — the email
-                        // is already on its way.
                         if (campaign.createOpportunities) {
                             try {
                                 const opportunityId = await ctx.runAction(
@@ -506,28 +542,19 @@ export const processEmailBatch = internalAction({
                         results.push({
                             recipientId: recipient.id,
                             success: false,
-                            error: result.error,
+                            error: r.error,
                         });
                     }
 
-                    // Rate limiting: stay under Graph IncomingBytes (150 MB / 5 min per mailbox).
-                    // Default 1200ms (~0.8 emails/sec) to avoid overload on large campaigns (19k+).
-                    const emailDelayMs = Math.max(500, parseInt(process.env.GRAPH_EMAIL_DELAY_MS ?? "1200", 10) || 1200);
-                    await new Promise((resolve) => setTimeout(resolve, emailDelayMs));
-                } catch (err) {
-                    failedCount++;
-                    results.push({
-                        recipientId: recipient.id,
-                        success: false,
-                        error: err instanceof Error ? err.message : "Unknown error",
-                    });
+                    processedInFlush++;
+                    if (processedInFlush >= FLUSH_INTERVAL) {
+                        await flushResults();
+                        processedInFlush = 0;
+                    }
                 }
 
-                // Flush progress incrementally so partial work survives crashes
-                processedInFlush++;
-                if (processedInFlush >= FLUSH_INTERVAL) {
-                    await flushResults();
-                    processedInFlush = 0;
+                if (i + SUB_BATCH < prepared.length && interBatchDelayMs > 0) {
+                    await new Promise((resolve) => setTimeout(resolve, interBatchDelayMs));
                 }
             }
 
@@ -552,10 +579,12 @@ export const processEmailBatch = internalAction({
                 });
             }
 
-            // Each worker self-schedules exactly one successor. Add delay between batches
-            // to avoid Graph IncomingBytes overload (150 MB / 5 min per mailbox).
+            // Each worker self-schedules exactly one successor. With $batch the
+            // per-recipient sleep is gone, so this batch-to-batch delay is the
+            // main pacing knob. 500ms is plenty given Outlook's per-mailbox cap
+            // of 4 concurrent requests; tune via GRAPH_BATCH_DELAY_MS if needed.
             if (hasMoreBatches) {
-                const batchDelayMs = parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "3000", 10) || 3000;
+                const batchDelayMs = parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "500", 10) || 500;
                 await ctx.scheduler.runAfter(batchDelayMs, internal.campaignQueue.processEmailBatch, {
                     campaignId: args.campaignId,
                 });
@@ -569,7 +598,7 @@ export const processEmailBatch = internalAction({
 
             if (hasMoreBatches) {
                 // Longer delay after error to let Graph recover
-                const batchDelayMs = parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "3000", 10) || 3000;
+                const batchDelayMs = parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "500", 10) || 500;
                 await ctx.scheduler.runAfter(Math.max(batchDelayMs, 10000), internal.campaignQueue.processEmailBatch, {
                     campaignId: args.campaignId,
                 });
@@ -673,51 +702,81 @@ export const processWhatsAppBatch = internalAction({
         const results: Array<{ recipientId: string; success: boolean; messageSid?: string; error?: string }> = [];
 
         try {
-            const config = getClickatellConfig();
+            const config = getMetaWhatsAppConfig();
+            const limiter = new RateLimiter(config.maxSendPerSecond, config.maxConcurrent);
 
-            // Prepare Header (Upload if needed just ONCE for the batch)
-            let headerPayload: any = undefined;
-
-            if (template.headerType && template.headerType !== "none") {
-                if (template.headerType === "text" && template.headerText) {
-                    headerPayload = {
-                        type: "text",
-                        text: template.headerText
-                    };
-                } else if (["image", "document", "video"].includes(template.headerType) && template.headerUrl) {
+            // Upload header media to Meta if the template has one and the cached id
+            // is missing/stale/stamped against a different URL. Re-running per
+            // batch is cheap because shouldRefreshMediaId short-circuits once the
+            // id is cached on the template doc.
+            let headerMediaIdForSend: string | undefined = template.headerMediaId;
+            if (isMediaHeaderType(template.headerType) && template.headerUrl) {
+                const needsRefresh = shouldRefreshMediaId(
+                    {
+                        headerMediaId: template.headerMediaId,
+                        headerMediaIdUploadedAt: template.headerMediaIdUploadedAt,
+                        headerMediaSourceUrl: template.headerMediaSourceUrl,
+                    },
+                    template.headerUrl
+                );
+                if (needsRefresh) {
                     try {
-                        console.log("Uploading batch header media...");
-                        const fileName = template.headerUrl.split('/').pop() || "media_file";
-
-                        // Use the first recipient's phone number from the batch for the upload
-                        const phoneForUpload = batch.recipients.find((r: { phone?: string }) => r.phone)?.phone || "27123456789";
-                        const toNumber = normalizePhoneNumber(phoneForUpload);
-
-                        const fileId = await uploadClickatellMedia(config.apiKey, template.headerUrl, toNumber, fileName, true);
-
-                        // Simplified Header Payload (works for all media types in One API)
-                        headerPayload = {
-                            type: "media",
-                            media: { fileId }
-                        };
-                    } catch (e) {
-                        console.error("Failed to upload batch header media:", e);
-                        // If header fails, we might still want to try sending without it? 
-                        // Or fail the batch? Probably fail as the template expects it.
-                        throw new Error(`Batch header media upload failed: ${e instanceof Error ? e.message : String(e)}`);
+                        const upload = await uploadWhatsAppMedia(config, {
+                            sourceUrl: template.headerUrl,
+                            headerType: template.headerType,
+                            mimeTypeOverride: template.headerMediaMimeType,
+                        });
+                        await ctx.runMutation(internal.whatsappTemplates.setHeaderMediaCache, {
+                            id: template._id,
+                            mediaId: upload.mediaId,
+                            mimeType: upload.mimeType,
+                            sourceUrl: template.headerUrl,
+                        });
+                        headerMediaIdForSend = upload.mediaId;
+                    } catch (uploadErr) {
+                        const msg = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+                        console.error(`Header media upload failed for campaign ${args.campaignId}: ${msg}`);
+                        // Fall back to sending with the public URL (link) — the template still
+                        // works, just less reliably. If the URL itself is broken Meta will
+                        // surface a per-recipient error and the existing 3-strike abort kicks in.
                     }
                 }
             }
+            const templateForSend: TemplateLike = {
+                ...(template as TemplateLike),
+                headerMediaId: headerMediaIdForSend,
+            };
 
-            // Process in sub-batches of 50 (Clickatell limit)
-            const subBatchSize = 50;
+            // Track 3-consecutive permanent template errors → abort the whole batch.
+            // Meta returns 132xxx codes when a template is paused or has a variable
+            // mismatch; every subsequent recipient will hit the same error, so we
+            // stop early rather than burn through the list.
+            let consecutiveTemplateErrors = 0;
+            let templateAbortReason: string | null = null;
 
-            for (let i = 0; i < batch.recipients.length; i += subBatchSize) {
-                const subBatch = batch.recipients.slice(i, i + subBatchSize);
+            await Promise.all(
+                batch.recipients.map(async (recipient: { id: string; phone?: string; name: string; variables?: string }) => {
+                    if (templateAbortReason) {
+                        failedCount++;
+                        results.push({
+                            recipientId: recipient.id,
+                            success: false,
+                            error: `Aborted: ${templateAbortReason}`,
+                        });
+                        return;
+                    }
 
-                // Build messages payload
-                const messagesPayload = subBatch.map((recipient: { id: string; phone?: string; name: string; variables?: string }) => {
-                    const toNumber = normalizePhoneNumber(recipient.phone || "");
+                    const toDigits = normalizeToE164Digits(recipient.phone || "");
+                    if (!toDigits) {
+                        failedCount++;
+                        results.push({
+                            recipientId: recipient.id,
+                            success: false,
+                            error: `Invalid phone number: ${recipient.phone || "(empty)"}`,
+                        });
+                        return;
+                    }
+
                     let recipientVars: Record<string, string> = {};
                     if (recipient.variables) {
                         try {
@@ -726,7 +785,6 @@ export const processWhatsAppBatch = internalAction({
                             console.warn(`Invalid JSON in recipient variables for ${recipient.id}, using empty object`);
                         }
                     }
-
 
                     const allVariables: Record<string, string> = {
                         name: recipient.name,
@@ -738,120 +796,53 @@ export const processWhatsAppBatch = internalAction({
                         ...recipientVars,
                     };
 
-                    const parameters: Record<string, string> = {};
-                    template.variables.forEach((varName: string) => {
-                        parameters[varName] = allVariables[varName] || "";
-                    });
+                    // Hand `allVariables` to the payload builder — it picks body
+                    // variables from template.variables and the button variable
+                    // from template.buttonUrlVariable, so both come from the
+                    // same map.
+                    const body = buildTemplateRequestBody(templateForSend, toDigits, allVariables);
+                    const result = await limiter.schedule(() => sendTemplateWithRetry(config, body));
 
-                    // Build template payload (Simplified API to match sendTestWhatsApp)
-                    const templatePayload: any = {
-                        templateName: template.name,
-                        body: {
-                            parameters: parameters
-                        }
-                    };
+                    if (result.status === "sent") {
+                        consecutiveTemplateErrors = 0;
+                        successCount++;
+                        results.push({
+                            recipientId: recipient.id,
+                            success: true,
+                            messageSid: result.wamid,
+                        });
 
-                    // Add header component if it exists
-                    if (headerPayload) {
-                        templatePayload.header = headerPayload;
-                    }
-
-                    return {
-                        channel: "whatsapp",
-                        to: toNumber,
-                        template: templatePayload,
-                        clientMessageId: recipient.id,
-                    };
-                });
-
-                try {
-                    const maxAttempts = 3;
-                    const baseDelayMs = 1000;
-                    let result: { messages: Array<{ accepted?: boolean; apiMessageId?: string; error?: unknown }> } | null = null;
-
-                    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-                        const response = await fetch(
-                            "https://platform.clickatell.com/v1/message",
-                            {
-                                method: "POST",
-                                headers: {
-                                    "Content-Type": "application/json",
-                                    Authorization: config.apiKey,
-                                },
-                                body: JSON.stringify({ messages: messagesPayload }),
+                        if (campaign.createDynamicsActivity) {
+                            try {
+                                await logWhatsAppActivity(
+                                    recipient.id,
+                                    template.name,
+                                    template.body || ""
+                                );
+                            } catch (e) {
+                                console.error(`CRM WhatsApp log failed for ${recipient.id}:`, e);
                             }
-                        );
-
-                        if (response.ok) {
-                            result = await response.json();
-                            break;
                         }
-
-                        const errorText = await response.text();
-
-                        if (!isRetryableHttpStatus(response.status) || attempt === maxAttempts) {
-                            throw new Error(`Clickatell API error: ${response.status} - ${errorText}`);
-                        }
-
-                        const delay = baseDelayMs * Math.pow(2, attempt - 1);
-                        await new Promise((resolve) => setTimeout(resolve, delay));
-                    }
-
-                    if (!result) {
-                        throw new Error("Clickatell API did not return a result");
-                    }
-                    const finalResult = result;
-                    console.log("CLICKATELL QUEUE BATCH RESPONSE:", JSON.stringify(finalResult, null, 2));
-
-                    for (let idx = 0; idx < finalResult.messages.length; idx++) {
-                        const msg = finalResult.messages[idx];
-                        const recipient = subBatch[idx];
-                        if (msg.accepted) {
-                            successCount++;
-                            results.push({
-                                recipientId: recipient.id,
-                                success: true,
-                                messageSid: msg.apiMessageId,
-                            });
-
-                            // Log to Dynamics CRM if enabled
-                            if (campaign.createDynamicsActivity) {
-                                try {
-                                    await logWhatsAppActivity(
-                                        recipient.id,
-                                        template.name,
-                                        template.body || ""
-                                    );
-                                } catch (e) {
-                                    console.error(`CRM WhatsApp log failed for ${recipient.id}:`, e);
-                                }
-                            }
-                        } else {
-                            failedCount++;
-                            results.push({
-                                recipientId: recipient.id,
-                                success: false,
-                                error: JSON.stringify(msg.error),
-                            });
-                        }
-                    }
-                } catch (err) {
-                    // Mark entire sub-batch as failed
-                    subBatch.forEach((recipient: { id: string; phone?: string; name: string; variables?: string }) => {
+                    } else {
                         failedCount++;
                         results.push({
                             recipientId: recipient.id,
                             success: false,
-                            error: err instanceof Error ? err.message : "Unknown error",
+                            error: `code=${result.errorCode ?? "n/a"} ${result.errorMessage}`,
                         });
-                    });
-                }
 
-                // Small delay between sub-batches
-                if (i + subBatchSize < batch.recipients.length) {
-                    await new Promise((resolve) => setTimeout(resolve, 200));
-                }
-            }
+                        if (isTemplatePermanentError(result.errorCode)) {
+                            consecutiveTemplateErrors++;
+                            if (consecutiveTemplateErrors >= 3 && !templateAbortReason) {
+                                templateAbortReason = `template '${template.name}' (${template.language}) hit 3 consecutive permanent errors (code ${result.errorCode}) — paused or misnamed`;
+                                console.error(templateAbortReason);
+                            }
+                        } else {
+                            consecutiveTemplateErrors = 0;
+                        }
+                    }
+                })
+            );
 
             // Batch update message statuses
             await ctx.runMutation(internal.messages.updateStatusBatch, {
@@ -875,11 +866,14 @@ export const processWhatsAppBatch = internalAction({
                 }
             );
 
-            // Schedule next batch if there are more
-            if (hasMoreBatches) {
+            // Schedule next batch — unless this batch hit the template abort condition,
+            // in which case every subsequent batch will fail the same way.
+            if (hasMoreBatches && !templateAbortReason) {
                 await ctx.scheduler.runAfter(500, internal.campaignQueue.processWhatsAppBatch, {
                     campaignId: args.campaignId,
                 });
+            } else if (templateAbortReason) {
+                console.error(`Campaign ${args.campaignId} halted: ${templateAbortReason}`);
             }
         } catch (err) {
             console.error("Batch processing error:", err);
@@ -1117,7 +1111,7 @@ export const processPersonalisedBatch = internalAction({
         try {
             const { dynamicsRequest } = await import("./lib/dynamics_auth");
             const { calculateOptions, parseAgeFromIdNumber } = await import("./lib/taxCalculator");
-            const { generatePersonalisedCopy } = await import("./lib/gemini");
+            const { generatePersonalisedCopy } = await import("./lib/claude");
             const { buildPersonalisedEmail } = await import("./lib/emailTemplatePersonalised");
             const { sendEmail } = await import("./lib/graph_client");
 

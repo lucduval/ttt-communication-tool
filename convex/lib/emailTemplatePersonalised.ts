@@ -1,4 +1,4 @@
-import type { PersonalisedCopy } from "./gemini";
+import type { PersonalisedCopy } from "./claude";
 import type { CalculatedOptions } from "./taxCalculator";
 
 function fmt(n: number): string {

@@ -106,77 +106,70 @@ export interface EmailMessage {
 }
 
 /**
- * Send an email using Microsoft Graph API from a shared mailbox
- * @param message - Email message with optional fromMailbox override
+ * Build the JSON body for /users/{mailbox}/sendMail. Shared by sendEmail (single)
+ * and sendEmailBatch ($batch). Both call sites need an identical payload shape;
+ * extracting this avoids drift between the two paths.
  */
-export async function sendEmail(message: EmailMessage): Promise<{ success: boolean; messageId?: string; error?: string }> {
-    // Use explicitly provided mailbox, or fall back to default from env
+function buildSendMailPayload(message: EmailMessage): {
+    payload: Record<string, unknown>;
+    sharedMailbox: string;
+} {
     const sharedMailbox = message.fromMailbox || process.env.SHARED_MAILBOX_ADDRESS;
-
     if (!sharedMailbox) {
         throw new Error("No mailbox specified and SHARED_MAILBOX_ADDRESS is not configured");
     }
 
-    const token = await getGraphAccessToken();
-
-    // Build the email payload
-    const emailPayload: Record<string, unknown> = {
-        message: {
-            subject: message.subject,
-            body: {
-                contentType: "HTML",
-                content: message.body,
-            },
-            toRecipients: message.toRecipients.map((r) => ({
-                emailAddress: {
-                    address: r.email,
-                    name: r.name || r.email,
-                },
-            })),
-            importance: message.importance || "normal",
-        },
-        saveToSentItems: message.saveToSentItems !== false,
+    const messageObj: Record<string, unknown> = {
+        subject: message.subject,
+        body: { contentType: "HTML", content: message.body },
+        toRecipients: message.toRecipients.map((r) => ({
+            emailAddress: { address: r.email, name: r.name || r.email },
+        })),
+        importance: message.importance || "normal",
     };
 
-    // Add custom headers if provided
     if (message.headers) {
-        (emailPayload.message as Record<string, unknown>).internetMessageHeaders = Object.entries(message.headers).map(([name, value]) => ({
-            name,
-            value,
-        }));
+        messageObj.internetMessageHeaders = Object.entries(message.headers).map(
+            ([name, value]) => ({ name, value })
+        );
     }
 
-    // Add CC recipients if provided
     if (message.ccRecipients && message.ccRecipients.length > 0) {
-        (emailPayload.message as Record<string, unknown>).ccRecipients = message.ccRecipients.map((r) => ({
-            emailAddress: {
-                address: r.email,
-                name: r.name || r.email,
-            },
+        messageObj.ccRecipients = message.ccRecipients.map((r) => ({
+            emailAddress: { address: r.email, name: r.name || r.email },
         }));
     }
 
-    // Add BCC recipients if provided
     if (message.bccRecipients && message.bccRecipients.length > 0) {
-        (emailPayload.message as Record<string, unknown>).bccRecipients = message.bccRecipients.map((r) => ({
-            emailAddress: {
-                address: r.email,
-                name: r.name || r.email,
-            },
+        messageObj.bccRecipients = message.bccRecipients.map((r) => ({
+            emailAddress: { address: r.email, name: r.name || r.email },
         }));
     }
 
-    // Add attachments if provided (for inline images)
     if (message.attachments && message.attachments.length > 0) {
-        (emailPayload.message as Record<string, unknown>).attachments = message.attachments.map((att) => ({
+        messageObj.attachments = message.attachments.map((att) => ({
             "@odata.type": "#microsoft.graph.fileAttachment",
             name: att.name,
             contentType: att.contentType,
             contentBytes: att.contentBase64,
             isInline: att.isInline !== undefined ? att.isInline : att.contentType.startsWith("image/"),
-            contentId: att.contentId || att.name.replace(/\.[^.]+$/, ""), // Use explicit contentId or default fallback
+            contentId: att.contentId || att.name.replace(/\.[^.]+$/, ""),
         }));
     }
+
+    return {
+        payload: { message: messageObj, saveToSentItems: message.saveToSentItems !== false },
+        sharedMailbox,
+    };
+}
+
+/**
+ * Send an email using Microsoft Graph API from a shared mailbox
+ * @param message - Email message with optional fromMailbox override
+ */
+export async function sendEmail(message: EmailMessage): Promise<{ success: boolean; messageId?: string; error?: string }> {
+    const { payload: emailPayload, sharedMailbox } = buildSendMailPayload(message);
+    const token = await getGraphAccessToken();
 
     // Send email from shared mailbox with retries for transient failures
     const url = `https://graph.microsoft.com/v1.0/users/${sharedMailbox}/sendMail`;
@@ -229,6 +222,186 @@ export async function sendEmail(message: EmailMessage): Promise<{ success: boole
     }
 
     return { success: true };
+}
+
+export interface BatchSendResult {
+    success: boolean;
+    error?: string;
+    status?: number;
+}
+
+/**
+ * Case-insensitive header lookup. Microsoft Graph $batch responses preserve
+ * original header casing, which varies between sub-services.
+ */
+function findHeader(headers: Record<string, string> | undefined, name: string): string | null {
+    if (!headers) return null;
+    const target = name.toLowerCase();
+    for (const [k, v] of Object.entries(headers)) {
+        if (k.toLowerCase() === target) return v;
+    }
+    return null;
+}
+
+function formatBatchErrorBody(body: unknown): string {
+    if (body === null || body === undefined) return "";
+    if (typeof body === "string") return body.slice(0, 300);
+    try {
+        return JSON.stringify(body).slice(0, 300);
+    } catch {
+        return String(body).slice(0, 300);
+    }
+}
+
+/**
+ * Send up to 20 emails in a single Microsoft Graph $batch HTTP call.
+ * Returns per-message results in the same order as the input.
+ *
+ * Important behaviour notes (from Graph throttling docs):
+ *  - The outer $batch HTTP call returns 200 even when sub-items fail. Each
+ *    sub-response carries its own status / headers / body.
+ *  - Microsoft Graph forwards at most 4 sub-requests at a time to Outlook,
+ *    regardless of batch size. A batch of 20 effectively executes as 5 groups
+ *    of 4 in parallel on the Outlook side.
+ *  - SDKs do NOT auto-retry sub-items that hit 429. We retry per-item here,
+ *    honouring each item's Retry-After header for 429s and using exponential
+ *    backoff for 5xx.
+ */
+export async function sendEmailBatch(
+    messages: EmailMessage[]
+): Promise<BatchSendResult[]> {
+    if (messages.length === 0) return [];
+    if (messages.length > 20) {
+        throw new Error("Microsoft Graph $batch supports at most 20 sub-requests");
+    }
+
+    const results: BatchSendResult[] = new Array(messages.length);
+
+    // Pre-build sub-request bodies once. Reuse across attempts so we don't
+    // rebuild large attachment payloads on retries.
+    const subRequests = messages.map((message, idx) => {
+        const { payload, sharedMailbox } = buildSendMailPayload(message);
+        return {
+            id: String(idx),
+            method: "POST" as const,
+            url: `/users/${sharedMailbox}/sendMail`,
+            headers: { "Content-Type": "application/json" },
+            body: payload,
+        };
+    });
+
+    let pending = messages.map((_, i) => i);
+    const maxAttempts = 3;
+    const baseDelayMs = 1000;
+
+    for (let attempt = 1; attempt <= maxAttempts && pending.length > 0; attempt++) {
+        const token = await getGraphAccessToken();
+        const requestsForThisAttempt = pending.map((idx) => subRequests[idx]);
+
+        const batchResponse = await fetch("https://graph.microsoft.com/v1.0/$batch", {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ requests: requestsForThisAttempt }),
+        });
+
+        // Outer $batch HTTP failure (rare — usually only on auth or network).
+        if (!batchResponse.ok) {
+            const errText = await batchResponse.text();
+            console.error(`$batch HTTP ${batchResponse.status}: ${errText}`);
+
+            const isLastAttempt = attempt === maxAttempts;
+            if (isLastAttempt || !isRetryableHttpStatus(batchResponse.status)) {
+                for (const idx of pending) {
+                    results[idx] = {
+                        success: false,
+                        status: batchResponse.status,
+                        error: `$batch failed: ${batchResponse.status} - ${errText.slice(0, 300)}`,
+                    };
+                }
+                return results;
+            }
+
+            const retryAfterSec =
+                batchResponse.status === 429
+                    ? parseRetryAfter(batchResponse.headers.get("Retry-After"))
+                    : null;
+            const delayMs =
+                batchResponse.status === 429
+                    ? Math.max((retryAfterSec ?? 90) * 1000, 90_000)
+                    : baseDelayMs * Math.pow(2, attempt - 1);
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            continue;
+        }
+
+        const responseBody = (await batchResponse.json()) as {
+            responses: Array<{
+                id: string;
+                status: number;
+                headers?: Record<string, string>;
+                body?: unknown;
+            }>;
+        };
+
+        const nextPending: number[] = [];
+        let maxRetryDelayMs = 0;
+
+        for (const sub of responseBody.responses) {
+            const idx = parseInt(sub.id, 10);
+            if (Number.isNaN(idx)) continue;
+
+            // sendMail returns 202 Accepted on success
+            if (sub.status >= 200 && sub.status < 300) {
+                results[idx] = { success: true, status: sub.status };
+                continue;
+            }
+
+            const retryable = sub.status === 429 || (sub.status >= 500 && sub.status < 600);
+            if (retryable && attempt < maxAttempts) {
+                nextPending.push(idx);
+                if (sub.status === 429) {
+                    const ra = parseRetryAfter(findHeader(sub.headers, "Retry-After"));
+                    // Honour Retry-After if present; otherwise minimum 30s.
+                    // Graph IncomingBytes 429s reset over a 5-min window, but
+                    // sendMail throttling typically suggests shorter waits via
+                    // the header — trust it when given.
+                    const itemDelayMs = (ra ?? 30) * 1000;
+                    maxRetryDelayMs = Math.max(maxRetryDelayMs, itemDelayMs);
+                } else {
+                    maxRetryDelayMs = Math.max(
+                        maxRetryDelayMs,
+                        baseDelayMs * Math.pow(2, attempt - 1)
+                    );
+                }
+                continue;
+            }
+
+            results[idx] = {
+                success: false,
+                status: sub.status,
+                error: `${sub.status} - ${formatBatchErrorBody(sub.body)}`,
+            };
+        }
+
+        pending = nextPending;
+        if (pending.length > 0 && maxRetryDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, maxRetryDelayMs));
+        }
+    }
+
+    // Defensive: anything still pending without a recorded result is a bug.
+    for (const idx of pending) {
+        if (!results[idx]) {
+            results[idx] = {
+                success: false,
+                error: "Unknown failure (exhausted retries with no response)",
+            };
+        }
+    }
+
+    return results;
 }
 
 /**

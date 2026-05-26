@@ -5,7 +5,7 @@ import { action } from "../_generated/server";
 import { api } from "../_generated/api";
 import { dynamicsRequest } from "../lib/dynamics_auth";
 import { calculateOptions, parseAgeFromIdNumber } from "../lib/taxCalculator";
-import { generatePersonalisedCopy, type TaxScenarioContext } from "../lib/gemini";
+import { generatePersonalisedCopy, type TaxScenarioContext } from "../lib/claude";
 import { buildPersonalisedEmail } from "../lib/emailTemplatePersonalised";
 import type { TaxProfileData } from "./dynamics";
 

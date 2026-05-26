@@ -140,6 +140,21 @@ export default defineSchema({
         headerType: v.optional(v.string()), // none, text, image, document, video
         headerText: v.optional(v.string()), // For text headers
         headerUrl: v.optional(v.string()), // For media headers (image, document, video)
+        // Cached Meta media id (returned by POST /{phone_number_id}/media) so we
+        // don't re-upload on every send. Invalidated if headerUrl/headerType
+        // change or if the id is older than ~25 days (Meta expires at 30).
+        headerMediaId: v.optional(v.string()),
+        headerMediaIdUploadedAt: v.optional(v.number()),
+        headerMediaSourceUrl: v.optional(v.string()),
+        headerMediaMimeType: v.optional(v.string()),
+        // URL button support. Meta allows one URL button per template; the URL
+        // is either static (constant for every recipient) or dynamic (contains
+        // a `{{1}}` placeholder that is replaced with a per-recipient value at
+        // send time). Static URL buttons require no payload component on send.
+        buttonType: v.optional(v.string()), // "none" | "url"
+        buttonText: v.optional(v.string()), // display label as approved in Meta, e.g. "Share with a friend"
+        buttonUrl: v.optional(v.string()), // URL pattern approved in Meta, may contain {{1}}
+        buttonUrlVariable: v.optional(v.string()), // logical variable name (e.g. "riivo_referralcode") whose value replaces {{1}}; unset for static URLs
         lastUpdatedAt: v.number(),
         createdBy: v.optional(v.string()), // Convex user _id of creator
         visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))), // undefined treated as "shared"

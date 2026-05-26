@@ -4,8 +4,13 @@ import { internalMutation, internalQuery, mutation, query } from "./_generated/s
 import type { Id } from "./_generated/dataModel";
 import { checkAccessHelper } from "./users";
 
-// Constants for batch sizing
-export const EMAIL_BATCH_SIZE = 250;
+// Constants for batch sizing.
+// EMAIL_BATCH_SIZE is the # of recipients per campaign batch. With Graph $batch
+// (20 sub-requests per HTTP call, see lib/graph_client.sendEmailBatch), a 100-
+// recipient batch is 5 $batch calls — well under Convex's 10-min action timeout
+// even when 429 retries lengthen things. Previous value (250) was sized for the
+// per-recipient send loop with a 1.2s sleep.
+export const EMAIL_BATCH_SIZE = 100;
 export const WHATSAPP_BATCH_SIZE = 1000;
 export const PERSONALISED_BATCH_SIZE = 50;
 
