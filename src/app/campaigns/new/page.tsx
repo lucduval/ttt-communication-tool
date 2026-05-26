@@ -25,6 +25,11 @@ import {
 } from "@/components/filters";
 import { ContactList, type Contact } from "@/components/recipients";
 import {
+    getConvexSiteUrl,
+    normalizeInlineBase64Images,
+    uploadFileToStorage,
+} from "@/lib/imageUpload";
+import {
     ArrowLeft,
     ArrowRight,
     Users,
@@ -175,7 +180,14 @@ export default function NewCampaignPage() {
     const [subject, setSubject] = useState("");
     const [htmlContent, setHtmlContent] = useState("");
     const [fontSize, setFontSize] = useState("18px");
-    const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
+    // Count of `<img>` tags in the current email body — derived from htmlContent.
+    // We no longer track uploaded images in a separate state because each
+    // insertion uploads to Convex storage immediately and embeds the URL into
+    // the HTML.
+    const imageCount = useMemo(() => {
+        const matches = htmlContent.match(/<img\b/gi);
+        return matches ? matches.length : 0;
+    }, [htmlContent]);
     const [attachments, setAttachments] = useState<File[]>([]);
     const [selectedMailbox, setSelectedMailbox] = useState<string | null>(null);
 
@@ -630,31 +642,14 @@ export default function NewCampaignPage() {
         }
     }, [campaignChannel]);
 
+    /**
+     * Upload an image to Convex storage so it can be referenced from email HTML
+     * as a hosted URL instead of an inline base64 blob. Called by the email
+     * composer at insert time so htmlContent never carries image bytes.
+     */
     const handleImageUpload = async (file: File): Promise<{ url: string; contentId: string }> => {
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const base64 = (e.target?.result as string).split(",")[1];
-                const contentId = file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9]/g, "_");
-                const sizeKB = Math.round(base64.length * 0.75 / 1024);
-
-                console.log(`Image stored: ${file.name} (${sizeKB}KB)`);
-
-                setUploadedImages((prev) => [
-                    ...prev,
-                    {
-                        name: file.name,
-                        contentType: file.type,
-                        contentBase64: base64,
-                        contentId,
-                    },
-                ]);
-
-                resolve({ url: `cid:${contentId}`, contentId });
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-        });
+        const ref = await uploadFileToStorage(file, generateUploadUrl, getConvexSiteUrl());
+        return { url: ref.url, contentId: ref.contentId };
     };
 
     const processAttachments = async (): Promise<UploadedImage[]> => {
@@ -861,52 +856,22 @@ export default function NewCampaignPage() {
                 }
             }
 
-            // Upload inline images to Convex storage and replace base64 src with
-            // hosted URLs. This keeps images out of every email payload, cutting
-            // per-email size from ~1-2 MB to ~20-50 KB and avoiding the Graph API
-            // IncomingBytes rate limit (150 MB / 5 min).
-            const siteUrl = process.env.NEXT_PUBLIC_CONVEX_SITE_URL || "";
+            // Newly-inserted images already use storage URLs (uploaded at insert
+            // time by the email composer). This call only does work for legacy
+            // content — older templates and pasted HTML may still embed images
+            // as inline base64; we migrate those to storage URLs here.
+            //
+            // Keeping image bytes out of the per-email payload is what makes
+            // large sends viable (Graph API IncomingBytes rate limit is 150 MB
+            // / 5 min; inlining base64 images blew through it in a few sends).
             let processedHtml: string | undefined = undefined;
             if (campaignChannel === "email") {
-                let html = htmlContent;
-
-                // Find all base64 images, upload each to storage, replace with URL
-                const base64ImgRegex = /<img([^>]+)src="data:(image\/[^;]+);base64,([^"]+)"([^>]*)>/gi;
-                let match;
-                const replacements: Array<{ full: string; replacement: string }> = [];
-
-                while ((match = base64ImgRegex.exec(html)) !== null) {
-                    const [fullMatch, beforeSrc, contentType, base64Data, afterSrc] = match;
-                    const ext = contentType.split("/")[1] || "png";
-
-                    // Convert base64 to blob and upload to Convex storage
-                    const byteString = atob(base64Data);
-                    const bytes = new Uint8Array(byteString.length);
-                    for (let i = 0; i < byteString.length; i++) {
-                        bytes[i] = byteString.charCodeAt(i);
-                    }
-                    const blob = new Blob([bytes], { type: contentType });
-
-                    const postUrl = await generateUploadUrl();
-                    const result = await fetch(postUrl, {
-                        method: "POST",
-                        headers: { "Content-Type": contentType },
-                        body: blob,
-                    });
-                    const { storageId } = await result.json();
-
-                    const imageUrl = `${siteUrl}/image?id=${storageId}`;
-                    replacements.push({
-                        full: fullMatch,
-                        replacement: `<img${beforeSrc}src="${imageUrl}"${afterSrc}>`,
-                    });
-                }
-
-                for (const { full, replacement } of replacements) {
-                    html = html.replace(full, replacement);
-                }
-
-                processedHtml = `<div style="font-size: ${fontSize}; font-family: Arial, sans-serif; color: #333; line-height: 1.45; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%;">${html}</div>`;
+                const { html: normalizedHtml } = await normalizeInlineBase64Images(
+                    htmlContent,
+                    generateUploadUrl,
+                    getConvexSiteUrl(),
+                );
+                processedHtml = `<div style="font-size: ${fontSize}; font-family: Arial, sans-serif; color: #333; line-height: 1.45; -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%;">${normalizedHtml}</div>`;
             }
 
             const campaignId = await startCampaign({
@@ -1683,7 +1648,7 @@ export default function NewCampaignPage() {
                                             </div>
                                             <div className="p-4 bg-amber-50 rounded-lg">
                                                 <div className="text-lg font-semibold text-amber-700">
-                                                    {uploadedImages.length} images
+                                                    {imageCount} images
                                                 </div>
                                                 <div className="text-sm text-gray-600">Attachments</div>
                                             </div>

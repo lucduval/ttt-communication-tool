@@ -10,6 +10,11 @@ import { useRouter } from "next/navigation";
 import { use, useEffect, useState } from "react";
 
 import { Id } from "../../../../../convex/_generated/dataModel";
+import {
+    getConvexSiteUrl,
+    normalizeInlineBase64Images,
+    uploadFileToStorage,
+} from "@/lib/imageUpload";
 
 interface EditTemplatePageProps {
     params: Promise<{
@@ -27,6 +32,12 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
     const currentUser = useQuery(api.users.getCurrentUser);
     const createTemplate = useMutation(api.emailTemplates.create);
     const updateTemplate = useMutation(api.emailTemplates.update);
+    const generateUploadUrl = useMutation(api.files.generateUploadUrl);
+
+    const handleImageUpload = async (file: File): Promise<{ url: string; contentId: string }> => {
+        const ref = await uploadFileToStorage(file, generateUploadUrl, getConvexSiteUrl());
+        return { url: ref.url, contentId: ref.contentId };
+    };
 
     const [name, setName] = useState("");
     const [subject, setSubject] = useState("");
@@ -61,11 +72,24 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
 
         setIsSubmitting(true);
         try {
+            // Migrate any inline base64 images to storage URLs before saving.
+            // Newly-inserted images already use URLs (uploaded at insert time);
+            // this only does work for legacy templates loaded for editing or
+            // HTML pasted from external sources.
+            const { html: normalizedHtml } = await normalizeInlineBase64Images(
+                htmlContent,
+                generateUploadUrl,
+                getConvexSiteUrl(),
+            );
+            if (normalizedHtml !== htmlContent) {
+                setHtmlContent(normalizedHtml);
+            }
+
             if (isNew) {
                 await createTemplate({
                     name,
                     subject,
-                    htmlContent,
+                    htmlContent: normalizedHtml,
                     fontSize,
                     visibility,
                 });
@@ -76,7 +100,7 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
                         id: templateId,
                         name,
                         subject,
-                        htmlContent,
+                        htmlContent: normalizedHtml,
                         fontSize,
                         visibility,
                     });
@@ -85,7 +109,7 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
             }
         } catch (error) {
             console.error(error);
-            alert("Failed to save template");
+            alert(`Failed to save template: ${error instanceof Error ? error.message : "Unknown error"}`);
         } finally {
             setIsSubmitting(false);
         }
@@ -176,9 +200,7 @@ export default function EditTemplatePage({ params }: EditTemplatePageProps) {
                         onContentChange={setHtmlContent}
                         fontSize={fontSize}
                         onFontSizeChange={setFontSize}
-                        onImageUpload={async () => {
-                            return { url: "", contentId: "" };
-                        }}
+                        onImageUpload={handleImageUpload}
                     />
                 </div>
             </div>

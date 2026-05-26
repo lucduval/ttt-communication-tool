@@ -30,6 +30,10 @@ import { Button } from "@/components/ui/Button";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "../../../convex/_generated/api";
 import { Save, FileDown, Trash2 } from "lucide-react";
+import {
+    getConvexSiteUrl,
+    normalizeInlineBase64Images,
+} from "@/lib/imageUpload";
 
 interface EmailComposerProps {
     subject: string;
@@ -42,61 +46,108 @@ interface EmailComposerProps {
     onFontSizeChange?: (size: string) => void;
 }
 
-// Max dimensions for compressed images
-const MAX_IMAGE_WIDTH = 800;
-const MAX_IMAGE_HEIGHT = 800;
-const JPEG_QUALITY = 0.8;
+// Bandwidth-only compression. Storage size is no longer a constraint (images
+// live in Convex storage), so we just keep dimensions reasonable for email
+// rendering and let JPEG quality stay near-lossless.
+const MAX_IMAGE_DIMENSION = 1600;
+const JPEG_QUALITY = 0.92;
+// Files under this size aren't worth re-encoding — gains are negligible and
+// it preserves the original bytes (PNG transparency, source quality, etc).
+const SKIP_COMPRESSION_BYTES = 300 * 1024;
+
+function escapeHtmlAttribute(value: string): string {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+interface CompressedImage {
+    blob: Blob;
+    contentType: string;
+    filename: string;
+}
+
+function deriveFilename(original: string, contentType: string): string {
+    const ext = contentType === "image/png" ? ".png"
+        : contentType === "image/gif" ? ".gif"
+        : contentType === "image/webp" ? ".webp"
+        : ".jpg";
+    return original.replace(/\.[^.]+$/, "") + ext;
+}
+
+async function loadImage(src: string): Promise<HTMLImageElement> {
+    return new Promise((resolve, reject) => {
+        const img = document.createElement("img");
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error("Failed to decode image"));
+        img.src = src;
+    });
+}
+
+async function canvasToBlob(canvas: HTMLCanvasElement, mime: string, quality: number): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+        canvas.toBlob(
+            (blob) => (blob ? resolve(blob) : reject(new Error("Canvas encoding produced no blob"))),
+            mime,
+            quality,
+        );
+    });
+}
 
 /**
- * Compress an image file to reduce its size
- * Returns a compressed base64 string
+ * Compress an image for upload. Returns a Blob ready to POST to storage.
+ *
+ * Preserves the source format when it's already efficient: PNGs stay PNG
+ * (transparency / crisp text), GIFs are passed through unchanged (animation),
+ * and small files skip re-encoding entirely. Everything else is rendered to
+ * JPEG at high quality with high-quality canvas resampling.
  */
-async function compressImage(file: File): Promise<{ base64: string; originalSize: number; compressedSize: number }> {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            const img = document.createElement("img");
-            img.onload = () => {
-                // Calculate new dimensions maintaining aspect ratio
-                let { width, height } = img;
-                const originalSize = file.size;
+async function compressImage(file: File): Promise<CompressedImage> {
+    const isPng = file.type === "image/png";
+    const isGif = file.type === "image/gif";
 
-                if (width > MAX_IMAGE_WIDTH || height > MAX_IMAGE_HEIGHT) {
-                    const ratio = Math.min(MAX_IMAGE_WIDTH / width, MAX_IMAGE_HEIGHT / height);
-                    width = Math.round(width * ratio);
-                    height = Math.round(height * ratio);
-                }
+    if (isGif || file.size <= SKIP_COMPRESSION_BYTES) {
+        return { blob: file, contentType: file.type, filename: file.name };
+    }
 
-                // Create canvas and draw resized image
-                const canvas = document.createElement("canvas");
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext("2d");
-                if (!ctx) {
-                    reject(new Error("Could not get canvas context"));
-                    return;
-                }
+    const objectUrl = URL.createObjectURL(file);
+    try {
+        const img = await loadImage(objectUrl);
+        let { width, height } = img;
+        const needsResize = width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION;
 
-                ctx.drawImage(img, 0, 0, width, height);
+        if (isPng && !needsResize) {
+            return { blob: file, contentType: file.type, filename: file.name };
+        }
 
-                // Convert to JPEG for better compression
-                const compressedBase64 = canvas.toDataURL("image/jpeg", JPEG_QUALITY);
-                const compressedSize = Math.round((compressedBase64.length * 3) / 4); // Approximate size from base64
+        if (needsResize) {
+            const ratio = Math.min(MAX_IMAGE_DIMENSION / width, MAX_IMAGE_DIMENSION / height);
+            width = Math.round(width * ratio);
+            height = Math.round(height * ratio);
+        }
 
-                console.log(`Image compressed: ${(originalSize / 1024).toFixed(1)}KB -> ${(compressedSize / 1024).toFixed(1)}KB (${Math.round((1 - compressedSize / originalSize) * 100)}% reduction)`);
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) throw new Error("Could not get canvas 2d context");
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, width, height);
 
-                resolve({
-                    base64: compressedBase64,
-                    originalSize,
-                    compressedSize,
-                });
-            };
-            img.onerror = () => reject(new Error("Failed to load image"));
-            img.src = e.target?.result as string;
+        const outputMime = isPng ? "image/png" : "image/jpeg";
+        const blob = await canvasToBlob(canvas, outputMime, JPEG_QUALITY);
+
+        return {
+            blob,
+            contentType: outputMime,
+            filename: deriveFilename(file.name, outputMime),
         };
-        reader.onerror = () => reject(new Error("Failed to read file"));
-        reader.readAsDataURL(file);
-    });
+    } finally {
+        URL.revokeObjectURL(objectUrl);
+    }
 }
 
 export function EmailComposer({
@@ -171,27 +222,46 @@ export function EmailComposer({
     const templates = useQuery(api.emailTemplates.list) || [];
     const saveTemplate = useMutation(api.emailTemplates.create);
     const deleteTemplate = useMutation(api.emailTemplates.remove);
+    const generateUploadUrl = useMutation(api.files.generateUploadUrl);
 
     // State for popovers
     const [isSavePopoverOpen, setIsSavePopoverOpen] = useState(false);
     const [newTemplateName, setNewTemplateName] = useState("");
     const [isLoadPopoverOpen, setIsLoadPopoverOpen] = useState(false);
+    const [isSavingTemplate, setIsSavingTemplate] = useState(false);
 
     const handleSaveTemplate = async () => {
         if (!newTemplateName.trim()) return;
+        setIsSavingTemplate(true);
         try {
+            // Migrate any inline base64 images to storage URLs before saving so
+            // htmlContent stays well under Convex's 1 MiB per-value limit.
+            // Newly-inserted images already use storage URLs; this only does
+            // work for legacy content (older templates, pasted HTML).
+            const { html: normalizedHtml } = await normalizeInlineBase64Images(
+                htmlContent,
+                generateUploadUrl,
+                getConvexSiteUrl(),
+            );
+            if (normalizedHtml !== htmlContent) {
+                onContentChange(normalizedHtml);
+                if (editorRef.current) editorRef.current.innerHTML = normalizedHtml;
+            }
+
             await saveTemplate({
                 name: newTemplateName,
                 subject: subject,
-                htmlContent: htmlContent,
+                htmlContent: normalizedHtml,
                 fontSize: fontSize,
             });
             alert("Template saved successfully");
             setIsSavePopoverOpen(false);
             setNewTemplateName("");
         } catch (error) {
-            alert("Failed to save template");
+            alert(`Failed to save template: ${error instanceof Error ? error.message : "Unknown error"}`);
             console.error(error);
+        } finally {
+            setIsSavingTemplate(false);
         }
     };
 
@@ -369,69 +439,43 @@ export function EmailComposer({
         onAttachmentsChange(newAttachments);
     };
 
+    const [isUploadingImage, setIsUploadingImage] = useState(false);
+
     const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
+        if (fileInputRef.current) fileInputRef.current.value = "";
         if (!file) return;
 
-        // Focus editor first
-        editorRef.current?.focus();
+        if (!onImageUpload) {
+            console.error("EmailComposer: onImageUpload prop is required for image insertion");
+            alert("Image upload is not configured in this context");
+            return;
+        }
 
+        editorRef.current?.focus();
+        setIsUploadingImage(true);
         try {
-            // Compress the image before inserting
-            const { base64, originalSize, compressedSize } = await compressImage(file);
-            const contentId = file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9]/g, "_");
+            const compressed = await compressImage(file);
+            const uploadFile = new File([compressed.blob], compressed.filename, {
+                type: compressed.contentType,
+            });
+            const { url, contentId } = await onImageUpload(uploadFile);
+
+            const safeAlt = escapeHtmlAttribute(file.name);
+            const safeUrl = escapeHtmlAttribute(url);
+            const safeCid = escapeHtmlAttribute(contentId);
 
             document.execCommand(
                 "insertHTML",
                 false,
-                `<img src="${base64}" alt="${file.name}" data-content-id="${contentId}" style="max-width: 100%; height: auto; border-radius: 4px; cursor: pointer;" />`
+                `<img src="${safeUrl}" alt="${safeAlt}" data-content-id="${safeCid}" style="max-width: 100%; height: auto; border-radius: 4px; cursor: pointer;" />`,
             );
             updateContent();
-
-            // Call the upload handler to store the image for sending
-            // We need to pass the compressed image, not the original
-            if (onImageUpload) {
-                try {
-                    // Create a new File with compressed data
-                    const response = await fetch(base64);
-                    const blob = await response.blob();
-                    const compressedFile = new File([blob], file.name.replace(/\.[^.]+$/, ".jpg"), {
-                        type: "image/jpeg",
-                    });
-                    await onImageUpload(compressedFile);
-                } catch (error) {
-                    console.error("Failed to register image:", error);
-                }
-            }
         } catch (error) {
-            console.error("Failed to process image:", error);
-            // Fallback to original method if compression fails
-            const reader = new FileReader();
-            reader.onload = async (readerEvent) => {
-                const base64 = readerEvent.target?.result as string;
-                const contentId = file.name.replace(/\.[^.]+$/, "").replace(/[^a-zA-Z0-9]/g, "_");
-
-                document.execCommand(
-                    "insertHTML",
-                    false,
-                    `<img src="${base64}" alt="${file.name}" data-content-id="${contentId}" style="max-width: 100%; height: auto; border-radius: 4px;" />`
-                );
-                updateContent();
-
-                if (onImageUpload) {
-                    try {
-                        await onImageUpload(file);
-                    } catch (err) {
-                        console.error("Failed to register image:", err);
-                    }
-                }
-            };
-            reader.readAsDataURL(file);
-        }
-
-        // Reset file input
-        if (fileInputRef.current) {
-            fileInputRef.current.value = "";
+            console.error("Failed to upload image:", error);
+            alert(`Failed to upload image: ${error instanceof Error ? error.message : "Unknown error"}`);
+        } finally {
+            setIsUploadingImage(false);
         }
     };
 
@@ -621,7 +665,7 @@ export function EmailComposer({
                 </Popover>
             )
         },
-        { icon: Image, action: handleImageClick, title: "Insert Image" },
+        { icon: Image, action: handleImageClick, title: isUploadingImage ? "Uploading image..." : "Insert Image", disabled: isUploadingImage },
         { icon: Paperclip, action: handleAttachmentClick, title: "Attach File" },
         { divider: true },
         { icon: Undo, command: "undo", title: "Undo" },
@@ -735,10 +779,10 @@ export function EmailComposer({
                             </div>
                             <Button
                                 onClick={handleSaveTemplate}
-                                disabled={!newTemplateName.trim()}
+                                disabled={!newTemplateName.trim() || isSavingTemplate}
                                 className="w-full h-8 text-xs"
                             >
-                                Save Template
+                                {isSavingTemplate ? "Saving..." : "Save Template"}
                             </Button>
                         </div>
                     </PopoverContent>
@@ -785,13 +829,14 @@ export function EmailComposer({
                                 <button
                                     key={idx}
                                     type="button"
+                                    disabled={btn.disabled}
                                     onMouseDown={(e) => e.preventDefault()} // Prevent focus loss
                                     onClick={() =>
                                         btn.action
                                             ? btn.action()
                                             : execCommand(btn.command!, btn.value)
                                     }
-                                    className="p-2 hover:bg-gray-200 rounded transition-colors"
+                                    className="p-2 hover:bg-gray-200 rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
                                     title={btn.title}
                                 >
                                     {btn.icon && <btn.icon size={16} className="text-gray-600" />}
