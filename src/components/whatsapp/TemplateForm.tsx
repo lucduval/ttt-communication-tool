@@ -89,6 +89,10 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
         buttonText: "",
         buttonUrl: "",
         buttonUrlVariable: "",
+        button2Type: "none" as typeof BUTTON_TYPES[number],
+        button2Text: "",
+        button2Url: "",
+        button2UrlVariable: "",
         visibility: "shared" as "private" | "shared",
     });
 
@@ -131,6 +135,10 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                 buttonText: initialData.buttonText || "",
                 buttonUrl: initialData.buttonUrl || "",
                 buttonUrlVariable: initialData.buttonUrlVariable || "",
+                button2Type: (initialData.button2Type as typeof BUTTON_TYPES[number]) || "none",
+                button2Text: initialData.button2Text || "",
+                button2Url: initialData.button2Url || "",
+                button2UrlVariable: initialData.button2UrlVariable || "",
                 visibility: (initialData.visibility as "private" | "shared") ?? "shared",
             });
         }
@@ -227,6 +235,18 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
             setUploadError("Pick a Dynamics field to substitute for `{{1}}` in the button URL.");
             return;
         }
+        const isDynamicButton2 =
+            formData.button2Type === "url" && formData.button2Url.includes("{{1}}");
+        if (isDynamicButton2 && !formData.button2UrlVariable) {
+            setUploadError("Pick a Dynamics field to substitute for `{{1}}` in the 2nd button URL.");
+            return;
+        }
+        // Meta button positions are fixed by the approved template, so a 2nd
+        // URL button only makes sense when the 1st slot is also a URL button.
+        if (formData.button2Type === "url" && formData.buttonType !== "url") {
+            setUploadError("Configure Button #1 as a URL before adding Button #2.");
+            return;
+        }
 
         setIsSubmitting(true);
 
@@ -251,6 +271,10 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                 buttonText: formData.buttonType === "url" ? formData.buttonText : undefined,
                 buttonUrl: formData.buttonType === "url" ? formData.buttonUrl : undefined,
                 buttonUrlVariable: isDynamicButton ? formData.buttonUrlVariable : undefined,
+                button2Type: formData.button2Type,
+                button2Text: formData.button2Type === "url" ? formData.button2Text : undefined,
+                button2Url: formData.button2Type === "url" ? formData.button2Url : undefined,
+                button2UrlVariable: isDynamicButton2 ? formData.button2UrlVariable : undefined,
                 visibility: formData.visibility,
             };
 
@@ -591,10 +615,10 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                 </div>
             )}
 
-            {/* Template Button */}
+            {/* Template Button #1 */}
             <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
                 <h4 className="text-sm font-semibold text-blue-900 mb-3">
-                    Template Button
+                    Template Button #1
                 </h4>
                 <p className="text-xs text-blue-700 mb-4">
                     If your Meta template has a call-to-action URL button, configure it here. Use{" "}
@@ -705,6 +729,122 @@ export function TemplateForm({ initialData, onSuccess, onCancel }: TemplateFormP
                     </div>
                 )}
             </div>
+
+            {/* Template Button #2 — Meta allows up to 2 URL buttons per
+                template. Only meaningful when Button #1 is also a URL. */}
+            {formData.buttonType === "url" && (
+                <div className="p-4 bg-blue-50 rounded-lg border border-blue-100">
+                    <h4 className="text-sm font-semibold text-blue-900 mb-3">
+                        Template Button #2 (optional)
+                    </h4>
+                    <p className="text-xs text-blue-700 mb-4">
+                        Add a second URL button if your Meta template has one. Same rules apply — include{" "}
+                        <span className="font-mono">{`{{1}}`}</span> for a dynamic link.
+                    </p>
+                    <div className="grid grid-cols-2 gap-4">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Button Type
+                            </label>
+                            <select
+                                value={formData.button2Type}
+                                onChange={(e) => {
+                                    const next = e.target.value as typeof BUTTON_TYPES[number];
+                                    setFormData((prev) => ({
+                                        ...prev,
+                                        button2Type: next,
+                                        ...(next === "none"
+                                            ? { button2Text: "", button2Url: "", button2UrlVariable: "" }
+                                            : {}),
+                                    }));
+                                }}
+                                className="w-full px-3 py-2 border border-gray-200 rounded-md"
+                            >
+                                {BUTTON_TYPES.map((type) => (
+                                    <option key={type} value={type}>
+                                        {type === "none" ? "None" : "URL"}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        {formData.button2Type === "url" && (
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    Button Label
+                                </label>
+                                <input
+                                    type="text"
+                                    value={formData.button2Text}
+                                    onChange={(e) =>
+                                        setFormData({ ...formData, button2Text: e.target.value })
+                                    }
+                                    placeholder="e.g. Learn more"
+                                    className="w-full px-3 py-2 border border-gray-200 rounded-md"
+                                />
+                                <p className="text-xs text-gray-400 mt-1">
+                                    Must match the label approved in Meta.
+                                </p>
+                            </div>
+                        )}
+                    </div>
+                    {formData.button2Type === "url" && (
+                        <div className="mt-4">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Button URL
+                            </label>
+                            <input
+                                type="text"
+                                value={formData.button2Url}
+                                onChange={(e) =>
+                                    setFormData({
+                                        ...formData,
+                                        button2Url: e.target.value,
+                                        button2UrlVariable: e.target.value.includes("{{1}}")
+                                            ? formData.button2UrlVariable
+                                            : "",
+                                    })
+                                }
+                                placeholder="https://riivo.io/learn-more"
+                                className="w-full px-3 py-2 border border-gray-200 rounded-md font-mono text-sm"
+                            />
+                            <p className="text-xs text-gray-400 mt-1">
+                                Must match the URL approved in Meta. Include{" "}
+                                <span className="font-mono">{`{{1}}`}</span> for a dynamic suffix.
+                            </p>
+                            {formData.button2Url.includes("{{1}}") && (
+                                <div className="mt-3 flex items-center gap-3">
+                                    <div className="w-1/3 flex items-center justify-end">
+                                        <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs font-mono font-medium">
+                                            {`{{1}}`}
+                                        </span>
+                                    </div>
+                                    <div className="text-gray-400">→</div>
+                                    <div className="flex-1">
+                                        <select
+                                            value={formData.button2UrlVariable}
+                                            onChange={(e) =>
+                                                setFormData({
+                                                    ...formData,
+                                                    button2UrlVariable: e.target.value,
+                                                })
+                                            }
+                                            className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm"
+                                            required
+                                        >
+                                            <option value="">Select Dynamics Field...</option>
+                                            {DYNAMICS_FIELDS.map((field) => (
+                                                <option key={field.value} value={field.value}>
+                                                    {field.label} ({field.value})
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* Visibility */}
             <div className="flex items-center gap-3 p-3 bg-gray-50 rounded-lg border border-gray-100">

@@ -36,23 +36,41 @@ export function WhatsAppPreview({
         return message;
     };
 
-    // Resolve the button URL by substituting {{1}} with the value of the
-    // mapped Dynamics variable. Returns the URL exactly as it will be sent —
-    // useful for confirming the dynamic link is wired correctly before a
-    // test send.
-    const resolveButtonUrl = (): string | null => {
-        if (!template || template.buttonType !== "url" || !template.buttonUrl) return null;
-        if (!template.buttonUrl.includes("{{1}}")) return template.buttonUrl;
-        const varName = template.buttonUrlVariable;
-        if (!varName) return template.buttonUrl;
+    // Resolve a button URL by substituting {{1}} with the value of the mapped
+    // Dynamics variable. Returns the URL exactly as it will be sent — useful
+    // for confirming the dynamic link is wired correctly before a test send.
+    const resolveUrl = (url?: string, varName?: string): string | null => {
+        if (!url) return null;
+        if (!url.includes("{{1}}")) return url;
+        if (!varName) return url;
         const value = variableValues[varName];
-        if (!value) return template.buttonUrl.replace("{{1}}", `[${varName}]`);
-        return template.buttonUrl.replace("{{1}}", value);
+        if (!value) return url.replace("{{1}}", `[${varName}]`);
+        return url.replace("{{1}}", value);
     };
 
-    const buttonUrl = resolveButtonUrl();
-    const hasButton = template?.buttonType === "url" && !!template.buttonText && !!template.buttonUrl;
-    const isDynamicButton = !!template?.buttonUrl?.includes("{{1}}");
+    type ResolvedButton = { text: string; url: string; isDynamic: boolean };
+    const buttons: ResolvedButton[] = [];
+    if (template?.buttonType === "url" && template.buttonText && template.buttonUrl) {
+        const resolved = resolveUrl(template.buttonUrl, template.buttonUrlVariable);
+        if (resolved !== null) {
+            buttons.push({
+                text: template.buttonText,
+                url: resolved,
+                isDynamic: template.buttonUrl.includes("{{1}}"),
+            });
+        }
+    }
+    if (template?.button2Type === "url" && template.button2Text && template.button2Url) {
+        const resolved = resolveUrl(template.button2Url, template.button2UrlVariable);
+        if (resolved !== null) {
+            buttons.push({
+                text: template.button2Text,
+                url: resolved,
+                isDynamic: template.button2Url.includes("{{1}}"),
+            });
+        }
+    }
+    const hasButton = buttons.length > 0;
 
     return (
         <div className="flex justify-center">
@@ -86,27 +104,32 @@ export function WhatsAppPreview({
                                         })}
                                     </p>
                                 </div>
-                                {hasButton && (
+                                {buttons.map((btn, i) => (
                                     <div
+                                        key={i}
                                         className="border-t border-gray-100 px-3 py-2 flex items-center justify-center gap-1.5 text-[#00A884] text-sm font-medium"
-                                        title={buttonUrl ?? undefined}
+                                        title={btn.url}
                                     >
                                         <ExternalLink size={14} />
-                                        {template!.buttonText}
+                                        {btn.text}
                                     </div>
-                                )}
+                                ))}
                             </div>
                         </div>
                     </div>
 
-                    {/* Resolved button URL — separate from the bubble so the
+                    {/* Resolved button URLs — separate from the bubble so each
                         full URL is visible without truncating the chat bubble. */}
-                    {hasButton && buttonUrl && (
-                        <div className="bg-white px-4 py-2 border-t border-gray-200">
-                            <p className="text-[10px] text-gray-500 uppercase tracking-wide">
-                                {isDynamicButton ? "Dynamic link" : "Link"}
-                            </p>
-                            <p className="text-xs font-mono text-gray-700 break-all">{buttonUrl}</p>
+                    {hasButton && (
+                        <div className="bg-white px-4 py-2 border-t border-gray-200 space-y-2">
+                            {buttons.map((btn, i) => (
+                                <div key={i}>
+                                    <p className="text-[10px] text-gray-500 uppercase tracking-wide">
+                                        {btn.isDynamic ? "Dynamic link" : "Link"}{buttons.length > 1 ? ` #${i + 1}` : ""}
+                                    </p>
+                                    <p className="text-xs font-mono text-gray-700 break-all">{btn.url}</p>
+                                </div>
+                            ))}
                         </div>
                     )}
 

@@ -104,16 +104,22 @@ export interface TemplateLike {
      */
     headerMediaId?: string;
     /**
-     * Optional URL button. `buttonUrl` is the URL pattern as approved in Meta;
-     * if it contains `{{1}}`, the button is dynamic and `buttonUrlVariable`
-     * names the logical variable whose value replaces the placeholder. Static
-     * URL buttons (no `{{1}}`) need no send-time component — Meta uses the
-     * approved URL directly.
+     * Optional URL buttons. Meta allows up to two URL buttons per template,
+     * occupying button-array positions 0 and 1 in the approved template. Each
+     * slot's `*Url` is the URL pattern as approved in Meta; if it contains
+     * `{{1}}`, that button is dynamic and `*UrlVariable` names the logical
+     * variable whose value replaces the placeholder. Static URL buttons (no
+     * `{{1}}`) need no send-time component — Meta uses the approved URL
+     * directly.
      */
     buttonType?: string;
     buttonText?: string;
     buttonUrl?: string;
     buttonUrlVariable?: string;
+    button2Type?: string;
+    button2Text?: string;
+    button2Url?: string;
+    button2UrlVariable?: string;
 }
 
 interface MetaTextParameter {
@@ -184,36 +190,56 @@ function buildBodyParameters(template: TemplateLike, allVariables: Record<string
 }
 
 /**
- * Detect whether the template URL button has a `{{1}}` placeholder. URL
- * buttons in Meta are always positional with a single variable, so a literal
- * `{{1}}` substring is the unambiguous signal that the button is dynamic.
+ * Detect whether a URL button is dynamic. URL buttons in Meta are always
+ * positional with a single variable, so a literal `{{1}}` substring is the
+ * unambiguous signal that the button is dynamic.
  */
+function isDynamicUrl(type: string | undefined, url: string | undefined): boolean {
+    return type === "url" && !!url && url.includes("{{1}}");
+}
+
 export function isDynamicUrlButton(template: TemplateLike): boolean {
-    return template.buttonType === "url" && !!template.buttonUrl && template.buttonUrl.includes("{{1}}");
+    return isDynamicUrl(template.buttonType, template.buttonUrl);
+}
+
+export function isDynamicUrlButton2(template: TemplateLike): boolean {
+    return isDynamicUrl(template.button2Type, template.button2Url);
 }
 
 /**
- * Build the URL-button component for a dynamic URL button. Returns undefined
- * for static URL buttons (Meta needs no component since the URL is fixed) and
- * for templates with no button.
+ * Build URL-button components for the template's URL buttons. Only dynamic
+ * URL buttons need a component on send (Meta uses the approved URL directly
+ * for static buttons). Each button's Meta index is its position in the
+ * template's button array: button #1 → "0", button #2 → "1".
  *
  * Per Meta's spec, the parameter value is the suffix that replaces `{{1}}` in
- * the approved URL — NOT the full URL. The full URL is reconstructed by Meta
- * by concatenating the static prefix with the parameter value.
+ * the approved URL — NOT the full URL. Meta reconstructs the URL by
+ * concatenating the static prefix with this value.
  */
-function buildButtonComponent(
+function buildButtonComponents(
     template: TemplateLike,
     allVariables: Record<string, string>
-): MetaComponent | undefined {
-    if (!isDynamicUrlButton(template)) return undefined;
-    const varName = template.buttonUrlVariable;
-    const value = varName ? allVariables[varName] ?? "" : "";
-    return {
-        type: "button",
-        sub_type: "url",
-        index: "0",
-        parameters: [{ type: "text", text: value }],
-    };
+): MetaComponent[] {
+    const components: MetaComponent[] = [];
+    if (isDynamicUrlButton(template)) {
+        const varName = template.buttonUrlVariable;
+        components.push({
+            type: "button",
+            sub_type: "url",
+            index: "0",
+            parameters: [{ type: "text", text: varName ? allVariables[varName] ?? "" : "" }],
+        });
+    }
+    if (isDynamicUrlButton2(template)) {
+        const varName = template.button2UrlVariable;
+        components.push({
+            type: "button",
+            sub_type: "url",
+            index: "1",
+            parameters: [{ type: "text", text: varName ? allVariables[varName] ?? "" : "" }],
+        });
+    }
+    return components;
 }
 
 function buildHeaderComponent(template: TemplateLike): MetaComponent | undefined {
@@ -269,8 +295,7 @@ export function buildTemplateRequestBody(
         components.push({ type: "body", parameters: buildBodyParameters(template, allVariables) });
     }
 
-    const button = buildButtonComponent(template, allVariables);
-    if (button) components.push(button);
+    components.push(...buildButtonComponents(template, allVariables));
 
     return {
         messaging_product: "whatsapp",

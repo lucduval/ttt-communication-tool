@@ -80,6 +80,10 @@ export const create = mutation({
         buttonText: v.optional(v.string()),
         buttonUrl: v.optional(v.string()),
         buttonUrlVariable: v.optional(v.string()),
+        button2Type: v.optional(v.string()),
+        button2Text: v.optional(v.string()),
+        button2Url: v.optional(v.string()),
+        button2UrlVariable: v.optional(v.string()),
         visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))),
     },
     handler: async (ctx, args) => {
@@ -118,6 +122,10 @@ export const update = mutation({
         buttonText: v.optional(v.string()),
         buttonUrl: v.optional(v.string()),
         buttonUrlVariable: v.optional(v.string()),
+        button2Type: v.optional(v.string()),
+        button2Text: v.optional(v.string()),
+        button2Url: v.optional(v.string()),
+        button2UrlVariable: v.optional(v.string()),
         visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))),
     },
     handler: async (ctx, args) => {

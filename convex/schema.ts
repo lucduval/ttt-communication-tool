@@ -147,14 +147,20 @@ export default defineSchema({
         headerMediaIdUploadedAt: v.optional(v.number()),
         headerMediaSourceUrl: v.optional(v.string()),
         headerMediaMimeType: v.optional(v.string()),
-        // URL button support. Meta allows one URL button per template; the URL
-        // is either static (constant for every recipient) or dynamic (contains
-        // a `{{1}}` placeholder that is replaced with a per-recipient value at
-        // send time). Static URL buttons require no payload component on send.
+        // URL button support. Meta allows up to two URL buttons per template;
+        // each is either static (constant for every recipient) or dynamic
+        // (contains a `{{1}}` placeholder replaced with a per-recipient value at
+        // send time). Static URL buttons need no payload component on send.
+        // Field order in the approved Meta template is positional: button #1
+        // → Meta index 0, button #2 → Meta index 1.
         buttonType: v.optional(v.string()), // "none" | "url"
         buttonText: v.optional(v.string()), // display label as approved in Meta, e.g. "Share with a friend"
         buttonUrl: v.optional(v.string()), // URL pattern approved in Meta, may contain {{1}}
         buttonUrlVariable: v.optional(v.string()), // logical variable name (e.g. "riivo_referralcode") whose value replaces {{1}}; unset for static URLs
+        button2Type: v.optional(v.string()), // "none" | "url"
+        button2Text: v.optional(v.string()),
+        button2Url: v.optional(v.string()),
+        button2UrlVariable: v.optional(v.string()),
         lastUpdatedAt: v.number(),
         createdBy: v.optional(v.string()), // Convex user _id of creator
         visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))), // undefined treated as "shared"

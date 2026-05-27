@@ -281,6 +281,107 @@ describe('buildTemplateRequestBody', () => {
         });
         expect(body.template.components!.map((c) => c.type)).toEqual(['header', 'body', 'button']);
     });
+
+    it('emits both button components at index 0 and 1 when both URL buttons are dynamic', () => {
+        const template: TemplateLike = {
+            ...baseTemplate,
+            buttonType: 'url',
+            buttonText: 'Share',
+            buttonUrl: 'https://riivo.io/refer?code={{1}}',
+            buttonUrlVariable: 'riivo_referralcode',
+            button2Type: 'url',
+            button2Text: 'Profile',
+            button2Url: 'https://riivo.io/u/{{1}}',
+            button2UrlVariable: 'accountnumber',
+        };
+        const body = buildTemplateRequestBody(template, '27821234567', {
+            '1': 'A',
+            '2': 'B',
+            riivo_referralcode: 'ref123',
+            accountnumber: 'acc456',
+        });
+        const buttons = body.template.components!.filter((c) => c.type === 'button');
+        expect(buttons).toEqual([
+            {
+                type: 'button',
+                sub_type: 'url',
+                index: '0',
+                parameters: [{ type: 'text', text: 'ref123' }],
+            },
+            {
+                type: 'button',
+                sub_type: 'url',
+                index: '1',
+                parameters: [{ type: 'text', text: 'acc456' }],
+            },
+        ]);
+    });
+
+    it('emits only the dynamic 2nd button component (index 1) when button #1 is static', () => {
+        const template: TemplateLike = {
+            ...baseTemplate,
+            buttonType: 'url',
+            buttonText: 'Visit',
+            buttonUrl: 'https://riivo.io/about',
+            button2Type: 'url',
+            button2Text: 'Profile',
+            button2Url: 'https://riivo.io/u/{{1}}',
+            button2UrlVariable: 'accountnumber',
+        };
+        const body = buildTemplateRequestBody(template, '27821234567', {
+            '1': 'A',
+            '2': 'B',
+            accountnumber: 'acc789',
+        });
+        const buttons = body.template.components!.filter((c) => c.type === 'button');
+        expect(buttons).toEqual([
+            {
+                type: 'button',
+                sub_type: 'url',
+                index: '1',
+                parameters: [{ type: 'text', text: 'acc789' }],
+            },
+        ]);
+    });
+
+    it('omits both button components when both URL buttons are static', () => {
+        const template: TemplateLike = {
+            ...baseTemplate,
+            buttonType: 'url',
+            buttonText: 'Visit',
+            buttonUrl: 'https://riivo.io/about',
+            button2Type: 'url',
+            button2Text: 'Pricing',
+            button2Url: 'https://riivo.io/pricing',
+        };
+        const body = buildTemplateRequestBody(template, '27821234567', { '1': 'A', '2': 'B' });
+        expect(body.template.components!.every((c) => c.type !== 'button')).toBe(true);
+    });
+
+    it('emits only the dynamic 1st button component (index 0) when button #2 is absent', () => {
+        const template: TemplateLike = {
+            ...baseTemplate,
+            buttonType: 'url',
+            buttonText: 'Share',
+            buttonUrl: 'https://riivo.io/refer?code={{1}}',
+            buttonUrlVariable: 'riivo_referralcode',
+            button2Type: 'none',
+        };
+        const body = buildTemplateRequestBody(template, '27821234567', {
+            '1': 'A',
+            '2': 'B',
+            riivo_referralcode: 'solo',
+        });
+        const buttons = body.template.components!.filter((c) => c.type === 'button');
+        expect(buttons).toEqual([
+            {
+                type: 'button',
+                sub_type: 'url',
+                index: '0',
+                parameters: [{ type: 'text', text: 'solo' }],
+            },
+        ]);
+    });
 });
 
 describe('inferMimeFromUrl', () => {

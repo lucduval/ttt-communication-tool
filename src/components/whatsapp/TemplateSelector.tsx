@@ -135,7 +135,11 @@ export function TemplateSelector({
             )}
 
             {/* Variable Inputs */}
-            {selectedTemplate && (selectedTemplate.variables.length > 0 || (selectedTemplate.buttonUrl?.includes("{{1}}") && selectedTemplate.buttonUrlVariable)) && (
+            {selectedTemplate && (
+                selectedTemplate.variables.length > 0 ||
+                (selectedTemplate.buttonUrl?.includes("{{1}}") && selectedTemplate.buttonUrlVariable) ||
+                (selectedTemplate.button2Url?.includes("{{1}}") && selectedTemplate.button2UrlVariable)
+            ) && (
                 <div className="border-t border-gray-200 pt-6">
                     <h4 className="font-semibold text-gray-900 mb-4">
                         Fill in Template Variables
@@ -155,32 +159,43 @@ export function TemplateSelector({
                                 />
                             </div>
                         ))}
-                        {/* Dynamic button URL variable. Separate from body variables
-                            because the button's {{1}} placeholder lives in its own
-                            namespace — at bulk send time this is auto-filled from
+                        {/* Dynamic button URL variables. Separate from body variables
+                            because each button's {{1}} placeholder lives in its own
+                            namespace — at bulk send time these are auto-filled from
                             the contact's Dynamics record, but for a test send the
-                            user supplies it directly. */}
-                        {selectedTemplate.buttonUrl?.includes("{{1}}") &&
-                            selectedTemplate.buttonUrlVariable &&
-                            !selectedTemplate.variables.includes(selectedTemplate.buttonUrlVariable) && (
-                                <div key={`btn-${selectedTemplate.buttonUrlVariable}`}>
+                            user supplies them directly. */}
+                        {[
+                            {
+                                url: selectedTemplate.buttonUrl,
+                                varName: selectedTemplate.buttonUrlVariable,
+                                label: "Button link",
+                            },
+                            {
+                                url: selectedTemplate.button2Url,
+                                varName: selectedTemplate.button2UrlVariable,
+                                label: "Button link #2",
+                            },
+                        ].map(({ url, varName, label }) =>
+                            url?.includes("{{1}}") &&
+                            varName &&
+                            !selectedTemplate.variables.includes(varName) ? (
+                                <div key={`btn-${label}-${varName}`}>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                                        {selectedTemplate.buttonUrlVariable}
+                                        {varName}
                                         <span className="ml-2 text-[10px] font-normal text-blue-600 uppercase tracking-wide">
-                                            Button link
+                                            {label}
                                         </span>
                                     </label>
                                     <input
                                         type="text"
-                                        value={variableValues[selectedTemplate.buttonUrlVariable] || ""}
-                                        onChange={(e) =>
-                                            onVariableChange(selectedTemplate.buttonUrlVariable!, e.target.value)
-                                        }
-                                        placeholder={`Enter ${selectedTemplate.buttonUrlVariable}...`}
+                                        value={variableValues[varName] || ""}
+                                        onChange={(e) => onVariableChange(varName, e.target.value)}
+                                        placeholder={`Enter ${varName}...`}
                                         className="w-full px-3 py-2 border border-gray-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-[#1E3A5F]/20"
                                     />
                                 </div>
-                            )}
+                            ) : null
+                        )}
                     </div>
                     <p className="text-xs text-gray-400 mt-3">
                         Note: Variables like name and phone will be auto-filled from
