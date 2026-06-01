@@ -35,6 +35,9 @@ export interface FilterState {
     personalisedCampaignFilter: "all" | "sent" | "not_sent";
     // Bad debt filter (client-side)
     badDebtFilter: "all" | "has_debt" | "no_debt";
+    // Referral participants filter (client-side) — "referrers_only" targets the
+    // distinct contacts who have referred someone (values of _riivo_referredby_value)
+    referralFilter: "all" | "referrers_only";
     // Alphabetical name range for batch sending (e.g. "A" to "F")
     nameRangeStart: string | null;
     nameRangeEnd: string | null;
@@ -67,6 +70,11 @@ interface ContactFiltersProps {
      * bad-debt control and show the equivalent helper note.
      */
     ita34Active?: boolean;
+    /**
+     * When true, the referral-participants segmentation is currently active —
+     * disable the bad-debt and ITA34 controls (only one segmentation at a time).
+     */
+    referralActive?: boolean;
     /** When set, the consultant filter is locked to this Dynamics systemuser ID and cannot be changed */
     lockedConsultantId?: string;
     /** When provided, shows the personalised campaign filter and lists known campaign names */
@@ -81,6 +89,7 @@ export function ContactFilters({
     showITA34Filters,
     badDebtActive = false,
     ita34Active = false,
+    referralActive = false,
     lockedConsultantId,
     personalisedCampaignNames,
 }: ContactFiltersProps) {
@@ -207,6 +216,7 @@ export function ContactFilters({
             taxReturnYear: null,
             personalisedCampaignFilter: "all",
             badDebtFilter: "all",
+            referralFilter: "all",
             nameRangeStart: null,
             nameRangeEnd: null,
         });
@@ -235,6 +245,7 @@ export function ContactFilters({
         filters.taxReturnYear !== null ||
         filters.personalisedCampaignFilter !== "all" ||
         filters.badDebtFilter !== "all" ||
+        filters.referralFilter !== "all" ||
         filters.nameRangeStart !== null ||
         filters.nameRangeEnd !== null;
 
@@ -613,7 +624,7 @@ export function ContactFilters({
                     </div>
 
                     {/* Bad Debt / Open Invoices filter */}
-                    <div className={`mt-4 pt-4 border-t border-red-200 bg-red-50/50 -mx-4 px-4 pb-3 rounded-b-lg ${ita34Active ? "opacity-50" : ""}`}>
+                    <div className={`mt-4 pt-4 border-t border-red-200 bg-red-50/50 -mx-4 px-4 pb-3 rounded-b-lg ${ita34Active || referralActive ? "opacity-50" : ""}`}>
                         <h4 className="font-semibold text-sm text-red-900 mb-3 flex items-center gap-1.5">
                             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" /></svg>
                             Bad Debt / Open Invoices
@@ -631,16 +642,50 @@ export function ContactFilters({
                                             e.target.value as FilterState["badDebtFilter"]
                                         )
                                     }
-                                    disabled={ita34Active}
-                                    className={`w-full bg-white border border-red-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-red-500/20 ${ita34Active ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                    disabled={ita34Active || referralActive}
+                                    className={`w-full bg-white border border-red-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-red-500/20 ${ita34Active || referralActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                 >
                                     <option value="all">All clients</option>
                                     <option value="has_debt">Has open invoices (bad debt)</option>
                                     <option value="no_debt">No open invoices</option>
                                 </select>
-                                {ita34Active && (
+                                {(ita34Active || referralActive) && (
                                     <p className="text-xs text-red-700 mt-1">
-                                        Disabled while the ITA34 filter is active — only one segmentation can be applied at a time.
+                                        Disabled while the {ita34Active ? "ITA34" : "referral"} filter is active — only one segmentation can be applied at a time.
+                                    </p>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Referral Participants filter */}
+                    <div className={`mt-4 pt-4 border-t border-emerald-200 bg-emerald-50/50 -mx-4 px-4 pb-3 rounded-b-lg ${badDebtActive || ita34Active ? "opacity-50" : ""}`}>
+                        <h4 className="font-semibold text-sm text-emerald-900 mb-3 flex items-center gap-1.5">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4-4 4 4 0 004 4zm6 0a3 3 0 10-2.83-4" /></svg>
+                            Referral Participants
+                        </h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
+                                    Referral Status
+                                </label>
+                                <select
+                                    value={filters.referralFilter}
+                                    onChange={(e) =>
+                                        updateFilter(
+                                            "referralFilter",
+                                            e.target.value as FilterState["referralFilter"]
+                                        )
+                                    }
+                                    disabled={badDebtActive || ita34Active}
+                                    className={`w-full bg-white border border-emerald-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-emerald-500/20 ${badDebtActive || ita34Active ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                >
+                                    <option value="all">All contacts</option>
+                                    <option value="referrers_only">Referrers only (people who referred someone)</option>
+                                </select>
+                                {(badDebtActive || ita34Active) && (
+                                    <p className="text-xs text-emerald-700 mt-1">
+                                        Disabled while the {badDebtActive ? "bad debt" : "ITA34"} filter is active — only one segmentation can be applied at a time.
                                     </p>
                                 )}
                             </div>
@@ -697,14 +742,14 @@ export function ContactFilters({
                     )}
 
                     {ita34Visible && (
-                        <div className={`mt-4 pt-4 border-t border-amber-200 bg-amber-50/50 -mx-4 px-4 pb-2 rounded-b-lg ${badDebtActive ? "opacity-50" : ""}`}>
+                        <div className={`mt-4 pt-4 border-t border-amber-200 bg-amber-50/50 -mx-4 px-4 pb-2 rounded-b-lg ${badDebtActive || referralActive ? "opacity-50" : ""}`}>
                             <h4 className="font-semibold text-sm text-amber-800 mb-3 flex items-center gap-1.5">
                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
                                 ITA34 Tax Data Filters
                             </h4>
-                            {badDebtActive && (
+                            {(badDebtActive || referralActive) && (
                                 <p className="text-xs text-amber-700 mb-3">
-                                    Disabled while the Bad Debt filter is active — only one segmentation can be applied at a time.
+                                    Disabled while the {badDebtActive ? "Bad Debt" : "referral"} filter is active — only one segmentation can be applied at a time.
                                 </p>
                             )}
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -718,8 +763,8 @@ export function ContactFilters({
                                             placeholder="Min"
                                             value={filters.incomeMin ?? ""}
                                             onChange={(e) => updateFilter("incomeMin", e.target.value ? Number(e.target.value) : null)}
-                                            disabled={badDebtActive}
-                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                            disabled={badDebtActive || referralActive}
+                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive || referralActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                         />
                                         <span className="text-gray-400">-</span>
                                         <input
@@ -727,8 +772,8 @@ export function ContactFilters({
                                             placeholder="Max"
                                             value={filters.incomeMax ?? ""}
                                             onChange={(e) => updateFilter("incomeMax", e.target.value ? Number(e.target.value) : null)}
-                                            disabled={badDebtActive}
-                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                            disabled={badDebtActive || referralActive}
+                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive || referralActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                         />
                                     </div>
                                 </div>
@@ -743,8 +788,8 @@ export function ContactFilters({
                                             placeholder="Min"
                                             value={filters.retirementFundMin ?? ""}
                                             onChange={(e) => updateFilter("retirementFundMin", e.target.value ? Number(e.target.value) : null)}
-                                            disabled={badDebtActive}
-                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                            disabled={badDebtActive || referralActive}
+                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive || referralActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                         />
                                         <span className="text-gray-400">-</span>
                                         <input
@@ -752,8 +797,8 @@ export function ContactFilters({
                                             placeholder="Max"
                                             value={filters.retirementFundMax ?? ""}
                                             onChange={(e) => updateFilter("retirementFundMax", e.target.value ? Number(e.target.value) : null)}
-                                            disabled={badDebtActive}
-                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                            disabled={badDebtActive || referralActive}
+                                            className={`w-1/2 bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive || referralActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                         />
                                     </div>
                                 </div>
@@ -776,8 +821,8 @@ export function ContactFilters({
                                                 placeholder="e.g. 5000"
                                                 value={filters.taxReturnMin ?? ""}
                                                 onChange={(e) => updateFilter("taxReturnMin", e.target.value ? Number(e.target.value) : null)}
-                                                disabled={badDebtActive}
-                                                className={`w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                                disabled={badDebtActive || referralActive}
+                                                className={`w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive || referralActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                             />
                                             <p className="text-xs text-amber-700 mt-1">
                                                 Filters contacts with a SARS refund above this amount
@@ -792,8 +837,8 @@ export function ContactFilters({
                                                 placeholder={`${new Date().getFullYear() - 1} (previous year)`}
                                                 value={filters.taxReturnYear ?? ""}
                                                 onChange={(e) => updateFilter("taxReturnYear", e.target.value ? Number(e.target.value) : null)}
-                                                disabled={badDebtActive}
-                                                className={`w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive ? "cursor-not-allowed bg-gray-100" : ""}`}
+                                                disabled={badDebtActive || referralActive}
+                                                className={`w-full bg-white border border-amber-300 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-amber-500/20 ${badDebtActive || referralActive ? "cursor-not-allowed bg-gray-100" : ""}`}
                                             />
                                             <p className="text-xs text-amber-700 mt-1">
                                                 Leave blank to default to {new Date().getFullYear() - 1}
@@ -884,6 +929,11 @@ export function ContactFilters({
                             {filters.badDebtFilter === "no_debt" && (
                                 <Badge status="success">
                                     No open invoices
+                                </Badge>
+                            )}
+                            {filters.referralFilter === "referrers_only" && (
+                                <Badge status="success">
+                                    Referrers only
                                 </Badge>
                             )}
                             {filters.personalisedCampaignFilter === "sent" && (

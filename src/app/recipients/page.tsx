@@ -61,6 +61,7 @@ export default function RecipientsPage() {
         taxReturnYear: null,
         personalisedCampaignFilter: "all",
         badDebtFilter: "all",
+        referralFilter: "all",
         nameRangeStart: null,
         nameRangeEnd: null,
     };
@@ -80,6 +81,8 @@ export default function RecipientsPage() {
 
     // For bad debt mode: all results loaded at once (same as ITA34/TaxReturn pattern)
     const allBadDebtContactsRef = useRef<Contact[]>([]);
+    // For referral-participants mode: all referrer contacts loaded at once
+    const allReferralContactsRef = useRef<Contact[]>([]);
 
     // Derive contact IDs for the current page to look up personalised campaign history
     const visibleContactIds = useMemo(() => contacts.map((c) => c.id), [contacts]);
@@ -127,6 +130,7 @@ export default function RecipientsPage() {
     const fetchLeads = useAction(api.actions.dynamics.fetchLeads);
     const getLeadCount = useAction(api.actions.dynamics.getLeadCount);
     const fetchContactsByBadDebt = useAction(api.actions.dynamics.fetchContactsByBadDebt);
+    const fetchReferralParticipants = useAction(api.actions.dynamics.fetchReferralParticipants);
 
     // Stabilise action refs so useCallback doesn't churn on every render
     const fetchContactsRef = useRef(fetchContacts);
@@ -134,13 +138,16 @@ export default function RecipientsPage() {
     const fetchLeadsRef = useRef(fetchLeads);
     const getLeadCountRef = useRef(getLeadCount);
     const fetchContactsByBadDebtRef = useRef(fetchContactsByBadDebt);
+    const fetchReferralParticipantsRef = useRef(fetchReferralParticipants);
     useEffect(() => { fetchContactsRef.current = fetchContacts; });
     useEffect(() => { getContactCountRef.current = getContactCount; });
     useEffect(() => { fetchLeadsRef.current = fetchLeads; });
     useEffect(() => { getLeadCountRef.current = getLeadCount; });
     useEffect(() => { fetchContactsByBadDebtRef.current = fetchContactsByBadDebt; });
+    useEffect(() => { fetchReferralParticipantsRef.current = fetchReferralParticipants; });
 
     const hasBadDebtFilter = filters.badDebtFilter === "has_debt";
+    const hasReferralFilter = filters.referralFilter === "referrers_only";
 
     const totalPages = totalCount ? Math.ceil(totalCount / ITEMS_PER_PAGE) : 1;
 
@@ -183,6 +190,30 @@ export default function RecipientsPage() {
 
                 setContacts(leadsResult.contacts as Contact[]);
                 setTotalCount(countResult.count);
+                setCurrentPage(page);
+            } else if (hasReferralFilter) {
+                const odataFilter = buildODataFilter(filters);
+                const result = await fetchReferralParticipantsRef.current({
+                    filter: odataFilter,
+                    search: filters.search || undefined,
+                    clientType: filters.clientType || undefined,
+                    entityType: filters.entityType ?? undefined,
+                    bank: filters.bank ?? undefined,
+                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                    province: filters.province || undefined,
+                    geographicLocation: filters.geographicLocation ?? undefined,
+                    ageMin: filters.ageMin ?? undefined,
+                    ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
+                });
+                const allContacts = result.contacts as Contact[];
+                allReferralContactsRef.current = allContacts;
+                setTotalCount(result.totalCount);
+
+                // Client-side pagination slice
+                const start = (page - 1) * ITEMS_PER_PAGE;
+                setContacts(allContacts.slice(start, start + ITEMS_PER_PAGE));
                 setCurrentPage(page);
             } else if (hasBadDebtFilter) {
                 console.log("[loadContacts] → BAD DEBT branch entered");
@@ -264,13 +295,21 @@ export default function RecipientsPage() {
             setIsLoading(false);
         }
     // Actions are accessed via stable refs — only re-create when filter values change
-    }, [filters, leadFilters, audience, hasBadDebtFilter]);
+    }, [filters, leadFilters, audience, hasBadDebtFilter, hasReferralFilter]);
 
     const handlePageChange = (page: number) => {
         // For bad debt mode, paginate client-side from the cached full set
         if (hasBadDebtFilter && allBadDebtContactsRef.current.length > 0) {
             const start = (page - 1) * ITEMS_PER_PAGE;
             setContacts(allBadDebtContactsRef.current.slice(start, start + ITEMS_PER_PAGE));
+            setCurrentPage(page);
+            window.scrollTo({ top: 0, behavior: "smooth" });
+            return;
+        }
+        // For referral mode, paginate client-side from the cached full set
+        if (hasReferralFilter && allReferralContactsRef.current.length > 0) {
+            const start = (page - 1) * ITEMS_PER_PAGE;
+            setContacts(allReferralContactsRef.current.slice(start, start + ITEMS_PER_PAGE));
             setCurrentPage(page);
             window.scrollTo({ top: 0, behavior: "smooth" });
             return;
@@ -394,6 +433,8 @@ export default function RecipientsPage() {
                                 }
                                 lockedConsultantId={lockedConsultantId}
                                 personalisedCampaignNames={personalisedCampaignNames}
+                                badDebtActive={hasBadDebtFilter}
+                                referralActive={hasReferralFilter}
                             />
                         )}
                         {audience === "leads" && (

@@ -85,6 +85,7 @@ const INITIAL_FILTERS: FilterState = {
     taxReturnYear: null,
     personalisedCampaignFilter: "all",
     badDebtFilter: "all",
+    referralFilter: "all",
     nameRangeStart: null,
     nameRangeEnd: null,
 };
@@ -288,6 +289,7 @@ export default function NewCampaignPage() {
     const fetchLeads = useAction(api.actions.dynamics.fetchLeads);
     const getLeadCount = useAction(api.actions.dynamics.getLeadCount);
     const fetchContactsByBadDebt = useAction(api.actions.dynamics.fetchContactsByBadDebt);
+    const fetchReferralParticipants = useAction(api.actions.dynamics.fetchReferralParticipants);
 
     // Build channel-appropriate filter
     const getChannelFilter = useCallback(() => {
@@ -313,6 +315,7 @@ export default function NewCampaignPage() {
 
     const hasTaxReturnFilters = filters.taxReturnMin !== null;
     const hasBadDebtFilter = filters.badDebtFilter === "has_debt";
+    const hasReferralFilter = filters.referralFilter === "referrers_only";
 
     const loadContacts = useCallback(async (append: boolean = false) => {
         try {
@@ -431,6 +434,35 @@ export default function NewCampaignPage() {
                         setContacts(prev => [...prev, ...leadsResult.contacts as Contact[]]);
                         setNextPageToken(leadsResult.nextPage ?? null);
                     }
+                }
+            } else if (hasReferralFilter) {
+                if (!append) {
+                    const channelFilter = getChannelFilter();
+                    const result = await fetchReferralParticipants({
+                        filter: channelFilter,
+                        search: filters.search || undefined,
+                        clientType: filters.clientType || undefined,
+                        entityType: filters.entityType ?? undefined,
+                        bank: filters.bank ?? undefined,
+                        sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                        province: filters.province || undefined,
+                        geographicLocation: filters.geographicLocation ?? undefined,
+                        ageMin: filters.ageMin ?? undefined,
+                        ageMax: filters.ageMax ?? undefined,
+                        ownerId: filters.ownerId || undefined,
+                        industryId: filters.industryId || undefined,
+                    });
+                    const allContacts = result.contacts as Contact[];
+                    allFilteredContactsRef.current = allContacts;
+                    setTotalCount(result.totalCount);
+                    setClientSideOffset(LOAD_MORE_SIZE);
+                    setContacts(allContacts.slice(0, LOAD_MORE_SIZE));
+                } else {
+                    setClientSideOffset(prev => {
+                        const newOffset = prev + LOAD_MORE_SIZE;
+                        setContacts(allFilteredContactsRef.current.slice(0, newOffset));
+                        return newOffset;
+                    });
                 }
             } else if (hasBadDebtFilter) {
                 if (!append) {
@@ -583,7 +615,7 @@ export default function NewCampaignPage() {
             setIsLoadingContacts(false);
             setIsLoadingMore(false);
         }
-    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, fetchContactsByBadDebt, fetchLeads, getLeadCount, filters, leadFilters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, hasBadDebtFilter, nextPageToken, canAccessPersonalised]);
+    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, fetchContactsByBadDebt, fetchReferralParticipants, fetchLeads, getLeadCount, filters, leadFilters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, hasBadDebtFilter, hasReferralFilter, nextPageToken, canAccessPersonalised]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -1014,6 +1046,7 @@ export default function NewCampaignPage() {
                 setSelectedContacts(displayedContacts);
                 // Do NOT set isSelectAllActive — that would bypass the client-side filter
             } else if (
+                hasReferralFilter ||
                 hasBadDebtFilter ||
                 ((campaignChannel === "personalised" || (campaignChannel === "email" && canAccessPersonalised)) && hasITA34Filters) ||
                 (campaignChannel === "personalised" && hasTaxReturnFilters)
@@ -1080,6 +1113,7 @@ export default function NewCampaignPage() {
     // Bad debt, ITA34, and tax return filters all fetch into allFilteredContactsRef
     // and paginate client-side, so they share the same "client-side" mode.
     const isClientSideMode = audience === "employees" ||
+        hasReferralFilter ||
         hasBadDebtFilter ||
         (campaignChannel === "personalised" && (hasITA34Filters || hasTaxReturnFilters)) ||
         (campaignChannel === "email" && canAccessPersonalised && hasITA34Filters);
@@ -1374,6 +1408,7 @@ export default function NewCampaignPage() {
                                             }
                                             badDebtActive={hasBadDebtFilter}
                                             ita34Active={hasITA34Filters}
+                                            referralActive={hasReferralFilter}
                                             personalisedCampaignNames={personalisedCampaignNames}
                                         />
                                     )}
