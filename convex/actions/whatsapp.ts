@@ -18,6 +18,7 @@ import {
     type MetaWhatsAppConfig,
     type TemplateLike,
 } from "../lib/whatsapp";
+import { notifyTinaOfOutboundTemplate, substitutedBodyVariables } from "../lib/notifyTina";
 
 /**
  * Decide whether the template needs a fresh media-id upload and, if so, run
@@ -116,6 +117,18 @@ export const sendTestWhatsApp = action({
                 `Meta WhatsApp send failed (code ${result.errorCode ?? "n/a"}, ${result.attempts} attempts): ${result.errorMessage}`
             );
         }
+
+        // Seed Tina's history with the test send too, so replying to a test
+        // template behaves identically to replying to a campaign send. Awaited
+        // best-effort; never throws.
+        await notifyTinaOfOutboundTemplate({
+            phone: toDigits,
+            templateName: template.name,
+            templateLanguage: template.language,
+            templateVariables: substitutedBodyVariables(templateForSend.variables, allVariables),
+            senderMessageId: result.wamid,
+            sender: "manual_test",
+        });
 
         return {
             success: true,
@@ -221,6 +234,21 @@ export const sendBulkWhatsApp = action({
                         recipientId: recipient.id,
                         success: true,
                         messageSid: result.wamid,
+                    });
+
+                    // Seed Tina's history with this outbound. Best-effort, never
+                    // throws; runs in parallel across recipients (each is its own
+                    // task and the rate-limit token was already released).
+                    await notifyTinaOfOutboundTemplate({
+                        phone: toDigits,
+                        templateName: template.name,
+                        templateLanguage: template.language,
+                        templateVariables: substitutedBodyVariables(
+                            templateForSend.variables,
+                            allVariables
+                        ),
+                        senderMessageId: result.wamid,
+                        sender: "campaign_whatsapp",
                     });
                 } else {
                     failedCount++;

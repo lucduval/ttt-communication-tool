@@ -34,6 +34,7 @@ import type * as lib_emailLayout from "../lib/emailLayout.js";
 import type * as lib_emailTemplatePersonalised from "../lib/emailTemplatePersonalised.js";
 import type * as lib_graph_client from "../lib/graph_client.js";
 import type * as lib_logoData from "../lib/logoData.js";
+import type * as lib_notifyTina from "../lib/notifyTina.js";
 import type * as lib_retry from "../lib/retry.js";
 import type * as lib_taxCalculator from "../lib/taxCalculator.js";
 import type * as lib_tracking_utils from "../lib/tracking_utils.js";
@@ -82,6 +83,7 @@ declare const fullApi: ApiFromModules<{
   "lib/emailTemplatePersonalised": typeof lib_emailTemplatePersonalised;
   "lib/graph_client": typeof lib_graph_client;
   "lib/logoData": typeof lib_logoData;
+  "lib/notifyTina": typeof lib_notifyTina;
   "lib/retry": typeof lib_retry;
   "lib/taxCalculator": typeof lib_taxCalculator;
   "lib/tracking_utils": typeof lib_tracking_utils;

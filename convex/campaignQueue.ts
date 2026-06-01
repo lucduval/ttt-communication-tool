@@ -17,6 +17,7 @@ import {
     type TemplateLike,
 } from "./lib/whatsapp";
 import { logEmailActivity, logWhatsAppActivity } from "./lib/dynamics_logging";
+import { notifyTinaOfOutboundTemplate, substitutedBodyVariables } from "./lib/notifyTina";
 
 /**
  * Queue batches for a campaign (called after startCampaign)
@@ -810,6 +811,24 @@ export const processWhatsAppBatch = internalAction({
                             recipientId: recipient.id,
                             success: true,
                             messageSid: result.wamid,
+                        });
+
+                        // Seed Tina's conversation history with this outbound so the
+                        // client's reply lands in context. Best-effort: never throws,
+                        // and the bot dedups by wamid. Awaited (not detached) so Convex
+                        // doesn't tear the action down before the fetch resolves; it
+                        // runs in parallel across recipients since each is its own task
+                        // and the rate-limit token was already released by limiter.schedule.
+                        await notifyTinaOfOutboundTemplate({
+                            phone: toDigits,
+                            templateName: template.name,
+                            templateLanguage: template.language,
+                            templateVariables: substitutedBodyVariables(
+                                templateForSend.variables,
+                                allVariables
+                            ),
+                            senderMessageId: result.wamid,
+                            sender: "campaign_whatsapp",
                         });
 
                         if (campaign.createDynamicsActivity) {
