@@ -755,6 +755,38 @@ export const processWhatsAppBatch = internalAction({
             let consecutiveTemplateErrors = 0;
             let templateAbortReason: string | null = null;
 
+            // Resolve template variables from each recipient's CRM record — never
+            // from the UI form. The template editor maps every variable (named or
+            // positional like "1"/"2") to a Dynamics field via variableMappings;
+            // that mapping is the source of truth at real send time. The UI
+            // "Fill in Template Variables" form only feeds test sends.
+            let variableMappings: Record<string, string> = {};
+            if (template.variableMappings) {
+                try {
+                    variableMappings = JSON.parse(template.variableMappings);
+                } catch {
+                    console.warn(`Invalid variableMappings JSON on template ${template._id}; resolving variables by name`);
+                }
+            }
+            // For each template variable, the Dynamics field to read. Falls back to
+            // the variable name itself (generic-by-field-name) for templates whose
+            // variable names already are logical field names (e.g. riivo_referralcode).
+            const varToField: Record<string, string> = {};
+            for (const varName of template.variables) {
+                varToField[varName] = variableMappings[varName] || varName;
+            }
+            // Dynamic URL buttons substitute {{1}} with a logical field's value too.
+            const buttonVars = [template.buttonUrlVariable, template.button2UrlVariable].filter(
+                (v): v is string => !!v
+            );
+
+            const neededFields = [...Object.values(varToField), ...buttonVars];
+            const { fetchContactFieldsByIds } = await import("./lib/dynamics_util");
+            const crmFieldMap = await fetchContactFieldsByIds(
+                batch.recipients.map((r: { id: string }) => r.id),
+                neededFields
+            );
+
             await Promise.all(
                 batch.recipients.map(async (recipient: { id: string; phone?: string; name: string; variables?: string }) => {
                     if (templateAbortReason) {
@@ -778,24 +810,37 @@ export const processWhatsAppBatch = internalAction({
                         return;
                     }
 
-                    let recipientVars: Record<string, string> = {};
-                    if (recipient.variables) {
-                        try {
-                            recipientVars = JSON.parse(recipient.variables);
-                        } catch {
-                            console.warn(`Invalid JSON in recipient variables for ${recipient.id}, using empty object`);
+                    const crm = crmFieldMap.get(recipient.id) ?? {};
+                    // Resolve a Dynamics field for this recipient, with sensible
+                    // fallbacks derived from the recipient record so name/phone
+                    // still work for non-contact audiences (leads/employees) that
+                    // have no Dynamics contact row.
+                    const resolveField = (field: string): string => {
+                        const fromCrm = crm[field];
+                        if (fromCrm) return fromCrm;
+                        switch (field) {
+                            case "fullname":
+                                return recipient.name;
+                            case "firstname":
+                                return recipient.name.split(" ")[0];
+                            case "lastname":
+                                return recipient.name.split(" ").slice(1).join(" ");
+                            case "mobilephone":
+                                return recipient.phone || "";
+                            default:
+                                return "";
                         }
-                    }
-
-                    const allVariables: Record<string, string> = {
-                        name: recipient.name,
-                        fullname: recipient.name,
-                        first_name: recipient.name.split(" ")[0],
-                        firstname: recipient.name.split(" ")[0],
-                        mobilephone: recipient.phone || "",
-                        riivo_referralcode: recipientVars.referralCode || "",
-                        ...recipientVars,
                     };
+
+                    const allVariables: Record<string, string> = {};
+                    // Body variables, keyed by their template placeholder name.
+                    for (const varName of template.variables) {
+                        allVariables[varName] = resolveField(varToField[varName]);
+                    }
+                    // Dynamic button URL variables are looked up by field name directly.
+                    for (const bv of buttonVars) {
+                        allVariables[bv] = resolveField(bv);
+                    }
 
                     // Hand `allVariables` to the payload builder — it picks body
                     // variables from template.variables and the button variable

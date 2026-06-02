@@ -860,7 +860,10 @@ export default function NewCampaignPage() {
                             id: c.id,
                             phone: c.internationalPhone || c.phone!,
                             name: c.fullName,
-                            variables: JSON.stringify(variableValues),
+                            // Variables are resolved per-recipient from the CRM at
+                            // send time via the template's variableMappings (see
+                            // processWhatsAppBatch). The UI form values feed only the
+                            // test send, so they are intentionally not passed here.
                         }));
                 }
             }
