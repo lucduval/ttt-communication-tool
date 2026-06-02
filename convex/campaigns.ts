@@ -226,6 +226,84 @@ export const pauseCampaign = mutation({
 });
 
 /**
+ * Resume a paused campaign. Picks up where it left off, sending only to
+ * recipients who haven't been sent to yet (already-sent recipients are skipped
+ * by the per-recipient dedup in the batch processors). Only admins or the
+ * campaign creator can resume.
+ */
+export const resumeCampaign = mutation({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (ctx, args) => {
+        const access = await checkAccessHelper(ctx);
+        if (!access.hasAccess || !access.user) throw new Error("Unauthorized");
+
+        const campaign = await ctx.db.get(args.campaignId);
+        if (!campaign) throw new Error("Campaign not found");
+
+        const isAdmin = access.user.role === "admin";
+        const isCreator = campaign.createdBy === access.user.clerkId;
+        if (!isAdmin && !isCreator) {
+            throw new Error("Only the campaign creator or an admin can resume this campaign");
+        }
+
+        if (campaign.status !== "paused") {
+            throw new Error(`Cannot resume campaign with status "${campaign.status}"`);
+        }
+
+        // Find the next batch still waiting to be processed.
+        const nextPendingBatch = await ctx.db
+            .query("campaignBatches")
+            .withIndex("by_campaign_status", (q) =>
+                q.eq("campaignId", args.campaignId).eq("status", "pending")
+            )
+            .first();
+
+        // No pending batches left — nothing more to send, mark it completed.
+        if (!nextPendingBatch) {
+            await ctx.db.patch(args.campaignId, { status: "completed" });
+
+            await ctx.runMutation(internal.notifications.create, {
+                userId: campaign.createdBy,
+                title: "Campaign Completed",
+                message: `Campaign "${campaign.name}" had no remaining batches and is now marked completed.`,
+                type: "success",
+                link: `/campaigns/${args.campaignId}`,
+            });
+
+            return { success: true, resumed: false };
+        }
+
+        // Flip status back so the batch processor's pause-check lets it proceed,
+        // then re-kick the channel-appropriate processor chain.
+        await ctx.db.patch(args.campaignId, { status: "processing" });
+
+        if (campaign.channel === "email") {
+            await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
+                campaignId: args.campaignId,
+            });
+        } else if (campaign.channel === "personalised") {
+            await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
+                campaignId: args.campaignId,
+            });
+        } else {
+            await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
+                campaignId: args.campaignId,
+            });
+        }
+
+        await ctx.runMutation(internal.notifications.create, {
+            userId: campaign.createdBy,
+            title: "Campaign Resumed",
+            message: `Campaign "${campaign.name}" has been resumed. Remaining batches will be sent.`,
+            type: "info",
+            link: `/campaigns/${args.campaignId}`,
+        });
+
+        return { success: true, resumed: true };
+    },
+});
+
+/**
  * Emergency pause - no auth required. Use from Convex Dashboard when you need
  * to stop a campaign immediately (Dashboard runs without user context).
  */

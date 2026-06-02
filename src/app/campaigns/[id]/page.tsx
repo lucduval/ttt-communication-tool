@@ -9,7 +9,7 @@ import { format } from "date-fns";
 import { Id } from "../../../../convex/_generated/dataModel";
 import { Button } from "@/components/ui/Button";
 import Link from "next/link";
-import { ArrowLeft, Loader2, Pause } from "lucide-react";
+import { ArrowLeft, Loader2, Pause, Play } from "lucide-react";
 import { BouncedEmailsCard } from "@/components/campaigns/BouncedEmailsCard";
 
 export default function CampaignDetailsPage() {
@@ -19,6 +19,7 @@ export default function CampaignDetailsPage() {
 
     const campaign = useQuery(api.campaigns.get, { id: campaignId });
     const pauseCampaign = useMutation(api.campaigns.pauseCampaign);
+    const resumeCampaign = useMutation(api.campaigns.resumeCampaign);
     const isEngagementFilter = statusFilter === "opened" || statusFilter === "clicked";
     const { results: paginatedMessages, status: messagesStatus, loadMore } = usePaginatedQuery(
         api.messages.listByCampaign,
@@ -58,6 +59,7 @@ export default function CampaignDetailsPage() {
 
     const isProcessing = campaign.status === "processing" || campaign.status === "queued";
     const canPause = campaign.status === "processing" || campaign.status === "queued";
+    const canResume = campaign.status === "paused";
     const completedBatches = batches?.filter((b) => b.status === "completed").length || 0;
     const totalBatches = campaign.totalBatches || batches?.length || 1;
     const progressPercent = totalBatches > 0 ? Math.round((completedBatches / totalBatches) * 100) : 0;
@@ -153,6 +155,20 @@ export default function CampaignDetailsPage() {
                         >
                             <Pause className="w-4 h-4 mr-2" />
                             Pause Campaign
+                        </Button>
+                    )}
+                    {canResume && (
+                        <Button
+                            variant="secondary"
+                            className="bg-green-100 text-green-800 hover:bg-green-200 border-green-300"
+                            onClick={async () => {
+                                if (confirm("Resume this campaign? Remaining batches will be sent. Recipients already messaged will not be contacted again.")) {
+                                    await resumeCampaign({ campaignId });
+                                }
+                            }}
+                        >
+                            <Play className="w-4 h-4 mr-2" />
+                            Resume Campaign
                         </Button>
                     )}
                 </div>
