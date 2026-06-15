@@ -243,6 +243,73 @@ function buildExtraContactFilter(filters: CampaignFilters): string {
 const CONTACT_SELECT_SIMPLE = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber,riivo_referralcode";
 
 /**
+ * Dynamics contact fields a WhatsApp template variable may be mapped to. Mirrors
+ * DYNAMICS_FIELDS in src/components/whatsapp/TemplateForm.tsx. Used as an
+ * allowlist so a template's variableMappings can only pull whitelisted fields
+ * into the OData $select — guards against invalid or injected field names.
+ * `lookup: true` marks entity references whose human-readable value lives in the
+ * formatted-value annotation rather than the raw `_field_value` column.
+ */
+export const MAPPABLE_CONTACT_FIELDS: Record<string, { lookup?: boolean }> = {
+    fullname: {},
+    firstname: {},
+    lastname: {},
+    mobilephone: {},
+    emailaddress1: {},
+    accountnumber: {},
+    address1_composite: {},
+    address1_city: {},
+    riivo_referralcode: {},
+    parentcustomerid: { lookup: true },
+};
+
+const FORMATTED_VALUE = "@OData.Community.Display.V1.FormattedValue";
+
+/**
+ * Batch-fetch specific contact fields by contactid. Returns a map of
+ * contactid -> { field: value } covering every requested (allowlisted) field.
+ * Contact ids with no matching Dynamics record (e.g. leads/employees, deleted
+ * contacts) simply don't appear in the map — callers fall back per recipient.
+ */
+export async function fetchContactFieldsByIds(
+    contactIds: string[],
+    fields: string[]
+): Promise<Map<string, Record<string, string>>> {
+    const result = new Map<string, Record<string, string>>();
+    const safeFields = [...new Set(fields)].filter((f) => f in MAPPABLE_CONTACT_FIELDS);
+    if (contactIds.length === 0 || safeFields.length === 0) return result;
+
+    const selectParts = new Set<string>(["contactid"]);
+    for (const f of safeFields) {
+        selectParts.add(MAPPABLE_CONTACT_FIELDS[f].lookup ? `_${f}_value` : f);
+    }
+    const select = [...selectParts].join(",");
+
+    // 200 ids per request keeps the `contactid eq '..' or ..` $filter well under
+    // Dynamics' URL length cap even alongside the $select.
+    const CHUNK = 200;
+    for (let i = 0; i < contactIds.length; i += CHUNK) {
+        const batch = contactIds.slice(i, i + CHUNK);
+        const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
+        const endpoint = `contacts?$select=${select}&$filter=${idFilter}`;
+        const resp = await dynamicsRequest<{ value: Record<string, unknown>[] }>(endpoint);
+        for (const row of resp.value ?? []) {
+            const id = row.contactid as string | undefined;
+            if (!id) continue;
+            const rec: Record<string, string> = {};
+            for (const f of safeFields) {
+                const raw = MAPPABLE_CONTACT_FIELDS[f].lookup
+                    ? row[`_${f}_value${FORMATTED_VALUE}`]
+                    : row[f];
+                rec[f] = raw == null ? "" : String(raw);
+            }
+            result.set(id, rec);
+        }
+    }
+    return result;
+}
+
+/**
  * Fetch contacts by tax return (SARS reimbursement) filter, then stream in chunks.
  * Used when taxReturnMin is set in campaign filters.
  */

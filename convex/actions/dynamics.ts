@@ -1333,6 +1333,7 @@ function buildLeadFilter(args: {
     ownerId?: string;
     status?: string;
     industryId?: string;
+    channel?: string;
 }): string {
     let filterExpression: string;
 
@@ -1375,6 +1376,16 @@ function buildLeadFilter(args: {
         filterExpression += ` and _riivo_industry_lookup_value eq '${args.industryId}'`;
     }
 
+    // Contactability filter: only count/return leads that can actually be reached
+    // on the chosen channel. This keeps the displayed count, the paginated list,
+    // and Select All in sync with the send path, which drops leads without an
+    // email (email/personalised) or phone (whatsapp) at send time.
+    if (args.channel === "email" || args.channel === "personalised") {
+        filterExpression += ` and ttt_email ne null`;
+    } else if (args.channel === "whatsapp") {
+        filterExpression += ` and ttt_mobilephone ne null`;
+    }
+
     return filterExpression;
 }
 
@@ -1393,6 +1404,7 @@ export const fetchLeads = action({
         ownerId: v.optional(v.string()),
         status: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        channel: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -1441,6 +1453,7 @@ export const getLeadCount = action({
         ownerId: v.optional(v.string()),
         status: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        channel: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -1468,6 +1481,7 @@ export const fetchAllLeadIds = action({
         ownerId: v.optional(v.string()),
         status: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        channel: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);

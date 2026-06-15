@@ -119,12 +119,26 @@ function buildSendMailPayload(message: EmailMessage): {
         throw new Error("No mailbox specified and SHARED_MAILBOX_ADDRESS is not configured");
     }
 
+    // A single recipient's `email` may itself contain several addresses separated
+    // by commas or semicolons (e.g. a free-text CC field where the user typed
+    // multiple addresses). Graph requires one address per recipient object, so
+    // expand them here — otherwise the whole joined string is treated as one
+    // unresolvable mailbox and the send fails with ErrorInvalidRecipients.
+    const toGraphRecipients = (recipients: Array<{ email: string; name?: string }>) =>
+        recipients.flatMap((r) =>
+            r.email
+                .split(/[,;]/)
+                .map((addr) => addr.trim())
+                .filter((addr) => addr.length > 0)
+                .map((address) => ({
+                    emailAddress: { address, name: r.name || address },
+                }))
+        );
+
     const messageObj: Record<string, unknown> = {
         subject: message.subject,
         body: { contentType: "HTML", content: message.body },
-        toRecipients: message.toRecipients.map((r) => ({
-            emailAddress: { address: r.email, name: r.name || r.email },
-        })),
+        toRecipients: toGraphRecipients(message.toRecipients),
         importance: message.importance || "normal",
     };
 
@@ -135,15 +149,13 @@ function buildSendMailPayload(message: EmailMessage): {
     }
 
     if (message.ccRecipients && message.ccRecipients.length > 0) {
-        messageObj.ccRecipients = message.ccRecipients.map((r) => ({
-            emailAddress: { address: r.email, name: r.name || r.email },
-        }));
+        const cc = toGraphRecipients(message.ccRecipients);
+        if (cc.length > 0) messageObj.ccRecipients = cc;
     }
 
     if (message.bccRecipients && message.bccRecipients.length > 0) {
-        messageObj.bccRecipients = message.bccRecipients.map((r) => ({
-            emailAddress: { address: r.email, name: r.name || r.email },
-        }));
+        const bcc = toGraphRecipients(message.bccRecipients);
+        if (bcc.length > 0) messageObj.bccRecipients = bcc;
     }
 
     if (message.attachments && message.attachments.length > 0) {
