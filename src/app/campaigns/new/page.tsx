@@ -109,17 +109,20 @@ function todayInSAST(): string {
     return `${y}-${m}-${d}`;
 }
 
-function tomorrowInSAST(): string {
-    const sastNow = new Date(Date.now() + 2 * 60 * 60 * 1000);
-    sastNow.setUTCDate(sastNow.getUTCDate() + 1);
-    const y = sastNow.getUTCFullYear();
-    const m = String(sastNow.getUTCMonth() + 1).padStart(2, "0");
-    const d = String(sastNow.getUTCDate()).padStart(2, "0");
-    return `${y}-${m}-${d}`;
-}
-
 function sastDateTimeToUtcMs(dateStr: string, timeStr: string): number {
     return new Date(`${dateStr}T${timeStr}:00${SAST_OFFSET}`).getTime();
+}
+
+// Render a coarse "in about X" label for a positive millisecond delta, used to
+// make the distance between now and the scheduled time obvious to the user.
+function describeOffsetFromNow(deltaMs: number): string {
+    const minutes = Math.round(deltaMs / 60000);
+    if (minutes < 1) return "in less than a minute";
+    if (minutes < 60) return `in about ${minutes} minute${minutes === 1 ? "" : "s"}`;
+    const hours = Math.round(minutes / 60);
+    if (hours < 24) return `in about ${hours} hour${hours === 1 ? "" : "s"}`;
+    const days = Math.round(hours / 24);
+    return `in about ${days} day${days === 1 ? "" : "s"}`;
 }
 
 function formatSastForDisplay(dateStr: string, timeStr: string): string {
@@ -228,7 +231,9 @@ export default function NewCampaignPage() {
     // Scheduling state — when sendMode === "schedule", the campaign is queued in
     // the DB but Convex's scheduler defers batch creation until scheduledAt (SAST).
     const [sendMode, setSendMode] = useState<"now" | "schedule">("now");
-    const [scheduleDate, setScheduleDate] = useState<string>(tomorrowInSAST());
+    // Default to today (not tomorrow) so users scheduling a send for "a few
+    // minutes from now" don't silently land a day ahead.
+    const [scheduleDate, setScheduleDate] = useState<string>(todayInSAST());
     const [scheduleTime, setScheduleTime] = useState<string>("10:00");
 
     const scheduledAtMs = useMemo(() => {
@@ -242,6 +247,17 @@ export default function NewCampaignPage() {
         sendMode === "schedule" && scheduledAtMs !== undefined && scheduledAtMs <= Date.now();
     const scheduleIsValid =
         sendMode === "now" || (scheduledAtMs !== undefined && !scheduleIsInPast);
+    // Human-readable distance from now, so an accidental wrong-day pick is
+    // obvious before sending (e.g. "in about 23 hours" when you meant minutes).
+    const scheduleOffsetLabel =
+        scheduledAtMs !== undefined && !scheduleIsInPast
+            ? describeOffsetFromNow(scheduledAtMs - Date.now())
+            : null;
+    // Flag schedules more than a week out as a likely mistake.
+    const scheduleIsFarOut =
+        scheduledAtMs !== undefined &&
+        !scheduleIsInPast &&
+        scheduledAtMs - Date.now() > 7 * 24 * 60 * 60 * 1000;
 
     // Queries
     const whatsappTemplates = useQuery(api.whatsappTemplates.list, {});
@@ -400,6 +416,7 @@ export default function NewCampaignPage() {
                             ownerId: leadFilters.ownerId || undefined,
                             status: leadFilters.status,
                             industryId: leadFilters.industryId || undefined,
+                            channel: campaignChannel,
                         }),
                         getLeadCount({
                             search: leadFilters.search || undefined,
@@ -409,6 +426,7 @@ export default function NewCampaignPage() {
                             ownerId: leadFilters.ownerId || undefined,
                             status: leadFilters.status,
                             industryId: leadFilters.industryId || undefined,
+                            channel: campaignChannel,
                         }),
                     ]);
                     const allLeads = leadsResult.contacts as Contact[];
@@ -430,6 +448,7 @@ export default function NewCampaignPage() {
                             ownerId: leadFilters.ownerId || undefined,
                             status: leadFilters.status,
                             industryId: leadFilters.industryId || undefined,
+                            channel: campaignChannel,
                         });
                         setContacts(prev => [...prev, ...leadsResult.contacts as Contact[]]);
                         setNextPageToken(leadsResult.nextPage ?? null);
@@ -1034,6 +1053,7 @@ export default function NewCampaignPage() {
                         ownerId: leadFilters.ownerId || undefined,
                         status: leadFilters.status,
                         industryId: leadFilters.industryId || undefined,
+                        channel: campaignChannel,
                     });
                     allLeads.push(...(result.contacts as Contact[]));
                     skipToken = result.nextPage ?? null;
@@ -1883,7 +1903,13 @@ export default function NewCampaignPage() {
                                                         <p className="text-xs text-gray-600">
                                                             Will send at{" "}
                                                             <strong>{formatSastForDisplay(scheduleDate, scheduleTime)}</strong>{" "}
-                                                            (South Africa Standard Time, GMT+2).
+                                                            (South Africa Standard Time, GMT+2)
+                                                            {scheduleOffsetLabel ? ` — ${scheduleOffsetLabel}` : ""}.
+                                                        </p>
+                                                    )}
+                                                    {scheduleIsFarOut && (
+                                                        <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                                                            Heads up: this is {scheduleOffsetLabel} from now. Double-check the date is correct.
                                                         </p>
                                                     )}
                                                     {scheduleIsInPast && (
