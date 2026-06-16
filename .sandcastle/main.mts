@@ -10,7 +10,11 @@ await run({
   name: "worker",
 
   // Sandbox provider — runs the agent inside an isolated container.
-  sandbox: docker(),
+  // Docker Desktop's containerd image store tags images fully-qualified
+  // (docker.io/library/…). `docker image inspect` won't resolve the bare
+  // "sandcastle:ttt-communication-tool" tag sandcastle defaults to, so we
+  // pass the fully-qualified name, which the same built image resolves under.
+  sandbox: docker({ imageName: "docker.io/library/sandcastle:ttt-communication-tool" }),
 
   // The agent provider. Pass a model string to claudeCode() — sonnet balances
   // capability and speed for most tasks. Switch to claude-opus-4-7 for harder
