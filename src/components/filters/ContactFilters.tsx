@@ -11,7 +11,7 @@ import { cn } from "@/lib/utils";
 
 export interface FilterState {
     search: string;
-    clientType: string | null; // Now "Service Line" (Tax, Accounting, etc.)
+    clientType: number[]; // "Service Line" (Tax, Accounting, etc.) — MultiSelect option codes
     entityType: number | null; // Individual vs Business
     marketingType: "tax" | "accounting" | "insurance" | "all";
     whatsappOptIn: boolean | null;
@@ -194,7 +194,7 @@ export function ContactFilters({
     const clearFilters = () => {
         onFiltersChange({
             search: "",
-            clientType: null,
+            clientType: [],
             marketingType: "all",
             whatsappOptIn: null,
             emailEnabled: null,
@@ -223,7 +223,7 @@ export function ContactFilters({
     };
 
     const hasActiveFilters =
-        filters.clientType !== null ||
+        filters.clientType.length > 0 ||
         filters.marketingType !== "all" ||
         filters.whatsappOptIn !== null ||
         filters.emailEnabled !== null ||
@@ -389,20 +389,12 @@ export function ContactFilters({
                             <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
                                 Client Type (Service)
                             </label>
-                            <select
-                                value={filters.clientType || ""}
-                                onChange={(e) =>
-                                    updateFilter("clientType", e.target.value || null)
-                                }
-                                className="w-full bg-white border border-gray-200 p-2 rounded text-sm outline-none focus:ring-2 focus:ring-[#1E3A5F]/10"
-                            >
-                                <option value="">All Types</option>
-                                {clientTypeOptions.map((opt) => (
-                                    <option key={opt.value} value={opt.value.toString()}>
-                                        {opt.label}
-                                    </option>
-                                ))}
-                            </select>
+                            <MultiSelect
+                                options={clientTypeOptions}
+                                selected={filters.clientType}
+                                onChange={(selected) => updateFilter("clientType", selected)}
+                                placeholder="Select client types..."
+                            />
                         </div>
 
                         {/* Bank */}
@@ -858,9 +850,9 @@ export function ContactFilters({
                                     Entity: {entityTypeOptions.find(o => o.value === filters.entityType)?.label || filters.entityType}
                                 </Badge>
                             )}
-                            {filters.clientType && (
+                            {filters.clientType.length > 0 && (
                                 <Badge status="info">
-                                    Service: {clientTypeOptions.find(o => o.value.toString() === filters.clientType)?.label || filters.clientType}
+                                    Service: {filters.clientType.length} selected
                                 </Badge>
                             )}
                             {filters.bank !== null && (

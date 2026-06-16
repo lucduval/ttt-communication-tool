@@ -40,7 +40,7 @@ export default function RecipientsPage() {
 
     const INITIAL_FILTERS: FilterState = {
         search: "",
-        clientType: null,
+        clientType: [],
         entityType: null,
         marketingType: "all",
         whatsappOptIn: null,
@@ -196,7 +196,7 @@ export default function RecipientsPage() {
                 const result = await fetchReferralParticipantsRef.current({
                     filter: odataFilter,
                     search: filters.search || undefined,
-                    clientType: filters.clientType || undefined,
+                    clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                     entityType: filters.entityType ?? undefined,
                     bank: filters.bank ?? undefined,
                     sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -222,7 +222,7 @@ export default function RecipientsPage() {
                 const result = await fetchContactsByBadDebtRef.current({
                     filter: odataFilter,
                     search: filters.search || undefined,
-                    clientType: filters.clientType || undefined,
+                    clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                     entityType: filters.entityType ?? undefined,
                     bank: filters.bank ?? undefined,
                     sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -255,7 +255,7 @@ export default function RecipientsPage() {
                         search: filters.search || undefined,
                         top: ITEMS_PER_PAGE,
                         skip: skip > 0 ? skip : undefined,
-                        clientType: filters.clientType || undefined,
+                        clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
                         sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -269,7 +269,7 @@ export default function RecipientsPage() {
                     getContactCountRef.current({
                         filter: odataFilter,
                         search: filters.search || undefined,
-                        clientType: filters.clientType || undefined,
+                        clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
                         sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,

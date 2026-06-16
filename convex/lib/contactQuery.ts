@@ -17,8 +17,8 @@ export interface ContactFilter {
     filter?: string;
     /** Free-text search across fullname / emailaddress1. */
     search?: string;
-    /** Client type (riivo_clienttypenew). */
-    clientType?: string;
+    /** Client type multi-select option codes (riivo_clienttypenew). */
+    clientType?: number[];
     /** Entity type option set (riivo_clienttypeindbus). */
     entityType?: number;
     /** Bank option set (ttt_bank). */
@@ -88,8 +88,9 @@ export function buildContactFilterClauses(filter: ContactFilter): string {
         clauses += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
     }
 
-    if (filter.clientType) {
-        clauses += ` and riivo_clienttypenew eq '${filter.clientType}'`;
+    if (filter.clientType && filter.clientType.length > 0) {
+        const values = filter.clientType.map(String).join("','");
+        clauses += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['${values}'])`;
     }
 
     if (filter.entityType !== undefined) {

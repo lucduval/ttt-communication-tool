@@ -64,7 +64,7 @@ const STEPS: { id: WizardStep; label: string; icon: React.ElementType }[] = [
 
 const INITIAL_FILTERS: FilterState = {
     search: "",
-    clientType: null,
+    clientType: [],
     entityType: null,
     marketingType: "all",
     whatsappOptIn: null,
@@ -441,7 +441,7 @@ export default function NewCampaignPage() {
                     const result = await fetchReferralParticipants({
                         filter: channelFilter,
                         search: filters.search || undefined,
-                        clientType: filters.clientType || undefined,
+                        clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
                         sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -470,7 +470,7 @@ export default function NewCampaignPage() {
                     const result = await fetchContactsByBadDebt({
                         filter: channelFilter,
                         search: filters.search || undefined,
-                        clientType: filters.clientType || undefined,
+                        clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
                         sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -501,7 +501,7 @@ export default function NewCampaignPage() {
                         taxReturnYear: filters.taxReturnYear ?? undefined,
                         filter: channelFilter,
                         search: filters.search || undefined,
-                        clientType: filters.clientType || undefined,
+                        clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
                         sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -534,7 +534,7 @@ export default function NewCampaignPage() {
                     const result = await fetchContactsWithITA34({
                         filter: channelFilter,
                         search: filters.search || undefined,
-                        clientType: filters.clientType || undefined,
+                        clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
                         sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -573,7 +573,7 @@ export default function NewCampaignPage() {
                         search: filters.search || undefined,
                         top: LOAD_MORE_SIZE,
                         skipToken: token,
-                        clientType: filters.clientType || undefined,
+                        clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
                         sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -588,7 +588,7 @@ export default function NewCampaignPage() {
                     !append ? getContactCount({
                         filter: channelFilter,
                         search: filters.search || undefined,
-                        clientType: filters.clientType || undefined,
+                        clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
                         bank: filters.bank ?? undefined,
                         sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -820,7 +820,7 @@ export default function NewCampaignPage() {
                 filtersJson = JSON.stringify({
                     filter: getChannelFilter(),
                     search: filters.search || undefined,
-                    clientType: filters.clientType || undefined,
+                    clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                     entityType: filters.entityType ?? undefined,
                     bank: filters.bank ?? undefined,
                     sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
@@ -1066,7 +1066,7 @@ export default function NewCampaignPage() {
                 const countResult = await getContactCount({
                     filter: channelFilter,
                     search: filters.search || undefined,
-                    clientType: filters.clientType || undefined,
+                    clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                     entityType: filters.entityType ?? undefined,
                     bank: filters.bank ?? undefined,
                     sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,

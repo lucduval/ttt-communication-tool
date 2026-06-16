@@ -29,10 +29,14 @@ describe("buildContactFilter", () => {
         );
     });
 
-    test("client type is emitted as a quoted equality match", () => {
-        expect(buildContactFilter({ clientType: "Gold" })).toBe(
-            "statecode eq 0 and riivo_clienttypenew eq 'Gold'"
+    test("client type is emitted as multi-select containment", () => {
+        expect(buildContactFilter({ clientType: [4, 5] })).toBe(
+            "statecode eq 0 and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['4','5'])"
         );
+    });
+
+    test("an empty client type array contributes nothing", () => {
+        expect(buildContactFilter({ clientType: [] })).toBe("statecode eq 0");
     });
 
     test("entity type and bank are emitted as numeric equality", () => {
@@ -103,7 +107,7 @@ describe("buildContactFilter", () => {
         const filter: ContactFilter = {
             filter: "riivo_taxmarketing eq true",
             search: "jo'hn",
-            clientType: "Gold",
+            clientType: [4, 5],
             entityType: 2,
             bank: 1,
             sourceCode: [10, 20],
@@ -118,7 +122,7 @@ describe("buildContactFilter", () => {
             "statecode eq 0" +
                 " and (riivo_taxmarketing eq true)" +
                 " and (contains(fullname,'jo''hn') or contains(emailaddress1,'jo''hn'))" +
-                " and riivo_clienttypenew eq 'Gold'" +
+                " and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['4','5'])" +
                 " and riivo_clienttypeindbus eq 2" +
                 " and ttt_bank eq 1" +
                 " and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['10','20'])" +
@@ -138,8 +142,8 @@ describe("buildContactFilterClauses", () => {
     });
 
     test("emits the appended clauses without the active-only base", () => {
-        expect(buildContactFilterClauses({ clientType: "Gold", ageMin: 30 })).toBe(
-            " and riivo_clienttypenew eq 'Gold' and riivo_age ge 30"
+        expect(buildContactFilterClauses({ clientType: [4, 5], ageMin: 30 })).toBe(
+            " and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['4','5']) and riivo_age ge 30"
         );
     });
 
@@ -147,7 +151,7 @@ describe("buildContactFilterClauses", () => {
         const filter: ContactFilter = {
             filter: "riivo_taxmarketing eq true",
             search: "jo'hn",
-            clientType: "Gold",
+            clientType: [4, 5],
             entityType: 2,
             bank: 1,
             sourceCode: [10, 20],
@@ -167,7 +171,7 @@ describe("buildContactFilterClauses", () => {
         const filter: ContactFilter = {
             filter: "riivo_taxmarketing eq true",
             search: "jo'hn",
-            clientType: "Gold",
+            clientType: [4, 5],
             entityType: 2,
             bank: 1,
             sourceCode: [10, 20],
@@ -183,7 +187,7 @@ describe("buildContactFilterClauses", () => {
         expect(buildContactFilterClauses(filter)).toBe(
             " and (riivo_taxmarketing eq true)" +
                 " and (contains(fullname,'jo''hn') or contains(emailaddress1,'jo''hn'))" +
-                " and riivo_clienttypenew eq 'Gold'" +
+                " and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['4','5'])" +
                 " and riivo_clienttypeindbus eq 2" +
                 " and ttt_bank eq 1" +
                 " and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['10','20'])" +

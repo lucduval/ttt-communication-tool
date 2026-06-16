@@ -22,7 +22,7 @@ export interface ShimmedContact {
 export interface CampaignFilters {
     filter?: string;
     search?: string;
-    clientType?: number | string;  // OptionSet: number from API, string from JSON
+    clientType?: number | string | Array<number | string>;  // MultiSelect option codes; legacy values may be a scalar
     entityType?: number;
     bank?: number;
     sourceCode?: string | string[];
@@ -49,8 +49,9 @@ export interface CampaignFilters {
 
 /**
  * Adapt the campaign-shaped filter object to the Contact Query module's typed
- * ContactFilter. clientType (a number or string from JSON) and sourceCode (a
- * string or string array) are normalised so the module owns the OData encoding.
+ * ContactFilter. clientType and sourceCode (each a scalar or array, possibly
+ * stringy after a JSON round-trip) are normalised to numeric option-code arrays
+ * so the module owns the OData multi-select containment encoding.
  */
 function toContactFilter(filters: CampaignFilters): ContactFilter {
     const { sourceCode, clientType } = filters;
@@ -60,10 +61,15 @@ function toContactFilter(filters: CampaignFilters): ContactFilter {
         sourceCodeArr = (Array.isArray(sourceCode) ? sourceCode : [sourceCode]).map(Number);
     }
 
+    let clientTypeArr: number[] | undefined;
+    if (clientType !== undefined && clientType !== null && (Array.isArray(clientType) ? clientType.length > 0 : true)) {
+        clientTypeArr = (Array.isArray(clientType) ? clientType : [clientType]).map(Number);
+    }
+
     return {
         filter: filters.filter,
         search: filters.search,
-        clientType: clientType !== undefined && clientType !== null ? String(clientType) : undefined,
+        clientType: clientTypeArr,
         entityType: filters.entityType,
         bank: filters.bank,
         sourceCode: sourceCodeArr,

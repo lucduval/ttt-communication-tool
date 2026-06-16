@@ -104,7 +104,7 @@ export const fetchContacts = action({
         skipToken: v.optional(v.string()), // Pagination token (cursor pagination)
         countOnly: v.optional(v.boolean()), // Only return count
         // New filters
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())), // MultiSelect usually returns array or string, for input we take array
@@ -240,7 +240,7 @@ export const getContactCount = action({
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
         // New filters
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -326,7 +326,7 @@ export const fetchAllContactIds = action({
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
         // New filters
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -780,7 +780,7 @@ export const fetchContactsWithITA34 = action({
         taxYear: v.optional(v.number()),
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -863,8 +863,9 @@ export const fetchContactsWithITA34 = action({
             const s = resolvedArgs.search.replace(/'/g, "''");
             extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
         }
-        if (resolvedArgs.clientType) {
-            extraFilter += ` and riivo_clienttypenew eq '${resolvedArgs.clientType}'`;
+        if (resolvedArgs.clientType && resolvedArgs.clientType.length > 0) {
+            const values = resolvedArgs.clientType.map(String).join("','");
+            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['${values}'])`;
         }
         if (resolvedArgs.entityType !== undefined) {
             extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
@@ -969,7 +970,7 @@ export const fetchContactsByTaxReturn = action({
         taxReturnYear: v.optional(v.number()),
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -1043,8 +1044,9 @@ export const fetchContactsByTaxReturn = action({
             const s = resolvedArgs.search.replace(/'/g, "''");
             extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
         }
-        if (resolvedArgs.clientType) {
-            extraFilter += ` and riivo_clienttypenew eq '${resolvedArgs.clientType}'`;
+        if (resolvedArgs.clientType && resolvedArgs.clientType.length > 0) {
+            const values = resolvedArgs.clientType.map(String).join("','");
+            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['${values}'])`;
         }
         if (resolvedArgs.entityType !== undefined) {
             extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
@@ -1409,7 +1411,7 @@ export const fetchContactsByBadDebt = action({
     args: {
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -1487,8 +1489,9 @@ export const fetchContactsByBadDebt = action({
             const s = resolvedArgs.search.replace(/'/g, "''");
             extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
         }
-        if (resolvedArgs.clientType) {
-            extraFilter += ` and riivo_clienttypenew eq '${resolvedArgs.clientType}'`;
+        if (resolvedArgs.clientType && resolvedArgs.clientType.length > 0) {
+            const values = resolvedArgs.clientType.map(String).join("','");
+            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['${values}'])`;
         }
         if (resolvedArgs.entityType !== undefined) {
             extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
@@ -1594,7 +1597,7 @@ export const fetchReferralParticipants = action({
     args: {
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -1652,8 +1655,9 @@ export const fetchReferralParticipants = action({
             const s = resolvedArgs.search.replace(/'/g, "''");
             extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
         }
-        if (resolvedArgs.clientType) {
-            extraFilter += ` and riivo_clienttypenew eq '${resolvedArgs.clientType}'`;
+        if (resolvedArgs.clientType && resolvedArgs.clientType.length > 0) {
+            const values = resolvedArgs.clientType.map(String).join("','");
+            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['${values}'])`;
         }
         if (resolvedArgs.entityType !== undefined) {
             extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
