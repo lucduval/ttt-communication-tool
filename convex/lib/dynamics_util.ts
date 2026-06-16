@@ -1,5 +1,6 @@
 
 import { dynamicsRequest } from "../actions/dynamics";
+import { buildContactFilter, buildContactFilterClauses, type ContactFilter } from "./contactQuery";
 
 interface SimpleContact {
     contactid: string;
@@ -47,93 +48,46 @@ export interface CampaignFilters {
 }
 
 /**
+ * Adapt the campaign-shaped filter object to the Contact Query module's typed
+ * ContactFilter. clientType (a number or string from JSON) and sourceCode (a
+ * string or string array) are normalised so the module owns the OData encoding.
+ */
+function toContactFilter(filters: CampaignFilters): ContactFilter {
+    const { sourceCode, clientType } = filters;
+
+    let sourceCodeArr: number[] | undefined;
+    if (sourceCode && (Array.isArray(sourceCode) ? sourceCode.length > 0 : true)) {
+        sourceCodeArr = (Array.isArray(sourceCode) ? sourceCode : [sourceCode]).map(Number);
+    }
+
+    return {
+        filter: filters.filter,
+        search: filters.search,
+        clientType: clientType !== undefined && clientType !== null ? String(clientType) : undefined,
+        entityType: filters.entityType,
+        bank: filters.bank,
+        sourceCode: sourceCodeArr,
+        province: filters.province,
+        geographicLocation: filters.geographicLocation,
+        ageMin: filters.ageMin,
+        ageMax: filters.ageMax,
+        ownerId: filters.ownerId,
+        industryId: filters.industryId,
+        nameRangeStart: filters.nameRangeStart,
+        nameRangeEnd: filters.nameRangeEnd,
+    };
+}
+
+/**
  * Fetch contacts matching filters from Dynamics and process them in chunks
  */
 export async function fetchMatchingContacts(
     filters: CampaignFilters,
     onChunk: (contacts: ShimmedContact[]) => Promise<void>
 ) {
-    const {
-        filter,
-        search,
-        clientType,
-        entityType,
-        bank,
-        sourceCode,
-        province,
-        geographicLocation,
-        ageMin,
-        ageMax,
-        ownerId,
-        industryId
-    } = filters;
-
-    // Build filter expression
-    let filterExpression = "statecode eq 0";
-
-    if (filter) {
-        filterExpression += ` and (${filter})`;
-    }
-
-    if (search) {
-        const searchTerm = search.replace(/'/g, "''");
-        filterExpression += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
-    }
-
-    if (clientType !== undefined && clientType !== null) {
-        const clientTypeNum = parseInt(String(clientType), 10);
-        if (!Number.isNaN(clientTypeNum)) {
-            filterExpression += ` and riivo_clienttypenew eq ${clientTypeNum}`;
-        }
-    }
-
-    if (entityType !== undefined) {
-        filterExpression += ` and riivo_clienttypeindbus eq ${entityType}`;
-    }
-
-    if (bank !== undefined) {
-        filterExpression += ` and ttt_bank eq ${bank}`;
-    }
-
-    if (sourceCode && sourceCode.length > 0) {
-        // Handle array or string sourceCode
-        const values = Array.isArray(sourceCode) ? sourceCode.map(String).join("','") : String(sourceCode);
-        filterExpression += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-    }
-
-    if (province) {
-        const prov = province.replace(/'/g, "''");
-        filterExpression += ` and address1_stateorprovince eq '${prov}'`;
-    }
-
-    if (geographicLocation !== undefined) {
-        filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
-    }
-
-    if (ageMin !== undefined) {
-        filterExpression += ` and riivo_age ge ${ageMin}`;
-    }
-
-    if (ageMax !== undefined) {
-        filterExpression += ` and riivo_age le ${ageMax}`;
-    }
-
-    if (ownerId) {
-        filterExpression += ` and _ownerid_value eq '${ownerId}'`;
-    }
-
-    if (industryId) {
-        filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
-    }
-
-    // Alphabetical name range: include contacts whose fullname falls within [start, end]
-    if (filters.nameRangeStart) {
-        filterExpression += ` and fullname ge '${filters.nameRangeStart}'`;
-    }
-    if (filters.nameRangeEnd && filters.nameRangeEnd !== "Z") {
-        const nextChar = String.fromCharCode(filters.nameRangeEnd.charCodeAt(0) + 1);
-        filterExpression += ` and fullname lt '${nextChar}'`;
-    }
+    // Build the contact-level filter via the Contact Query module so the
+    // send-time audience matches the recipient list, count, and select-all.
+    const filterExpression = buildContactFilter(toContactFilter(filters));
 
     console.log(`[fetchMatchingContacts] Filter Expression: ${filterExpression}`);
 
@@ -203,41 +157,14 @@ export async function fetchMatchingContacts(
 }
 
 /**
- * Build extra contact-level filter from CampaignFilters (shared by tax return and ITA34 fetches)
+ * Build extra contact-level filter from CampaignFilters (shared by tax return and ITA34 fetches).
+ *
+ * Delegates to the Contact Query module's clause builder so the two-step audience
+ * sends apply exactly the same contact-level filtering as a standard query — they
+ * append these clauses to their own contact-id-batch base.
  */
 function buildExtraContactFilter(filters: CampaignFilters): string {
-    let extraFilter = "";
-    const { filter, search, clientType, entityType, bank, sourceCode, province, geographicLocation, ageMin, ageMax, ownerId, industryId } = filters;
-    if (filter) extraFilter += ` and (${filter})`;
-    if (search) {
-        const s = search.replace(/'/g, "''");
-        extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
-    }
-    if (clientType !== undefined && clientType !== null) {
-        const n = parseInt(String(clientType), 10);
-        if (!Number.isNaN(n)) extraFilter += ` and riivo_clienttypenew eq ${n}`;
-    }
-    if (entityType !== undefined) extraFilter += ` and riivo_clienttypeindbus eq ${entityType}`;
-    if (bank !== undefined) extraFilter += ` and ttt_bank eq ${bank}`;
-    if (sourceCode && (Array.isArray(sourceCode) ? sourceCode.length : 1)) {
-        const values = Array.isArray(sourceCode) ? sourceCode.map(String).join("','") : String(sourceCode);
-        extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-    }
-    if (province) {
-        const prov = province.replace(/'/g, "''");
-        extraFilter += ` and address1_stateorprovince eq '${prov}'`;
-    }
-    if (geographicLocation !== undefined) extraFilter += ` and riivo_geographiclocation eq ${geographicLocation}`;
-    if (ageMin !== undefined) extraFilter += ` and riivo_age ge ${ageMin}`;
-    if (ageMax !== undefined) extraFilter += ` and riivo_age le ${ageMax}`;
-    if (ownerId) extraFilter += ` and _ownerid_value eq '${ownerId}'`;
-    if (industryId) extraFilter += ` and _riivo_industryid_value eq '${industryId}'`;
-    if (filters.nameRangeStart) extraFilter += ` and fullname ge '${filters.nameRangeStart}'`;
-    if (filters.nameRangeEnd && filters.nameRangeEnd !== "Z") {
-        const nextChar = String.fromCharCode(filters.nameRangeEnd.charCodeAt(0) + 1);
-        extraFilter += ` and fullname lt '${nextChar}'`;
-    }
-    return extraFilter;
+    return buildContactFilterClauses(toContactFilter(filters));
 }
 
 const CONTACT_SELECT_SIMPLE = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber,riivo_referralcode";

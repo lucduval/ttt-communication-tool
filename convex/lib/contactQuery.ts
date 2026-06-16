@@ -37,6 +37,14 @@ export interface ContactFilter {
     ownerId?: string;
     /** Industry scope (_riivo_industryid_value). */
     industryId?: string;
+    /** Alphabetical name-range lower bound (fullname ge). Used for batch sending. */
+    nameRangeStart?: string;
+    /**
+     * Alphabetical name-range upper bound. Emitted as fullname lt the letter
+     * after nameRangeEnd, so the range is inclusive of the named letter. A value
+     * of "Z" contributes no upper bound (the range extends to the end).
+     */
+    nameRangeEnd?: string;
 }
 
 /**
@@ -54,58 +62,82 @@ export function escapeODataValue(value: string): string {
  * and appends one clause per populated filter field, in a fixed order.
  */
 export function buildContactFilter(filter: ContactFilter): string {
-    let filterExpression = "statecode eq 0";
+    return "statecode eq 0" + buildContactFilterClauses(filter);
+}
+
+/**
+ * Build only the appended clauses for a typed filter object — the same clauses
+ * buildContactFilter adds after the active-only base, in the same fixed order,
+ * but without the leading "statecode eq 0".
+ *
+ * This is the "extra filter" form used by two-step audience queries that resolve
+ * a related entity first and then re-query contacts with their own id-batch base
+ * (e.g. tax-return / ITA34 / bad-debt sends). They append these clauses to their
+ * own base so the contact-level filtering stays identical to a standard query.
+ * Returns "" when no fields are populated.
+ */
+export function buildContactFilterClauses(filter: ContactFilter): string {
+    let clauses = "";
 
     if (filter.filter) {
-        filterExpression += ` and (${filter.filter})`;
+        clauses += ` and (${filter.filter})`;
     }
 
     if (filter.search) {
         const searchTerm = escapeODataValue(filter.search);
-        filterExpression += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
+        clauses += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
     }
 
     if (filter.clientType) {
-        filterExpression += ` and riivo_clienttypenew eq '${filter.clientType}'`;
+        clauses += ` and riivo_clienttypenew eq '${filter.clientType}'`;
     }
 
     if (filter.entityType !== undefined) {
-        filterExpression += ` and riivo_clienttypeindbus eq ${filter.entityType}`;
+        clauses += ` and riivo_clienttypeindbus eq ${filter.entityType}`;
     }
 
     if (filter.bank !== undefined) {
-        filterExpression += ` and ttt_bank eq ${filter.bank}`;
+        clauses += ` and ttt_bank eq ${filter.bank}`;
     }
 
     if (filter.sourceCode && filter.sourceCode.length > 0) {
         const values = filter.sourceCode.map(String).join("','");
-        filterExpression += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
+        clauses += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
     }
 
     if (filter.province) {
         const prov = escapeODataValue(filter.province);
-        filterExpression += ` and address1_stateorprovince eq '${prov}'`;
+        clauses += ` and address1_stateorprovince eq '${prov}'`;
     }
 
     if (filter.geographicLocation !== undefined) {
-        filterExpression += ` and riivo_geographiclocation eq ${filter.geographicLocation}`;
+        clauses += ` and riivo_geographiclocation eq ${filter.geographicLocation}`;
     }
 
     if (filter.ageMin !== undefined) {
-        filterExpression += ` and riivo_age ge ${filter.ageMin}`;
+        clauses += ` and riivo_age ge ${filter.ageMin}`;
     }
 
     if (filter.ageMax !== undefined) {
-        filterExpression += ` and riivo_age le ${filter.ageMax}`;
+        clauses += ` and riivo_age le ${filter.ageMax}`;
     }
 
     if (filter.ownerId) {
-        filterExpression += ` and _ownerid_value eq '${filter.ownerId}'`;
+        clauses += ` and _ownerid_value eq '${filter.ownerId}'`;
     }
 
     if (filter.industryId) {
-        filterExpression += ` and _riivo_industryid_value eq '${filter.industryId}'`;
+        clauses += ` and _riivo_industryid_value eq '${filter.industryId}'`;
     }
 
-    return filterExpression;
+    if (filter.nameRangeStart) {
+        clauses += ` and fullname ge '${filter.nameRangeStart}'`;
+    }
+
+    if (filter.nameRangeEnd && filter.nameRangeEnd !== "Z") {
+        const nextChar = String.fromCharCode(filter.nameRangeEnd.charCodeAt(0) + 1);
+        clauses += ` and fullname lt '${nextChar}'`;
+    }
+
+    return clauses;
 }

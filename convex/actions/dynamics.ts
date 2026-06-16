@@ -269,61 +269,23 @@ export const getContactCount = action({
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
-        // Build filter expression
-        let filterExpression = "statecode eq 0";
-
-        if (filter) {
-            filterExpression += ` and (${filter})`;
-        }
-
-        if (search) {
-            const searchTerm = search.replace(/'/g, "''");
-            filterExpression += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
-        }
-
-        if (clientType) {
-            filterExpression += ` and riivo_clienttypenew eq '${clientType}'`;
-        }
-
-        if (entityType !== undefined) {
-            filterExpression += ` and riivo_clienttypeindbus eq ${entityType}`;
-        }
-
-        if (bank !== undefined) {
-            filterExpression += ` and ttt_bank eq ${bank}`;
-        }
-
-        if (sourceCode && sourceCode.length > 0) {
-            const values = sourceCode.map(String).join("','");
-            filterExpression += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-
-        if (province) {
-            const prov = province.replace(/'/g, "''");
-            filterExpression += ` and address1_stateorprovince eq '${prov}'`;
-        }
-
-        if (geographicLocation !== undefined) {
-            filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
-        }
-
-        if (ageMin !== undefined) {
-            filterExpression += ` and riivo_age ge ${ageMin}`;
-        }
-
-        if (ageMax !== undefined) {
-            filterExpression += ` and riivo_age le ${ageMax}`;
-        }
-
-        if (ownerId) {
-            filterExpression += ` and _ownerid_value eq '${ownerId}'`;
-        }
-
-        if (industryId) {
-            filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
-        }
-
-
+        // Build the contact-level filter via the Contact Query module so count,
+        // select-all, the recipient list, and the send-time stream all derive
+        // their audience from one place.
+        const filterExpression = buildContactFilter({
+            filter,
+            search,
+            clientType,
+            entityType,
+            bank,
+            sourceCode,
+            province,
+            geographicLocation,
+            ageMin,
+            ageMax,
+            ownerId,
+            industryId,
+        });
 
         console.log(`[getContactCount] Filter Expression: ${filterExpression}`);
 
@@ -393,59 +355,22 @@ export const fetchAllContactIds = action({
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
-        // Build filter expression
-        let filterExpression = "statecode eq 0";
-
-        if (filter) {
-            filterExpression += ` and (${filter})`;
-        }
-
-        if (search) {
-            const searchTerm = search.replace(/'/g, "''");
-            filterExpression += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
-        }
-
-        if (clientType) {
-            filterExpression += ` and riivo_clienttypenew eq '${clientType}'`;
-        }
-
-        if (entityType !== undefined) {
-            filterExpression += ` and riivo_clienttypeindbus eq ${entityType}`;
-        }
-
-        if (bank !== undefined) {
-            filterExpression += ` and ttt_bank eq ${bank}`;
-        }
-
-        if (sourceCode && sourceCode.length > 0) {
-            const values = sourceCode.map(String).join("','");
-            filterExpression += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-
-        if (province) {
-            const prov = province.replace(/'/g, "''");
-            filterExpression += ` and address1_stateorprovince eq '${prov}'`;
-        }
-
-        if (geographicLocation !== undefined) {
-            filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
-        }
-
-        if (ageMin !== undefined) {
-            filterExpression += ` and riivo_age ge ${ageMin}`;
-        }
-
-        if (ageMax !== undefined) {
-            filterExpression += ` and riivo_age le ${ageMax}`;
-        }
-
-        if (ownerId) {
-            filterExpression += ` and _ownerid_value eq '${ownerId}'`;
-        }
-
-        if (industryId) {
-            filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
-        }
+        // Build the contact-level filter via the Contact Query module so the
+        // select-all audience matches the recipient list, count, and send.
+        const filterExpression = buildContactFilter({
+            filter,
+            search,
+            clientType,
+            entityType,
+            bank,
+            sourceCode,
+            province,
+            geographicLocation,
+            ageMin,
+            ageMax,
+            ownerId,
+            industryId,
+        });
 
         console.log(`[fetchAllContactIds] Filter Expression: ${filterExpression}`);
 
