@@ -3,6 +3,7 @@
 import { action, internalAction } from "../_generated/server";
 import { v } from "convex/values";
 import { dynamicsRequest } from "../lib/dynamics_auth";
+import { buildContactFilter } from "../lib/contactQuery";
 import { api } from "../_generated/api";
 export { dynamicsRequest };
 
@@ -143,68 +144,22 @@ export const fetchContacts = action({
         // Select specific fields
         queryParts.push(`$select=${CONTACT_SELECT_FIELDS}`);
 
-        // Always filter for active contacts (statecode = 0)
-        let filterExpression = "statecode eq 0";
-
-        // Add custom filter if provided
-        if (filter) {
-            filterExpression += ` and (${filter})`;
-        }
-
-        // Add search if provided (search in fullname or emailaddress1)
-        if (search) {
-            const searchTerm = search.replace(/'/g, "''"); // Escape single quotes
-            filterExpression += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
-        }
-
-        // --- New Filters ---
-        // OptionSet fields require integer values; avoid Edm.String vs Edm.Int32 mismatch.
-
-        if (clientType) {
-            filterExpression += ` and riivo_clienttypenew eq '${clientType}'`;
-        }
-
-        if (entityType !== undefined) {
-            filterExpression += ` and riivo_clienttypeindbus eq ${entityType}`;
-        }
-
-        if (bank !== undefined) {
-            filterExpression += ` and ttt_bank eq ${bank}`;
-        }
-
-        if (sourceCode && sourceCode.length > 0) {
-            // For MultiSelect, use containment or OR logic. 
-            // Dynamics 365 MultiSelect filtering: Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['1','2'])
-            // Ideally we construct a string of values.
-            // Simplified: "contain-values"
-            const values = sourceCode.map(String).join("','");
-            filterExpression += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-
-        if (province) {
-            const prov = province.replace(/'/g, "''");
-            filterExpression += ` and address1_stateorprovince eq '${prov}'`;
-        }
-
-        if (geographicLocation !== undefined) {
-            filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
-        }
-
-        if (ageMin !== undefined) {
-            filterExpression += ` and riivo_age ge ${ageMin}`;
-        }
-
-        if (ageMax !== undefined) {
-            filterExpression += ` and riivo_age le ${ageMax}`;
-        }
-
-        if (ownerId) {
-            filterExpression += ` and _ownerid_value eq '${ownerId}'`;
-        }
-
-        if (industryId) {
-            filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
-        }
+        // Build the contact-level filter via the Contact Query module so the
+        // recipient list shares one canonical filter definition and escaping.
+        const filterExpression = buildContactFilter({
+            filter,
+            search,
+            clientType,
+            entityType,
+            bank,
+            sourceCode,
+            province,
+            geographicLocation,
+            ageMin,
+            ageMax,
+            ownerId,
+            industryId,
+        });
 
         console.log(`[fetchContacts] Filter Expression: ${filterExpression}`);
 
