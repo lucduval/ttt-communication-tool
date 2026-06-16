@@ -1,6 +1,6 @@
 
 import { dynamicsRequest } from "../actions/dynamics";
-import { buildContactFilter, buildContactFilterClauses, type ContactFilter } from "./contactQuery";
+import { buildContactFilterClauses, streamContacts, type ContactFilter } from "./contactQuery";
 
 interface SimpleContact {
     contactid: string;
@@ -91,75 +91,25 @@ export async function fetchMatchingContacts(
     filters: CampaignFilters,
     onChunk: (contacts: ShimmedContact[]) => Promise<void>
 ) {
-    // Build the contact-level filter via the Contact Query module so the
-    // send-time audience matches the recipient list, count, and select-all.
-    const filterExpression = buildContactFilter(toContactFilter(filters));
-
-    console.log(`[fetchMatchingContacts] Filter Expression: ${filterExpression}`);
-
+    // Stream the send-time audience through the Contact Query module so it shares
+    // one filter definition with the recipient list, count, and select-all, and
+    // so pagination cursors and retry/backoff are handled in one place.
     const selectFields = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber,riivo_referralcode";
-    const initialEndpoint = `contacts?$filter=${filterExpression}&$select=${selectFields}&$orderby=fullname asc`;
 
-    interface SimpleContactsResponse {
-        "@odata.context": string;
-        "@odata.nextLink"?: string;
-        value: SimpleContact[];
-    }
-
-    let nextLink: string | null = initialEndpoint;
-    let pageCount = 0;
-    const MAX_PAGES = 1000; // 50k contacts limit safe guard
-    const MAX_PAGE_RETRIES = 3;
-
-    while (nextLink && pageCount < MAX_PAGES) {
-        pageCount++;
-        const currentLink: string = nextLink;
-        if (currentLink.startsWith("http")) {
-            nextLink = currentLink.replace(/^.*\/api\/data\/v9\.2\//, "");
-        } else {
-            nextLink = currentLink;
-        }
-
-        if (!nextLink) break;
-
-        let pageSuccess = false;
-        let lastError: unknown;
-
-        for (let attempt = 1; attempt <= MAX_PAGE_RETRIES; attempt++) {
-            try {
-                const response: SimpleContactsResponse = await dynamicsRequest<SimpleContactsResponse>(nextLink!);
-
-                if (response.value && response.value.length > 0) {
-                    const chunk = response.value.map((contact) => ({
-                        id: contact.contactid,
-                        fullName: contact.fullname || "",
-                        email: contact.emailaddress1,
-                        phone: contact.mobilephone,
-                        internationalPhone: (contact as any).icon_formattedmobilenumber || null,
-                        referralCode: contact.riivo_referralcode || null,
-                    }));
-
-                    await onChunk(chunk);
-                }
-
-                nextLink = response["@odata.nextLink"] || null;
-                pageSuccess = true;
-                break;
-            } catch (error) {
-                lastError = error;
-                console.warn(`Error fetching contacts page ${pageCount} (attempt ${attempt}/${MAX_PAGE_RETRIES}):`, error);
-                if (attempt < MAX_PAGE_RETRIES) {
-                    // Exponential backoff: 1s, 2s, 4s
-                    await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
-                }
-            }
-        }
-
-        if (!pageSuccess) {
-            console.error(`Failed to fetch contacts page ${pageCount} after ${MAX_PAGE_RETRIES} attempts. Aborting.`, lastError);
-            throw lastError;
-        }
-    }
+    await streamContacts<SimpleContact>(toContactFilter(filters), {
+        select: selectFields,
+        onPage: async (rows) => {
+            const chunk = rows.map((contact) => ({
+                id: contact.contactid,
+                fullName: contact.fullname || "",
+                email: contact.emailaddress1,
+                phone: contact.mobilephone,
+                internationalPhone: (contact as any).icon_formattedmobilenumber || null,
+                referralCode: contact.riivo_referralcode || null,
+            }));
+            await onChunk(chunk);
+        },
+    });
 }
 
 /**

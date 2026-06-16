@@ -3,7 +3,11 @@
 import { action, internalAction } from "../_generated/server";
 import { v } from "convex/values";
 import { dynamicsRequest } from "../lib/dynamics_auth";
-import { buildContactFilter } from "../lib/contactQuery";
+import {
+    countContacts,
+    fetchContactsPage,
+    streamContacts,
+} from "../lib/contactQuery";
 import { api } from "../_generated/api";
 export { dynamicsRequest };
 
@@ -85,13 +89,6 @@ export interface DynamicsContact {
     riivo_geographiclocation: number | null;
 }
 
-interface ContactsResponse {
-    "@odata.context": string;
-    "@odata.nextLink"?: string;
-    "@odata.count"?: number;
-    value: DynamicsContact[];
-}
-
 /**
  * Fetch contacts from Dynamics 365 with filtering and pagination
  */
@@ -138,62 +135,34 @@ export const fetchContacts = action({
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
-        // Build OData query parameters
-        const queryParts: string[] = [];
-
-        // Select specific fields
-        queryParts.push(`$select=${CONTACT_SELECT_FIELDS}`);
-
-        // Build the contact-level filter via the Contact Query module so the
-        // recipient list shares one canonical filter definition and escaping.
-        const filterExpression = buildContactFilter({
-            filter,
-            search,
-            clientType,
-            entityType,
-            bank,
-            sourceCode,
-            province,
-            geographicLocation,
-            ageMin,
-            ageMax,
-            ownerId,
-            industryId,
-        });
-
-        console.log(`[fetchContacts] Filter Expression: ${filterExpression}`);
-
-        queryParts.push(`$filter=${filterExpression}`);
-
-        // Order by name
-        queryParts.push("$orderby=fullname asc");
-
-        // For count-only queries, use $top=1 to minimise data transfer
-        if (countOnly) {
-            queryParts.push("$count=true");
-            queryParts.push("$top=1");
-        }
-        // Do NOT add $top for normal paged queries — Dynamics ignores @odata.nextLink when
-        // $top is present (it treats $top as a hard limit, not a page size).
-        // Page size is controlled exclusively via the Prefer: odata.maxpagesize header.
-
-        // Build the endpoint
-        let endpoint = `contacts?${queryParts.join("&")}`;
-
-        // If we have a skipToken, use it for pagination
-        if (skipToken) {
-            endpoint = skipToken.replace(/^.*\/api\/data\/v9\.2\//, "");
-        }
-
-        // odata.maxpagesize controls page size and triggers @odata.nextLink in the response
-        const response = await dynamicsRequest<ContactsResponse>(endpoint, {
-            headers: {
-                Prefer: `odata.include-annotations="*",odata.maxpagesize=${top}`,
+        // Fetch a single page via the Contact Query module so the recipient list
+        // shares one canonical filter definition and never assembles page-size
+        // headers or cursor tokens itself.
+        const response = await fetchContactsPage<DynamicsContact>(
+            {
+                filter,
+                search,
+                clientType,
+                entityType,
+                bank,
+                sourceCode,
+                province,
+                geographicLocation,
+                ageMin,
+                ageMax,
+                ownerId,
+                industryId,
             },
-        });
+            {
+                select: CONTACT_SELECT_FIELDS,
+                pageSize: top,
+                cursor: skipToken,
+                countOnly,
+            }
+        );
 
         // Transform the response
-        const contacts = response.value.map((contact) => ({
+        const contacts = (response.value ?? []).map((contact) => ({
             id: contact.contactid,
             fullName: contact.fullname,
             firstName: contact.firstname,
@@ -269,10 +238,11 @@ export const getContactCount = action({
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
-        // Build the contact-level filter via the Contact Query module so count,
-        // select-all, the recipient list, and the send-time stream all derive
-        // their audience from one place.
-        const filterExpression = buildContactFilter({
+        // Count via the Contact Query module so count, select-all, the recipient
+        // list, and the send-time stream all derive their audience from one place.
+        // The module handles the Dynamics @odata.count 5000 ceiling internally,
+        // paginating contactids to recover the true total when it is hit.
+        const count = await countContacts({
             filter,
             search,
             clientType,
@@ -287,32 +257,7 @@ export const getContactCount = action({
             industryId,
         });
 
-        console.log(`[getContactCount] Filter Expression: ${filterExpression}`);
-
-        // Dynamics @odata.count caps at 5000 in many environments.
-        // When the count hits that ceiling, paginate with only contactid
-        // to get the true total.
-        const initialEndpoint = `contacts?$filter=${filterExpression}&$count=true&$top=1&$select=contactid`;
-        const initialResponse = await dynamicsRequest<ContactsResponse>(initialEndpoint);
-        const odataCount = initialResponse["@odata.count"] || 0;
-
-        if (odataCount < 5000) {
-            return { count: odataCount };
-        }
-
-        // Count exceeded 5000 — paginate to get the real number
-        let total = 0;
-        let countUrl = `contacts?$filter=${filterExpression}&$select=contactid&$count=true` as string | null;
-        for (let p = 0; countUrl && p < 200; p++) {
-            const url = countUrl.startsWith("http")
-                ? countUrl.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : countUrl;
-            const page: ContactsResponse = await dynamicsRequest(url);
-            total += (page.value?.length ?? 0);
-            countUrl = page["@odata.nextLink"] ?? null;
-        }
-
-        return { count: total };
+        return { count };
     },
 });
 
@@ -355,76 +300,44 @@ export const fetchAllContactIds = action({
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
-        // Build the contact-level filter via the Contact Query module so the
-        // select-all audience matches the recipient list, count, and send.
-        const filterExpression = buildContactFilter({
-            filter,
-            search,
-            clientType,
-            entityType,
-            bank,
-            sourceCode,
-            province,
-            geographicLocation,
-            ageMin,
-            ageMax,
-            ownerId,
-            industryId,
-        });
-
-        console.log(`[fetchAllContactIds] Filter Expression: ${filterExpression}`);
-
-        // We only need basic fields for campaign creation
-        const selectFields = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber";
-
-        const initialEndpoint = `contacts?$filter=${filterExpression}&$select=${selectFields}&$orderby=fullname asc`;
-
         interface SimpleContact {
             contactid: string;
             fullname: string;
             emailaddress1: string | null;
             mobilephone: string | null;
             icon_formattedmobilenumber: string | null;
-            // Include other fields if they are in the response but we only asked for these
         }
 
-        interface SimpleContactsResponse {
-            "@odata.context": string;
-            "@odata.nextLink"?: string;
-            value: SimpleContact[];
-        }
+        // We only need basic fields for campaign creation
+        const selectFields = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber";
 
-        let allContacts: SimpleContact[] = [];
-        let nextLink: string | null = initialEndpoint;
-
-        // Loop through pages
-        // Safety break to prevent infinite loops if something goes wrong
-        let pageCount = 0;
-        const MAX_PAGES = 500; // 500 * 50 = 25000 records, should be enough for now. 
-        // Note: Dynamics usually returns 5000 records per page if not specified, but we didn't specify page size so it might default to 50 or 5000.
-        // Let's rely on nextLink.
-
-        while (nextLink && pageCount < MAX_PAGES) {
-            pageCount++;
-
-            // If nextLink is a full URL (from OData response), extract relative part
-            // Dynamics nextLink is usually full URL
-            if (nextLink.startsWith("http")) {
-                // We need to keep the query part but remove the base URL
-                // Ideally dynamicsRequest handles full URLs if we pass them? 
-                // Looking at dynamicsRequest implementation would be good but let's assume it takes relative path based on existing code 
-                // "endpoint = skipToken.replace(/^.*\/api\/data\/v9\.2\//, "");" in fetchContacts suggests we need to strip base.
-                nextLink = nextLink.replace(/^.*\/api\/data\/v9\.2\//, "");
+        // Stream every matching contact through the Contact Query module so the
+        // select-all audience matches the recipient list, count, and send, and so
+        // pagination is handled in one place. 500 pages is the safety cap.
+        const allContacts: SimpleContact[] = [];
+        await streamContacts<SimpleContact>(
+            {
+                filter,
+                search,
+                clientType,
+                entityType,
+                bank,
+                sourceCode,
+                province,
+                geographicLocation,
+                ageMin,
+                ageMax,
+                ownerId,
+                industryId,
+            },
+            {
+                select: selectFields,
+                maxPages: 500,
+                onPage: (rows) => {
+                    allContacts.push(...rows);
+                },
             }
-
-            const response: SimpleContactsResponse = await dynamicsRequest<SimpleContactsResponse>(nextLink);
-
-            if (response.value && response.value.length > 0) {
-                allContacts.push(...response.value);
-            }
-
-            nextLink = response["@odata.nextLink"] || null;
-        }
+        );
 
         return allContacts.map((contact) => ({
             id: contact.contactid,
