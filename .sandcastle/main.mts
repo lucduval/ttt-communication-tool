@@ -44,7 +44,13 @@ await run({
       // onSandboxReady runs once after the sandbox is initialised and the repo is
       // synced in, before the agent starts. Use it to install dependencies or run
       // any other setup steps your project needs.
-      onSandboxReady: [{ command: "npm install" }],
+      //
+      // copyToWorktree brings in the host's macOS node_modules, so this install
+      // mainly re-fetches the Linux-native binaries (esbuild, etc.). That can take
+      // several minutes on the first run, so the default 60s timeout is too low.
+      onSandboxReady: [
+        { command: "npm install --no-audit --no-fund", timeoutMs: 600000 },
+      ],
     },
   },
 });
