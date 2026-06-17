@@ -261,6 +261,137 @@ export async function streamPages<T>(
     }
 }
 
+// ---- Entity-agnostic execution core ----
+//
+// stream / count / fetch-page accept a prebuilt filter expression plus the
+// entity, select, order, and id-field, so any entity (contacts, leads, …) can
+// drive the same paging / retry / count engine. The contact operations below
+// are thin facades that build the contact filter and call into these.
+
+/** Options for {@link streamEntity}. */
+export interface StreamEntityOptions<T> extends StreamPagesOptions<T> {
+    /** Collection to query (e.g. "contacts", "leads"). */
+    entity: string;
+    /** Columns to retrieve ($select). */
+    select: string;
+    /** Order clause ($orderby). */
+    orderby: string;
+}
+
+/**
+ * Stream every row of an entity matching a prebuilt filter expression, page by
+ * page. Owns cursor extraction, normalization, page-size control, and retry via
+ * {@link streamPages}; entity-agnostic so siblings reuse it without duplicating
+ * paging.
+ */
+export async function streamEntity<T>(
+    filterExpression: string,
+    opts: StreamEntityOptions<T>
+): Promise<void> {
+    const initialEndpoint = `${opts.entity}?$filter=${filterExpression}&$select=${opts.select}&$orderby=${opts.orderby}`;
+    await streamPages<T>(initialEndpoint, opts);
+}
+
+/** Options for {@link countEntity}. */
+export interface CountEntityOptions extends RequestExecutionOptions {
+    /** Collection to query (e.g. "contacts", "leads"). */
+    entity: string;
+    /** Primary-key column used for the probe and id-pagination pass. */
+    idField: string;
+    /**
+     * The `@odata.count` ceiling above which Dynamics caps the reported count.
+     * Hitting it triggers an id pagination pass for the true total. Defaults to 5000.
+     */
+    ceiling?: number;
+    /** Safety cap on pages followed during the pagination pass. Defaults to 200. */
+    maxPages?: number;
+}
+
+/**
+ * Count rows of an entity matching a prebuilt filter expression. Uses
+ * `@odata.count` when it is below the ceiling; otherwise paginates ids to recover
+ * the true total. Entity-agnostic so the count-fallback engine is shared.
+ */
+export async function countEntity(
+    filterExpression: string,
+    opts: CountEntityOptions
+): Promise<number> {
+    const request = opts.request ?? dynamicsRequest;
+    const ceiling = opts.ceiling ?? 5000;
+    const { entity, idField } = opts;
+
+    const probeEndpoint = `${entity}?$filter=${filterExpression}&$count=true&$top=1&$select=${idField}`;
+    const probe = await request<DynamicsPage<Record<string, string>>>(probeEndpoint);
+    const odataCount = probe["@odata.count"] ?? 0;
+    if (odataCount < ceiling) {
+        return odataCount;
+    }
+
+    // Count exceeded the ceiling — paginate to get the real number.
+    let total = 0;
+    await streamPages<Record<string, string>>(
+        `${entity}?$filter=${filterExpression}&$select=${idField}&$count=true`,
+        {
+            request: opts.request,
+            sleep: opts.sleep,
+            maxRetries: opts.maxRetries,
+            maxPages: opts.maxPages ?? 200,
+            onPage: (rows) => {
+                total += rows.length;
+            },
+        }
+    );
+    return total;
+}
+
+/** Options for {@link fetchEntityPage}. */
+export interface FetchEntityPageOptions extends RequestExecutionOptions {
+    /** Collection to query (e.g. "contacts", "leads"). */
+    entity: string;
+    /** Columns to retrieve ($select). */
+    select: string;
+    /** Order clause ($orderby). */
+    orderby: string;
+    /** Page size via the Prefer: odata.maxpagesize header. */
+    pageSize: number;
+    /** A nextLink/skip token from a prior page; followed verbatim after normalization. */
+    cursor?: string;
+    /** Request `@odata.count` for the (capped) total. */
+    countOnly?: boolean;
+}
+
+/**
+ * Fetch a single page of an entity for a client-driven recipient list. Builds the
+ * request (or follows a normalized cursor) and applies the page-size header.
+ * Entity-agnostic; returns the raw Dynamics page.
+ */
+export async function fetchEntityPage<T>(
+    filterExpression: string,
+    opts: FetchEntityPageOptions
+): Promise<DynamicsPage<T>> {
+    const request = opts.request ?? dynamicsRequest;
+    let endpoint: string;
+    if (opts.cursor) {
+        endpoint = normalizeEndpoint(opts.cursor);
+    } else {
+        const parts = [
+            `$select=${opts.select}`,
+            `$filter=${filterExpression}`,
+            `$orderby=${opts.orderby}`,
+        ];
+        if (opts.countOnly) {
+            parts.push("$count=true");
+            parts.push("$top=1");
+        }
+        endpoint = `${opts.entity}?${parts.join("&")}`;
+    }
+    return request<DynamicsPage<T>>(endpoint, {
+        headers: { Prefer: `odata.include-annotations="*",odata.maxpagesize=${opts.pageSize}` },
+    });
+}
+
+// ---- Contact facades over the entity-agnostic core ----
+
 /** Options for {@link streamContacts}. */
 interface StreamContactsOptions<T> extends StreamPagesOptions<T> {
     /** Columns to retrieve ($select). */
@@ -274,17 +405,19 @@ interface StreamContactsOptions<T> extends StreamPagesOptions<T> {
 /**
  * Stream every contact matching a typed filter, page by page. The filter is built
  * here from the typed object so the owner scope (and every other clause) is always
- * applied — callers cannot pass a pre-built string that bypasses it.
+ * applied — callers cannot pass a pre-built string that bypasses it. A thin facade
+ * over {@link streamEntity}.
  */
 export async function streamContacts<T>(
     filter: ContactFilter,
     opts: StreamContactsOptions<T>
 ): Promise<void> {
-    const entity = opts.entity ?? "contacts";
-    const orderby = opts.orderby ?? "fullname asc";
-    const filterExpression = buildContactFilter(filter);
-    const initialEndpoint = `${entity}?$filter=${filterExpression}&$select=${opts.select}&$orderby=${orderby}`;
-    await streamPages<T>(initialEndpoint, opts);
+    await streamEntity<T>(buildContactFilter(filter), {
+        ...opts,
+        entity: opts.entity ?? "contacts",
+        select: opts.select,
+        orderby: opts.orderby ?? "fullname asc",
+    });
 }
 
 /** Options for {@link countContacts}. */
@@ -302,38 +435,18 @@ interface CountContactsOptions extends RequestExecutionOptions {
 /**
  * Count contacts matching a typed filter. Uses `@odata.count` when it is below the
  * ceiling; otherwise paginates contactids to recover the true total. Owner scope
- * is always applied because the filter is built from the typed object here.
+ * is always applied because the filter is built from the typed object here. A thin
+ * facade over {@link countEntity}.
  */
 export async function countContacts(
     filter: ContactFilter,
     opts: CountContactsOptions = {}
 ): Promise<number> {
-    const request = opts.request ?? dynamicsRequest;
-    const ceiling = opts.ceiling ?? 5000;
-    const filterExpression = buildContactFilter(filter);
-
-    const probeEndpoint = `contacts?$filter=${filterExpression}&$count=true&$top=1&$select=contactid`;
-    const probe = await request<DynamicsPage<{ contactid: string }>>(probeEndpoint);
-    const odataCount = probe["@odata.count"] ?? 0;
-    if (odataCount < ceiling) {
-        return odataCount;
-    }
-
-    // Count exceeded the ceiling — paginate to get the real number.
-    let total = 0;
-    await streamPages<{ contactid: string }>(
-        `contacts?$filter=${filterExpression}&$select=contactid&$count=true`,
-        {
-            request: opts.request,
-            sleep: opts.sleep,
-            maxRetries: opts.maxRetries,
-            maxPages: opts.maxPages ?? 200,
-            onPage: (rows) => {
-                total += rows.length;
-            },
-        }
-    );
-    return total;
+    return countEntity(buildContactFilter(filter), {
+        ...opts,
+        entity: "contacts",
+        idField: "contactid",
+    });
 }
 
 /** Options for {@link fetchContactsPage}. */
@@ -353,29 +466,18 @@ interface FetchContactsPageOptions extends RequestExecutionOptions {
 /**
  * Fetch a single page of contacts for the client-driven recipient list. Builds the
  * request (or follows a normalized cursor) and applies the page-size header so the
- * caller never assembles paging details itself. Returns the raw Dynamics page.
+ * caller never assembles paging details itself. Returns the raw Dynamics page. A
+ * thin facade over {@link fetchEntityPage}.
  */
 export async function fetchContactsPage<T>(
     filter: ContactFilter,
     opts: FetchContactsPageOptions
 ): Promise<DynamicsPage<T>> {
-    const request = opts.request ?? dynamicsRequest;
-    let endpoint: string;
-    if (opts.cursor) {
-        endpoint = normalizeEndpoint(opts.cursor);
-    } else {
-        const parts = [
-            `$select=${opts.select}`,
-            `$filter=${buildContactFilter(filter)}`,
-            `$orderby=${opts.orderby ?? "fullname asc"}`,
-        ];
-        if (opts.countOnly) {
-            parts.push("$count=true");
-            parts.push("$top=1");
-        }
-        endpoint = `contacts?${parts.join("&")}`;
-    }
-    return request<DynamicsPage<T>>(endpoint, {
-        headers: { Prefer: `odata.include-annotations="*",odata.maxpagesize=${opts.pageSize}` },
+    return fetchEntityPage<T>(buildContactFilter(filter), {
+        ...opts,
+        entity: "contacts",
+        select: opts.select,
+        orderby: opts.orderby ?? "fullname asc",
+        pageSize: opts.pageSize,
     });
 }

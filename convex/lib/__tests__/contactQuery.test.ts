@@ -4,9 +4,13 @@ import {
     buildContactFilterClauses,
     escapeODataValue,
     normalizeEndpoint,
+    streamPages,
     streamContacts,
     countContacts,
     fetchContactsPage,
+    streamEntity,
+    countEntity,
+    fetchEntityPage,
     type ContactFilter,
     type DynamicsPage,
     type DynamicsRequestFn,
@@ -411,5 +415,160 @@ describe("fetchContactsPage", () => {
             }
         );
         expect(endpoints[0]).toBe("contacts?$skiptoken=p2");
+    });
+});
+
+// ---- Entity-agnostic execution core ----
+//
+// The core operations accept a prebuilt filter expression plus the entity,
+// select, order, and id-field, so a sibling module (e.g. Lead Query) can drive
+// the same paging/retry/count engine without duplicating it. These tests use a
+// non-contact entity ("leads") to prove the engine is genuinely entity-agnostic.
+
+describe("streamEntity", () => {
+    test("pages through a non-contact entity, normalizing each cursor", async () => {
+        const { request, endpoints } = fakeRequest([
+            {
+                value: [{ leadid: "1" }],
+                "@odata.nextLink":
+                    "https://org.api.crm.dynamics.com/api/data/v9.2/leads?$skiptoken=p2",
+            },
+            { value: [{ leadid: "2" }] },
+        ]);
+
+        const collected: Array<{ leadid: string }> = [];
+        await streamEntity<{ leadid: string }>("statecode eq 0", {
+            entity: "leads",
+            select: "leadid",
+            orderby: "fullname asc",
+            request,
+            onPage: (rows) => {
+                collected.push(...rows);
+            },
+        });
+
+        expect(collected.map((c) => c.leadid)).toEqual(["1", "2"]);
+        expect(endpoints[0]).toBe(
+            "leads?$filter=statecode eq 0&$select=leadid&$orderby=fullname asc"
+        );
+        expect(endpoints[1]).toBe("leads?$skiptoken=p2");
+    });
+
+    test("uses the prebuilt filter expression verbatim", async () => {
+        const { request, endpoints } = fakeRequest([{ value: [] }]);
+        await streamEntity("statecode eq 0 and _ownerid_value eq 'owner-9'", {
+            entity: "leads",
+            select: "leadid",
+            orderby: "fullname asc",
+            request,
+            onPage: () => {},
+        });
+        expect(endpoints[0]).toContain("_ownerid_value eq 'owner-9'");
+    });
+});
+
+describe("countEntity", () => {
+    test("returns the odata count when below the ceiling", async () => {
+        const { request, endpoints } = fakeRequest([{ "@odata.count": 7, value: [] }]);
+        expect(
+            await countEntity("statecode eq 0", {
+                entity: "leads",
+                idField: "leadid",
+                request,
+            })
+        ).toBe(7);
+        expect(endpoints[0]).toBe(
+            "leads?$filter=statecode eq 0&$count=true&$top=1&$select=leadid"
+        );
+    });
+
+    test("paginates ids when the count hits the ceiling", async () => {
+        const { request, endpoints } = fakeRequest([
+            { "@odata.count": 5000, value: [{ leadid: "probe" }] },
+            {
+                value: [{ leadid: "1" }, { leadid: "2" }],
+                "@odata.nextLink":
+                    "https://org.api.crm.dynamics.com/api/data/v9.2/leads?$skiptoken=p2",
+            },
+            { value: [{ leadid: "3" }] },
+        ]);
+        expect(
+            await countEntity("statecode eq 0", {
+                entity: "leads",
+                idField: "leadid",
+                ceiling: 5000,
+                request,
+            })
+        ).toBe(3);
+        expect(endpoints[1]).toBe(
+            "leads?$filter=statecode eq 0&$select=leadid&$count=true"
+        );
+    });
+});
+
+describe("fetchEntityPage", () => {
+    test("builds a single page request for a non-contact entity", async () => {
+        const { request, endpoints } = fakeRequest([{ value: [{ leadid: "1" }] }]);
+        const page = await fetchEntityPage<{ leadid: string }>("statecode eq 0", {
+            entity: "leads",
+            select: "leadid",
+            orderby: "fullname asc",
+            pageSize: 50,
+            request,
+        });
+        expect(page.value).toEqual([{ leadid: "1" }]);
+        expect(endpoints[0]).toBe(
+            "leads?$select=leadid&$filter=statecode eq 0&$orderby=fullname asc"
+        );
+    });
+
+    test("requests the capped count when countOnly is set", async () => {
+        const { request, endpoints } = fakeRequest([{ "@odata.count": 3, value: [] }]);
+        await fetchEntityPage("statecode eq 0", {
+            entity: "leads",
+            select: "leadid",
+            orderby: "fullname asc",
+            pageSize: 50,
+            countOnly: true,
+            request,
+        });
+        expect(endpoints[0]).toBe(
+            "leads?$select=leadid&$filter=statecode eq 0&$orderby=fullname asc&$count=true&$top=1"
+        );
+    });
+
+    test("follows a provided cursor verbatim after normalizing it", async () => {
+        const { request, endpoints } = fakeRequest([{ value: [] }]);
+        await fetchEntityPage("statecode eq 0", {
+            entity: "leads",
+            select: "leadid",
+            orderby: "fullname asc",
+            pageSize: 50,
+            cursor:
+                "https://org.api.crm.dynamics.com/api/data/v9.2/leads?$skiptoken=p2",
+            request,
+        });
+        expect(endpoints[0]).toBe("leads?$skiptoken=p2");
+    });
+});
+
+describe("streamPages is exported for sibling-module consumption", () => {
+    test("drives raw paging over any endpoint", async () => {
+        const { request } = fakeRequest([
+            {
+                value: [{ id: "1" }],
+                "@odata.nextLink":
+                    "https://org.api.crm.dynamics.com/api/data/v9.2/leads?$skiptoken=p2",
+            },
+            { value: [{ id: "2" }] },
+        ]);
+        const collected: Array<{ id: string }> = [];
+        await streamPages<{ id: string }>("leads?$filter=statecode eq 0", {
+            request,
+            onPage: (rows) => {
+                collected.push(...rows);
+            },
+        });
+        expect(collected.map((c) => c.id)).toEqual(["1", "2"]);
     });
 });
