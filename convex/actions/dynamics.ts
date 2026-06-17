@@ -4,6 +4,7 @@ import { action, internalAction } from "../_generated/server";
 import { v } from "convex/values";
 import { dynamicsRequest } from "../lib/dynamics_auth";
 import {
+    buildContactFilterClauses,
     countContacts,
     fetchContactsPage,
     streamContacts,
@@ -768,47 +769,7 @@ export const fetchContactsWithITA34 = action({
         if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
 
         // Build additional contact-level filter conditions
-        let extraFilter = "";
-        if (resolvedArgs.filter) {
-            extraFilter += ` and (${resolvedArgs.filter})`;
-        }
-        if (resolvedArgs.search) {
-            const s = resolvedArgs.search.replace(/'/g, "''");
-            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
-        }
-        if (resolvedArgs.clientType && resolvedArgs.clientType.length > 0) {
-            const values = resolvedArgs.clientType.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.entityType !== undefined) {
-            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
-        }
-        if (resolvedArgs.bank !== undefined) {
-            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
-        }
-        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
-            const values = resolvedArgs.sourceCode.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.province) {
-            const prov = resolvedArgs.province.replace(/'/g, "''");
-            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
-        }
-        if (resolvedArgs.geographicLocation !== undefined) {
-            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
-        }
-        if (resolvedArgs.ageMin !== undefined) {
-            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
-        }
-        if (resolvedArgs.ageMax !== undefined) {
-            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
-        }
-        if (resolvedArgs.ownerId) {
-            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
-        }
-        if (resolvedArgs.industryId) {
-            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
-        }
+        const extraFilter = buildContactFilterClauses(resolvedArgs);
 
         const contacts: Array<{
             id: string;
@@ -949,47 +910,7 @@ export const fetchContactsByTaxReturn = action({
         if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
 
         // Build additional contact-level filter conditions
-        let extraFilter = "";
-        if (resolvedArgs.filter) {
-            extraFilter += ` and (${resolvedArgs.filter})`;
-        }
-        if (resolvedArgs.search) {
-            const s = resolvedArgs.search.replace(/'/g, "''");
-            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
-        }
-        if (resolvedArgs.clientType && resolvedArgs.clientType.length > 0) {
-            const values = resolvedArgs.clientType.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.entityType !== undefined) {
-            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
-        }
-        if (resolvedArgs.bank !== undefined) {
-            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
-        }
-        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
-            const values = resolvedArgs.sourceCode.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.province) {
-            const prov = resolvedArgs.province.replace(/'/g, "''");
-            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
-        }
-        if (resolvedArgs.geographicLocation !== undefined) {
-            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
-        }
-        if (resolvedArgs.ageMin !== undefined) {
-            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
-        }
-        if (resolvedArgs.ageMax !== undefined) {
-            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
-        }
-        if (resolvedArgs.ownerId) {
-            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
-        }
-        if (resolvedArgs.industryId) {
-            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
-        }
+        const extraFilter = buildContactFilterClauses(resolvedArgs);
 
         const contacts: Array<{
             id: string;
@@ -1394,47 +1315,7 @@ export const fetchContactsByBadDebt = action({
         if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
 
         // Step 2: Build additional contact-level filter conditions
-        let extraFilter = "";
-        if (resolvedArgs.filter) {
-            extraFilter += ` and (${resolvedArgs.filter})`;
-        }
-        if (resolvedArgs.search) {
-            const s = resolvedArgs.search.replace(/'/g, "''");
-            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
-        }
-        if (resolvedArgs.clientType && resolvedArgs.clientType.length > 0) {
-            const values = resolvedArgs.clientType.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.entityType !== undefined) {
-            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
-        }
-        if (resolvedArgs.bank !== undefined) {
-            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
-        }
-        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
-            const values = resolvedArgs.sourceCode.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.province) {
-            const prov = resolvedArgs.province.replace(/'/g, "''");
-            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
-        }
-        if (resolvedArgs.geographicLocation !== undefined) {
-            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
-        }
-        if (resolvedArgs.ageMin !== undefined) {
-            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
-        }
-        if (resolvedArgs.ageMax !== undefined) {
-            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
-        }
-        if (resolvedArgs.ownerId) {
-            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
-        }
-        if (resolvedArgs.industryId) {
-            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
-        }
+        const extraFilter = buildContactFilterClauses(resolvedArgs);
 
         // Step 3: Fetch contacts in batches of 50 (OData OR filter limit)
         const contacts: Array<{
@@ -1560,47 +1441,7 @@ export const fetchReferralParticipants = action({
         if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
 
         // Step 2: Build additional contact-level filter conditions (mirrors fetchContactsByBadDebt)
-        let extraFilter = "";
-        if (resolvedArgs.filter) {
-            extraFilter += ` and (${resolvedArgs.filter})`;
-        }
-        if (resolvedArgs.search) {
-            const s = resolvedArgs.search.replace(/'/g, "''");
-            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
-        }
-        if (resolvedArgs.clientType && resolvedArgs.clientType.length > 0) {
-            const values = resolvedArgs.clientType.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.entityType !== undefined) {
-            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
-        }
-        if (resolvedArgs.bank !== undefined) {
-            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
-        }
-        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
-            const values = resolvedArgs.sourceCode.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.province) {
-            const prov = resolvedArgs.province.replace(/'/g, "''");
-            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
-        }
-        if (resolvedArgs.geographicLocation !== undefined) {
-            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
-        }
-        if (resolvedArgs.ageMin !== undefined) {
-            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
-        }
-        if (resolvedArgs.ageMax !== undefined) {
-            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
-        }
-        if (resolvedArgs.ownerId) {
-            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
-        }
-        if (resolvedArgs.industryId) {
-            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
-        }
+        const extraFilter = buildContactFilterClauses(resolvedArgs);
 
         // Step 3: Fetch the referrer contacts in batches of 50 (OData OR filter limit).
         // statecode eq 0 + the channel filter (passed in via `filter`) mean inactive /

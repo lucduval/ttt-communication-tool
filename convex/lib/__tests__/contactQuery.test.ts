@@ -191,6 +191,26 @@ describe("buildContactFilterClauses", () => {
         expect(buildContactFilter(filter)).toBe("statecode eq 0" + buildContactFilterClauses(filter));
     });
 
+    test("ignores audience-specific extra fields so specialised audiences can pass their resolvedArgs verbatim", () => {
+        // Specialised audience handlers (tax-return / ITA34 / bad-debt /
+        // referral-participant) pass their whole resolvedArgs object — which
+        // carries audience-only fields like taxReturnMin / taxYear alongside the
+        // standard contact filters. The clause builder must emit only the
+        // contact-level clauses and silently drop the unknown audience fields.
+        const audienceArgs = {
+            taxReturnMin: 1000,
+            taxReturnYear: 2024,
+            taxYear: 2024,
+            incomeMin: 50000,
+            clientType: [4, 5],
+            ownerId: "owner-1",
+        } as unknown as ContactFilter;
+        expect(buildContactFilterClauses(audienceArgs)).toBe(
+            " and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['4','5'])" +
+                " and _ownerid_value eq 'owner-1'"
+        );
+    });
+
     test("characterizes the extra-filter clause ordering for a representative spread", () => {
         const filter: ContactFilter = {
             filter: "riivo_taxmarketing eq true",
