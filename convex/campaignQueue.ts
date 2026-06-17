@@ -18,6 +18,7 @@ import {
 } from "./lib/whatsapp";
 import { logEmailActivity, logWhatsAppActivity } from "./lib/dynamics_logging";
 import { notifyTinaOfOutboundTemplate, substitutedBodyVariables } from "./lib/notifyTina";
+import { batchProcessorFor, handleBatchError } from "./lib/channelDispatch";
 
 /**
  * Queue batches for a campaign (called after startCampaign)
@@ -121,20 +122,11 @@ export const queueCampaignBatches = action({
                 attachments: args.attachments,
             });
 
-            if (args.channel === "personalised") {
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
-                    campaignId: args.campaignId,
-                });
-            } else if (args.channel === "email") {
-                // Single worker to stay under Graph IncomingBytes limit (150 MB / 5 min per mailbox).
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
-                    campaignId: args.campaignId,
-                });
-            } else {
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
-                    campaignId: args.campaignId,
-                });
-            }
+            // A single email worker stays under the Graph IncomingBytes limit
+            // (150 MB / 5 min per mailbox).
+            await ctx.scheduler.runAfter(0, batchProcessorFor(args.channel), {
+                campaignId: args.campaignId,
+            });
         }
 
         return { success: true };
@@ -240,19 +232,9 @@ export const kickoffScheduledCampaign = internalAction({
             attachments: args.attachments,
         });
 
-        if (args.channel === "personalised") {
-            await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
-                campaignId: args.campaignId,
-            });
-        } else if (args.channel === "email") {
-            await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
-                campaignId: args.campaignId,
-            });
-        } else {
-            await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
-                campaignId: args.campaignId,
-            });
-        }
+        await ctx.scheduler.runAfter(0, batchProcessorFor(args.channel), {
+            campaignId: args.campaignId,
+        });
 
         return { success: true };
     },
@@ -591,19 +573,15 @@ export const processEmailBatch = internalAction({
                 });
             }
         } catch (err) {
-            console.error("Batch processing error:", err);
-            const { hasMoreBatches } = await ctx.runMutation(internal.campaignBatches.markBatchFailed, {
+            // Longer delay after error to let Graph recover.
+            const batchDelayMs = parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "500", 10) || 500;
+            await handleBatchError(ctx, {
+                channel: "email",
+                campaignId: args.campaignId,
                 batchId: batch._id,
-                errorMessage: err instanceof Error ? err.message : "Unknown error",
+                err,
+                retryDelayMs: Math.max(batchDelayMs, 10000),
             });
-
-            if (hasMoreBatches) {
-                // Longer delay after error to let Graph recover
-                const batchDelayMs = parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "500", 10) || 500;
-                await ctx.scheduler.runAfter(Math.max(batchDelayMs, 10000), internal.campaignQueue.processEmailBatch, {
-                    campaignId: args.campaignId,
-                });
-            }
         }
     },
 });
@@ -895,18 +873,14 @@ export const processWhatsAppBatch = internalAction({
                 console.error(`Campaign ${args.campaignId} halted: ${templateAbortReason}`);
             }
         } catch (err) {
-            console.error("Batch processing error:", err);
-            const { hasMoreBatches } = await ctx.runMutation(internal.campaignBatches.markBatchFailed, {
+            // Continue processing remaining batches even after a failure.
+            await handleBatchError(ctx, {
+                channel: "whatsapp",
+                campaignId: args.campaignId,
                 batchId: batch._id,
-                errorMessage: err instanceof Error ? err.message : "Unknown error",
+                err,
+                retryDelayMs: 500,
             });
-
-            // Continue processing remaining batches even after a failure
-            if (hasMoreBatches) {
-                await ctx.scheduler.runAfter(500, internal.campaignQueue.processWhatsAppBatch, {
-                    campaignId: args.campaignId,
-                });
-            }
         }
     },
 });
@@ -1041,21 +1015,11 @@ export const processCampaignFilters = internalAction({
                 count: totalProcessed
             });
 
-            // Start processing the first batch
-            if (channel === "personalised") {
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
-                    campaignId,
-                });
-            } else if (channel === "email") {
-                // Single worker to stay under Graph IncomingBytes limit (150 MB / 5 min per mailbox).
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
-                    campaignId,
-                });
-            } else {
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
-                    campaignId,
-                });
-            }
+            // Start processing the first batch. A single email worker stays under
+            // the Graph IncomingBytes limit (150 MB / 5 min per mailbox).
+            await ctx.scheduler.runAfter(0, batchProcessorFor(channel), {
+                campaignId,
+            });
 
         } catch (error) {
             console.error("Error processing campaign filters:", error);
@@ -1352,17 +1316,13 @@ export const processPersonalisedBatch = internalAction({
                 });
             }
         } catch (err) {
-            console.error("Personalised batch processing error:", err);
-            const { hasMoreBatches } = await ctx.runMutation(internal.campaignBatches.markBatchFailed, {
+            await handleBatchError(ctx, {
+                channel: "personalised",
+                campaignId: args.campaignId,
                 batchId: batch._id,
-                errorMessage: err instanceof Error ? err.message : "Unknown error",
+                err,
+                retryDelayMs: 500,
             });
-
-            if (hasMoreBatches) {
-                await ctx.scheduler.runAfter(500, internal.campaignQueue.processPersonalisedBatch, {
-                    campaignId: args.campaignId,
-                });
-            }
         }
     },
 });
