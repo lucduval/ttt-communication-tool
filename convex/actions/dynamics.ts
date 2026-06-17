@@ -9,6 +9,12 @@ import {
     fetchContactsPage,
     streamContacts,
 } from "../lib/contactQuery";
+import {
+    countLeads,
+    fetchLeadsPage,
+    streamLeads,
+    type LeadFilter,
+} from "../lib/leadQuery";
 import { api } from "../_generated/api";
 export { dynamicsRequest };
 
@@ -1012,13 +1018,6 @@ interface DynamicsLead {
     _ownerid_value: string | null;
 }
 
-interface LeadsResponse {
-    "@odata.context": string;
-    "@odata.nextLink"?: string;
-    "@odata.count"?: number;
-    value: DynamicsLead[];
-}
-
 function mapLeadToContact(lead: DynamicsLead) {
     return {
         id: lead.new_leadid,
@@ -1041,57 +1040,29 @@ function mapLeadToContact(lead: DynamicsLead) {
     };
 }
 
-function buildLeadFilter(args: {
+/**
+ * Build a typed {@link LeadFilter} from action args. Owner scope is resolved at
+ * the action seam and passed in; every other clause comes straight from the
+ * typed args. The Lead Query module turns this into the OData expression — the
+ * dialect never appears here.
+ */
+function toLeadFilter(args: {
     search?: string;
     province?: string;
     emailOptIn?: boolean;
     whatsappOptIn?: boolean;
-    ownerId?: string;
     status?: string;
     industryId?: string;
-}): string {
-    let filterExpression: string;
-
-    if (args.status === "active") {
-        filterExpression = "statecode eq 0";
-    } else if (args.status === "inactive") {
-        filterExpression = "statecode eq 1";
-    } else {
-        // "all" or undefined — no statecode filter
-        filterExpression = "statecode ne -1"; // always-true placeholder for OData AND chaining
-    }
-
-    if (args.search) {
-        const s = args.search.replace(/'/g, "''");
-        filterExpression += ` and (contains(new_name,'${s}') or contains(ttt_email,'${s}'))`;
-    }
-
-    if (args.province) {
-        const prov = args.province.replace(/'/g, "''");
-        filterExpression += ` and riivo_province eq '${prov}'`;
-    }
-
-    if (args.emailOptIn === true) {
-        filterExpression += ` and riivo_emailoptin eq true`;
-    } else if (args.emailOptIn === false) {
-        filterExpression += ` and riivo_emailoptin eq false`;
-    }
-
-    if (args.whatsappOptIn === true) {
-        filterExpression += ` and riivo_whatsappoptin eq true`;
-    } else if (args.whatsappOptIn === false) {
-        filterExpression += ` and riivo_whatsappoptin eq false`;
-    }
-
-    if (args.ownerId) {
-        filterExpression += ` and _ownerid_value eq '${args.ownerId}'`;
-    }
-
-    if (args.industryId) {
-        filterExpression += ` and _riivo_industry_lookup_value eq '${args.industryId}'`;
-    }
-
-    return filterExpression;
+}, ownerId?: string): LeadFilter {
+    return {
+        status: args.status,
+        search: args.search,
+        province: args.province,
+        emailOptIn: args.emailOptIn,
+        whatsappOptIn: args.whatsappOptIn,
+        ownerId,
+        industryId: args.industryId,
+    };
 }
 
 /**
@@ -1117,28 +1088,20 @@ export const fetchLeads = action({
         const { top = 50 } = args;
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
-        const filterExpression = buildLeadFilter({ ...args, ownerId });
-
-        const queryParts: string[] = [
-            `$select=${LEAD_SELECT_FIELDS}`,
-            `$filter=${filterExpression}`,
-            `$orderby=new_name asc`,
-        ];
-
-        let endpoint = `new_leads?${queryParts.join("&")}`;
-
-        if (args.skipToken) {
-            endpoint = args.skipToken.replace(/^.*\/api\/data\/v9\.2\//, "");
-        }
-
-        const response = await dynamicsRequest<LeadsResponse>(endpoint, {
-            headers: {
-                Prefer: `odata.include-annotations="*",odata.maxpagesize=${top}`,
-            },
-        });
+        // Fetch a single page via the Lead Query module so the recipient list
+        // shares one canonical filter definition and never assembles page-size
+        // headers or cursor tokens itself.
+        const response = await fetchLeadsPage<DynamicsLead>(
+            toLeadFilter(args, ownerId),
+            {
+                select: LEAD_SELECT_FIELDS,
+                pageSize: top,
+                cursor: args.skipToken,
+            }
+        );
 
         return {
-            contacts: response.value.map(mapLeadToContact),
+            contacts: (response.value ?? []).map(mapLeadToContact),
             nextPage: response["@odata.nextLink"] || null,
             totalCount: response["@odata.count"] || null,
         };
@@ -1163,12 +1126,14 @@ export const getLeadCount = action({
         if (!access.hasAccess) throw new Error("Unauthorized");
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
-        const filterExpression = buildLeadFilter({ ...args, ownerId });
 
-        const endpoint = `new_leads?$filter=${filterExpression}&$count=true&$top=1`;
-        const response = await dynamicsRequest<LeadsResponse>(endpoint);
+        // Count via the Lead Query module so count, select-all, and the recipient
+        // list all derive their audience from one place. The module handles the
+        // Dynamics @odata.count ceiling internally, paginating lead ids to recover
+        // the true total when it is hit.
+        const count = await countLeads(toLeadFilter(args, ownerId));
 
-        return { count: response["@odata.count"] || 0 };
+        return { count };
     },
 });
 
@@ -1190,10 +1155,6 @@ export const fetchAllLeadIds = action({
         if (!access.hasAccess) throw new Error("Unauthorized");
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
-        const filterExpression = buildLeadFilter({ ...args, ownerId });
-
-        const selectFields = "new_leadid,new_name,ttt_email,ttt_mobilephone";
-        const initialEndpoint = `new_leads?$filter=${filterExpression}&$select=${selectFields}&$orderby=new_name asc`;
 
         interface SimpleLead {
             new_leadid: string;
@@ -1202,26 +1163,19 @@ export const fetchAllLeadIds = action({
             ttt_mobilephone: string | null;
         }
 
-        interface SimpleLeadsResponse {
-            value: SimpleLead[];
-            "@odata.nextLink"?: string;
-        }
+        const selectFields = "new_leadid,new_name,ttt_email,ttt_mobilephone";
 
-        let allLeads: SimpleLead[] = [];
-        let nextLink: string | null = initialEndpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 500) {
-            pageCount++;
-            if (nextLink.startsWith("http")) {
-                nextLink = nextLink.replace(/^.*\/api\/data\/v9\.2\//, "");
-            }
-            const response: SimpleLeadsResponse = await dynamicsRequest<SimpleLeadsResponse>(nextLink);
-            if (response.value?.length) {
-                allLeads.push(...response.value);
-            }
-            nextLink = response["@odata.nextLink"] || null;
-        }
+        // Stream every matching lead through the Lead Query module so the
+        // select-all audience matches the recipient list and count, and so
+        // pagination is handled in one place. 500 pages is the safety cap.
+        const allLeads: SimpleLead[] = [];
+        await streamLeads<SimpleLead>(toLeadFilter(args, ownerId), {
+            select: selectFields,
+            maxPages: 500,
+            onPage: (rows) => {
+                allLeads.push(...rows);
+            },
+        });
 
         return allLeads.map((lead) => ({
             id: lead.new_leadid,

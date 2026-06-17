@@ -252,6 +252,39 @@ describe("countLeads", () => {
     });
 });
 
+describe("recipient list, count, and select-all agree", () => {
+    test("all three facades derive the same filter expression from one LeadFilter", async () => {
+        const filter: LeadFilter = {
+            status: "active",
+            search: "O'Brien",
+            province: "Gauteng",
+            emailOptIn: true,
+            ownerId: "owner-9",
+            industryId: "ind-3",
+        };
+
+        // The recipient list (fetchLeadsPage), the count (countLeads), and
+        // select-all (streamLeads) must all target the identical $filter, so the
+        // audience counted is the audience listed and sent.
+        const page = fakeRequest([{ value: [] }]);
+        await fetchLeadsPage(filter, { select: "new_leadid", pageSize: 50, request: page.request });
+
+        const count = fakeRequest([{ "@odata.count": 0, value: [] }]);
+        await countLeads(filter, { request: count.request });
+
+        const stream = fakeRequest([{ value: [] }]);
+        await streamLeads(filter, { select: "new_leadid", request: stream.request, onPage: () => {} });
+
+        const expected = buildLeadFilter(filter);
+        const filterOf = (endpoint: string) =>
+            endpoint.match(/\$filter=([^&]*)/)?.[1];
+
+        expect(filterOf(page.endpoints[0])).toBe(expected);
+        expect(filterOf(count.endpoints[0])).toBe(expected);
+        expect(filterOf(stream.endpoints[0])).toBe(expected);
+    });
+});
+
 describe("fetchLeadsPage", () => {
     test("builds a single page request with a page-size header and returns the raw page", async () => {
         const { request, endpoints } = fakeRequest([
