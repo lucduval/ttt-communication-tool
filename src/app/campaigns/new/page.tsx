@@ -282,9 +282,7 @@ export default function NewCampaignPage() {
     const fetchContactsWithITA34 = useAction(api.actions.dynamics.fetchContactsWithITA34);
     const fetchContactsByTaxReturn = useAction(api.actions.dynamics.fetchContactsByTaxReturn);
     const sendTestEmail = useAction(api.actions.email.sendTestEmail);
-    const sendBulkEmails = useAction(api.actions.email.sendBulkEmails);
     const sendTestWhatsApp = useAction(api.actions.whatsapp.sendTestWhatsApp);
-    const sendBulkWhatsApp = useAction(api.actions.whatsapp.sendBulkWhatsApp);
     const fetchEmployees = useAction(api.actions.dynamics.fetchUsers);
     const fetchLeads = useAction(api.actions.dynamics.fetchLeads);
     const getLeadCount = useAction(api.actions.dynamics.getLeadCount);
