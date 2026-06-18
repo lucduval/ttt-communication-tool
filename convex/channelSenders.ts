@@ -4,6 +4,20 @@ import { internal } from "./_generated/api";
 import type { ActionCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import type { ChannelSender, DriverBatch, EmitFn } from "./lib/channelSend";
+import {
+    getMetaWhatsAppConfig,
+    normalizeToE164Digits,
+    buildTemplateRequestBody,
+    sendTemplateWithRetry,
+    isTemplatePermanentError,
+    isMediaHeaderType,
+    shouldRefreshMediaId,
+    uploadWhatsAppMedia,
+    RateLimiter,
+    type TemplateLike,
+} from "./lib/whatsapp";
+import { logWhatsAppActivity } from "./lib/dynamics_logging";
+import { notifyTinaOfOutboundTemplate, substitutedBodyVariables } from "./lib/notifyTina";
 
 /**
  * Channel Senders — the per-channel adapters behind the Channel Send seam. Each
@@ -271,4 +285,184 @@ export const emailSender: ChannelSender = {
     channel: "email",
     errorRetryDelayMs: Math.max(emailBatchDelayMs(), 10000),
     sendBatch: sendEmailBatch_,
+};
+
+/**
+ * WhatsApp Channel Sender. Owns the rate limiter, header-media upload, the Tina
+ * notification, inline CRM logging, and the three-strike permanent-template-error
+ * abort — surfaced as a `halt` so the driver stops scheduling a successor. Per-
+ * recipient results stream to the driver via `emit`; flushing (now every 25,
+ * the reliability win) is the driver's.
+ */
+async function sendWhatsAppBatch_(
+    ctx: ActionCtx,
+    campaign: any,
+    batch: DriverBatch,
+    emit: EmitFn
+): Promise<{ halt?: string; nextDelayMs?: number }> {
+    const campaignId = campaign._id as Id<"campaigns">;
+
+    if (!campaign.whatsappTemplateId) {
+        // A WhatsApp campaign with no template can never make progress; halt so the
+        // driver does not schedule successor batches.
+        return { halt: "WhatsApp campaign has no template" };
+    }
+
+    const template = await ctx.runQuery(internal.campaignBatches.getWhatsAppTemplate, {
+        templateId: campaign.whatsappTemplateId,
+    });
+    if (!template) {
+        return { halt: "WhatsApp template not found" };
+    }
+
+    const config = getMetaWhatsAppConfig();
+    const limiter = new RateLimiter(config.maxSendPerSecond, config.maxConcurrent);
+
+    // Upload header media to Meta if the template has one and the cached id is
+    // missing/stale/stamped against a different URL. Re-running per batch is cheap
+    // because shouldRefreshMediaId short-circuits once the id is cached.
+    let headerMediaIdForSend: string | undefined = template.headerMediaId;
+    if (isMediaHeaderType(template.headerType) && template.headerUrl) {
+        const needsRefresh = shouldRefreshMediaId(
+            {
+                headerMediaId: template.headerMediaId,
+                headerMediaIdUploadedAt: template.headerMediaIdUploadedAt,
+                headerMediaSourceUrl: template.headerMediaSourceUrl,
+            },
+            template.headerUrl
+        );
+        if (needsRefresh) {
+            try {
+                const upload = await uploadWhatsAppMedia(config, {
+                    sourceUrl: template.headerUrl,
+                    headerType: template.headerType,
+                    mimeTypeOverride: template.headerMediaMimeType,
+                });
+                await ctx.runMutation(internal.whatsappTemplates.setHeaderMediaCache, {
+                    id: template._id,
+                    mediaId: upload.mediaId,
+                    mimeType: upload.mimeType,
+                    sourceUrl: template.headerUrl,
+                });
+                headerMediaIdForSend = upload.mediaId;
+            } catch (uploadErr) {
+                const msg = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+                console.error(`Header media upload failed for campaign ${campaignId}: ${msg}`);
+                // Fall back to sending with the public URL (link) — the template still
+                // works, just less reliably. A broken URL surfaces as a per-recipient
+                // error and the existing 3-strike abort kicks in.
+            }
+        }
+    }
+    const templateForSend: TemplateLike = {
+        ...(template as TemplateLike),
+        headerMediaId: headerMediaIdForSend,
+    };
+
+    // Track 3-consecutive permanent template errors → abort the batch. Meta returns
+    // 132xxx codes when a template is paused or has a variable mismatch; every
+    // subsequent recipient hits the same error, so we stop early rather than burn
+    // through the list. Surfaced as `halt` so the driver schedules no successor.
+    let consecutiveTemplateErrors = 0;
+    let templateAbortReason: string | null = null;
+
+    await Promise.all(
+        batch.recipients.map(async (recipient) => {
+            if (templateAbortReason) {
+                await emit([
+                    { recipientId: recipient.id, success: false, error: `Aborted: ${templateAbortReason}` },
+                ]);
+                return;
+            }
+
+            const toDigits = normalizeToE164Digits(recipient.phone || "");
+            if (!toDigits) {
+                await emit([
+                    {
+                        recipientId: recipient.id,
+                        success: false,
+                        error: `Invalid phone number: ${recipient.phone || "(empty)"}`,
+                    },
+                ]);
+                return;
+            }
+
+            let recipientVars: Record<string, string> = {};
+            if (recipient.variables) {
+                try {
+                    recipientVars = JSON.parse(recipient.variables);
+                } catch {
+                    console.warn(`Invalid JSON in recipient variables for ${recipient.id}, using empty object`);
+                }
+            }
+
+            const allVariables: Record<string, string> = {
+                name: recipient.name,
+                fullname: recipient.name,
+                first_name: recipient.name.split(" ")[0],
+                firstname: recipient.name.split(" ")[0],
+                mobilephone: recipient.phone || "",
+                riivo_referralcode: recipientVars.referralCode || "",
+                ...recipientVars,
+            };
+
+            // The payload builder picks body variables from template.variables and the
+            // button variable from template.buttonUrlVariable, both from this map.
+            const body = buildTemplateRequestBody(templateForSend, toDigits, allVariables);
+            const result = await limiter.schedule(() => sendTemplateWithRetry(config, body));
+
+            if (result.status === "sent") {
+                consecutiveTemplateErrors = 0;
+                await emit([
+                    { recipientId: recipient.id, success: true, externalMessageId: result.wamid },
+                ]);
+
+                // Seed Tina's conversation history with this outbound so the client's
+                // reply lands in context. Best-effort and deduped by wamid; awaited so
+                // Convex does not tear the action down before the fetch resolves.
+                await notifyTinaOfOutboundTemplate({
+                    phone: toDigits,
+                    templateName: template.name,
+                    templateLanguage: template.language,
+                    templateVariables: substitutedBodyVariables(templateForSend.variables, allVariables),
+                    senderMessageId: result.wamid,
+                    sender: "campaign_whatsapp",
+                });
+
+                if (campaign.createDynamicsActivity) {
+                    try {
+                        await logWhatsAppActivity(recipient.id, template.name, template.body || "");
+                    } catch (e) {
+                        console.error(`CRM WhatsApp log failed for ${recipient.id}:`, e);
+                    }
+                }
+            } else {
+                await emit([
+                    {
+                        recipientId: recipient.id,
+                        success: false,
+                        error: `code=${result.errorCode ?? "n/a"} ${result.errorMessage}`,
+                    },
+                ]);
+
+                if (isTemplatePermanentError(result.errorCode)) {
+                    consecutiveTemplateErrors++;
+                    if (consecutiveTemplateErrors >= 3 && !templateAbortReason) {
+                        templateAbortReason = `template '${template.name}' (${template.language}) hit 3 consecutive permanent errors (code ${result.errorCode}) — paused or misnamed`;
+                        console.error(templateAbortReason);
+                    }
+                } else {
+                    consecutiveTemplateErrors = 0;
+                }
+            }
+        })
+    );
+
+    return { halt: templateAbortReason ?? undefined, nextDelayMs: 500 };
+}
+
+export const whatsappSender: ChannelSender = {
+    channel: "whatsapp",
+    errorRetryDelayMs: 500,
+    sendBatch: sendWhatsAppBatch_,
 };

@@ -116,13 +116,21 @@ export async function runChannelSend(
         buffer.length = 0;
     };
 
-    const emit: EmitFn = async (results) => {
-        for (const r of results) {
-            buffer.push(r);
-            if (r.success) successCount++;
-            else failedCount++;
-            if (buffer.length >= FLUSH_INTERVAL) await flush();
-        }
+    // Serialise emit so adapters that send concurrently (e.g. WhatsApp's
+    // Promise.all over recipients) cannot interleave a flush and double-write
+    // or drop buffered results. The sends themselves stay concurrent; only the
+    // buffer append + flush is ordered.
+    let chain: Promise<void> = Promise.resolve();
+    const emit: EmitFn = (results) => {
+        chain = chain.then(async () => {
+            for (const r of results) {
+                buffer.push(r);
+                if (r.success) successCount++;
+                else failedCount++;
+                if (buffer.length >= FLUSH_INTERVAL) await flush();
+            }
+        });
+        return chain;
     };
 
     try {
