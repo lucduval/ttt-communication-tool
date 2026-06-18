@@ -16,6 +16,8 @@ import { describe, it, expect } from "vitest";
 import {
     ita34IncomeScanAdapter,
     taxReturnScanAdapter,
+    badDebtScanAdapter,
+    referralScanAdapter,
     resolveSpecialisedAudience,
     type ScanAdapter,
 } from "../specialisedAudience";
@@ -154,6 +156,96 @@ describe("taxReturnScanAdapter", () => {
         expect(scan).toContain("createdon lt 2025-01-01T00:00:00Z");
         expect(scan).toContain("_ttt_customer_value ne null");
         expect(scan).toContain("statecode eq 1");
+    });
+});
+
+function badDebtRow(contactId: string, outstanding: number) {
+    return {
+        _ttt_customer_value: contactId,
+        ttt_outstanding: outstanding,
+    };
+}
+
+describe("badDebtScanAdapter", () => {
+    it("collapses open invoices to each contact's highest outstanding; every collapsed contact qualifies", async () => {
+        const { request } = routedRequest([
+            {
+                match: "new_invoiceses",
+                pages: [
+                    {
+                        value: [
+                            // c1 has two open invoices; the higher outstanding wins.
+                            badDebtRow("c1", 300),
+                            badDebtRow("c1", 1500),
+                            badDebtRow("c2", 750),
+                        ],
+                    },
+                ],
+            },
+        ]);
+
+        const result = await badDebtScanAdapter().scan(request);
+
+        // No membership test: every contact with an open invoice qualifies.
+        expect([...result.contactIds].sort()).toEqual(["c1", "c2"]);
+        expect(result.figures.get("c1")).toBe(1500);
+        expect(result.figures.get("c2")).toBe(750);
+    });
+
+    it("scans only open invoices with a positive outstanding and a customer set", async () => {
+        const { request, endpoints } = routedRequest([
+            { match: "new_invoiceses", pages: [{ value: [badDebtRow("c1", 100)] }] },
+        ]);
+
+        await badDebtScanAdapter().scan(request);
+
+        const scan = endpoints.find((e) => e.includes("new_invoiceses"))!;
+        expect(scan).toContain("statecode eq 0");
+        expect(scan).toContain("statuscode eq 958140000");
+        expect(scan).toContain("ttt_outstanding gt 0");
+        expect(scan).toContain("_ttt_customer_value ne null");
+    });
+});
+
+function referrerRow(referredByValue: string | null) {
+    return { _riivo_referredby_value: referredByValue };
+}
+
+describe("referralScanAdapter", () => {
+    it("collects the distinct referrer-id set with no per-contact figure", async () => {
+        const { request } = routedRequest([
+            {
+                match: "contacts",
+                pages: [
+                    {
+                        value: [
+                            // r1 referred two people, r2 one; nulls are skipped.
+                            referrerRow("r1"),
+                            referrerRow("r1"),
+                            referrerRow("r2"),
+                            referrerRow(null),
+                        ],
+                    },
+                ],
+            },
+        ]);
+
+        const result = await referralScanAdapter().scan(request);
+
+        expect([...result.contactIds].sort()).toEqual(["r1", "r2"]);
+        // No membership figure attached for any referrer.
+        expect(result.figures.size).toBe(0);
+    });
+
+    it("scans contacts for a non-null referredby lookup", async () => {
+        const { request, endpoints } = routedRequest([
+            { match: "contacts", pages: [{ value: [referrerRow("r1")] }] },
+        ]);
+
+        await referralScanAdapter().scan(request);
+
+        const scan = endpoints.find((e) => e.includes("contacts"))!;
+        expect(scan).toContain("_riivo_referredby_value ne null");
     });
 });
 

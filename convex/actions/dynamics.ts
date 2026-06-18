@@ -4,7 +4,6 @@ import { action, internalAction } from "../_generated/server";
 import { v } from "convex/values";
 import { dynamicsRequest } from "../lib/dynamics_auth";
 import {
-    buildContactFilterClauses,
     countContacts,
     fetchContactsPage,
     streamContacts,
@@ -604,7 +603,13 @@ const IRP5_SELECT_FIELDS = [
 // The canonical tax-figure shape (and the readers that produce it) are owned by
 // the Tax Profile module.
 import type { TaxProfileData } from "../lib/taxProfile";
-import { resolveSpecialisedAudience, ita34IncomeScanAdapter, taxReturnScanAdapter } from "../lib/specialisedAudience";
+import {
+    resolveSpecialisedAudience,
+    ita34IncomeScanAdapter,
+    taxReturnScanAdapter,
+    badDebtScanAdapter,
+    referralScanAdapter,
+} from "../lib/specialisedAudience";
 export type { TaxProfileData };
 
 export const fetchContactTaxData = action({
@@ -1079,9 +1084,12 @@ export const fetchAllLeadIds = action({
 
 /**
  * Fetch contacts that have at least one open invoice (bad debt).
- * Two-step: query open invoices first, collect contact IDs, then resolve
- * linked contact records with all standard contact-level filters.
- * Same pattern as fetchContactsWithITA34 / fetchContactsByTaxReturn.
+ *
+ * The scan (open invoices with a positive outstanding balance, collapsed to the
+ * highest outstanding per contact) and the id-chunked contact re-query live in the
+ * Specialised Audience module / Contact Query; this handler is the rich-list-shape
+ * mapper. The audience displays the outstanding amount directly — it is the scan
+ * figure — so no Tax Profile join is requested and `extra.scanFigure` carries it.
  */
 export const fetchContactsByBadDebt = action({
     args: {
@@ -1104,62 +1112,6 @@ export const fetchContactsByBadDebt = action({
         const effectiveOwnerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
 
-        // Step 1: Fetch all open invoices with outstanding > 0
-        const invoiceFilter = `statecode eq 0 and statuscode eq 958140000 and ttt_outstanding gt 0 and _ttt_customer_value ne null`;
-        const invoiceEndpoint = `new_invoiceses?$select=_ttt_customer_value,ttt_outstanding,new_name,ttt_invoiceid&$filter=${invoiceFilter}`;
-        console.log(`[fetchContactsByBadDebt] Invoice filter: ${invoiceFilter}`);
-        console.log(`[fetchContactsByBadDebt] Invoice endpoint: ${invoiceEndpoint}`);
-
-        interface InvoiceRow {
-            _ttt_customer_value: string;
-            ttt_outstanding: number | null;
-            new_name: string | null;
-            ttt_invoiceid: string | null;
-        }
-
-        let allInvoices: InvoiceRow[] = [];
-        let nextLink: string | null = invoiceEndpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 100) {
-            pageCount++;
-            const endpoint: string = nextLink.startsWith("http")
-                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : nextLink;
-            const response = await dynamicsRequest<{ value: InvoiceRow[]; "@odata.nextLink"?: string }>(endpoint);
-            if (response.value?.length) {
-                allInvoices.push(...response.value);
-            }
-            nextLink = response["@odata.nextLink"] ?? null;
-        }
-
-        console.log(`[fetchContactsByBadDebt] Total invoices fetched: ${allInvoices.length}`);
-        if (allInvoices.length > 0) {
-            console.log(`[fetchContactsByBadDebt] Sample invoice:`, JSON.stringify(allInvoices[0]));
-        }
-
-        // Group by contact — keep highest outstanding per contact
-        const contactMap = new Map<string, InvoiceRow>();
-        for (const row of allInvoices) {
-            const cid = row._ttt_customer_value;
-            if (!cid) continue;
-            const existing = contactMap.get(cid);
-            if (!existing || (row.ttt_outstanding ?? 0) > (existing.ttt_outstanding ?? 0)) {
-                contactMap.set(cid, row);
-            }
-        }
-
-        const contactIds = Array.from(contactMap.keys());
-        console.log(`[fetchContactsByBadDebt] Unique contacts with debt: ${contactIds.length}`);
-        if (contactIds.length > 0) {
-            console.log(`[fetchContactsByBadDebt] Sample contact IDs:`, contactIds.slice(0, 5));
-        }
-        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
-
-        // Step 2: Build additional contact-level filter conditions
-        const extraFilter = buildContactFilterClauses(resolvedArgs);
-
-        // Step 3: Fetch contacts in batches of 50 (OData OR filter limit)
         const contacts: Array<{
             id: string;
             fullName: string;
@@ -1179,40 +1131,38 @@ export const fetchContactsByBadDebt = action({
             outstandingAmount: number | null;
         }> = [];
 
-        for (let i = 0; i < contactIds.length; i += 50) {
-            const batch = contactIds.slice(i, i + 50);
-            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
-            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
-            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
+        await resolveSpecialisedAudience<DynamicsContact>({
+            adapter: badDebtScanAdapter(),
+            filter: resolvedArgs,
+            select: CONTACT_SELECT_FIELDS,
+            onChunk: (resolved) => {
+                for (const { contact: c, extra } of resolved) {
+                    contacts.push({
+                        id: c.contactid,
+                        fullName: c.fullname,
+                        firstName: c.firstname,
+                        lastName: c.lastname,
+                        email: c.emailaddress1,
+                        phone: c.mobilephone,
+                        internationalPhone: c.icon_formattedmobilenumber,
+                        isActive: c.statecode === 0,
+                        clientType: c.riivo_clienttypenew,
+                        marketingPreferences: {
+                            tax: c.riivo_taxmarketing,
+                            accounting: c.riivo_accountingmarketing,
+                            insurance: c.riivo_insurancemarketing,
+                        },
+                        whatsappOptIn: c.riivo_whatsappoptinout,
+                        emailNotifications: c.icon_sendemailclientnotifications,
+                        smsNotifications: c.icon_sendclientssmsnotifications,
+                        createdOn: c.createdon,
+                        modifiedOn: c.modifiedon,
+                        outstandingAmount: extra.scanFigure,
+                    });
+                }
+            },
+        });
 
-            for (const c of contactResponse.value) {
-                const invoiceRow = contactMap.get(c.contactid);
-                contacts.push({
-                    id: c.contactid,
-                    fullName: c.fullname,
-                    firstName: c.firstname,
-                    lastName: c.lastname,
-                    email: c.emailaddress1,
-                    phone: c.mobilephone,
-                    internationalPhone: c.icon_formattedmobilenumber,
-                    isActive: c.statecode === 0,
-                    clientType: c.riivo_clienttypenew,
-                    marketingPreferences: {
-                        tax: c.riivo_taxmarketing,
-                        accounting: c.riivo_accountingmarketing,
-                        insurance: c.riivo_insurancemarketing,
-                    },
-                    whatsappOptIn: c.riivo_whatsappoptinout,
-                    emailNotifications: c.icon_sendemailclientnotifications,
-                    smsNotifications: c.icon_sendclientssmsnotifications,
-                    createdOn: c.createdon,
-                    modifiedOn: c.modifiedon,
-                    outstandingAmount: invoiceRow?.ttt_outstanding ?? null,
-                });
-            }
-        }
-
-        console.log(`[fetchContactsByBadDebt] Final contacts returned: ${contacts.length}`);
         return { contacts, totalCount: contacts.length };
     },
 });
@@ -1250,44 +1200,11 @@ export const fetchReferralParticipants = action({
         const effectiveOwnerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
 
-        // Step 1: Collect the distinct referrer IDs from _riivo_referredby_value
-        // across every contact that has the field set.
-        const referrerFilter = `_riivo_referredby_value ne null`;
-        const referrerEndpoint = `contacts?$select=_riivo_referredby_value&$filter=${referrerFilter}`;
-        console.log(`[fetchReferralParticipants] Referrer scan endpoint: ${referrerEndpoint}`);
-
-        interface ReferrerRow {
-            _riivo_referredby_value: string | null;
-        }
-
-        const referrerIds = new Set<string>();
-        let nextLink: string | null = referrerEndpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 200) {
-            pageCount++;
-            const endpoint: string = nextLink.startsWith("http")
-                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : nextLink;
-            const response = await dynamicsRequest<{ value: ReferrerRow[]; "@odata.nextLink"?: string }>(endpoint);
-            if (response.value?.length) {
-                for (const row of response.value) {
-                    if (row._riivo_referredby_value) referrerIds.add(row._riivo_referredby_value);
-                }
-            }
-            nextLink = response["@odata.nextLink"] ?? null;
-        }
-
-        const contactIds = Array.from(referrerIds);
-        console.log(`[fetchReferralParticipants] Distinct referrers found: ${contactIds.length}`);
-        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
-
-        // Step 2: Build additional contact-level filter conditions (mirrors fetchContactsByBadDebt)
-        const extraFilter = buildContactFilterClauses(resolvedArgs);
-
-        // Step 3: Fetch the referrer contacts in batches of 50 (OData OR filter limit).
-        // statecode eq 0 + the channel filter (passed in via `filter`) mean inactive /
-        // non-contactable referrers are skipped silently.
+        // The referrer scan (distinct _riivo_referredby_value set) and the id-chunked
+        // contact re-query live in the Specialised Audience module / Contact Query;
+        // this handler is the rich-list-shape mapper. The re-query re-applies
+        // statecode eq 0 + the channel filter, so inactive / non-contactable referrers
+        // fall away silently. This audience has no per-contact figure to display.
         const contacts: Array<{
             id: string;
             fullName: string;
@@ -1306,38 +1223,37 @@ export const fetchReferralParticipants = action({
             modifiedOn: string;
         }> = [];
 
-        for (let i = 0; i < contactIds.length; i += 50) {
-            const batch = contactIds.slice(i, i + 50);
-            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
-            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
-            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
+        await resolveSpecialisedAudience<DynamicsContact>({
+            adapter: referralScanAdapter(),
+            filter: resolvedArgs,
+            select: CONTACT_SELECT_FIELDS,
+            onChunk: (resolved) => {
+                for (const { contact: c } of resolved) {
+                    contacts.push({
+                        id: c.contactid,
+                        fullName: c.fullname,
+                        firstName: c.firstname,
+                        lastName: c.lastname,
+                        email: c.emailaddress1,
+                        phone: c.mobilephone,
+                        internationalPhone: c.icon_formattedmobilenumber,
+                        isActive: c.statecode === 0,
+                        clientType: c.riivo_clienttypenew,
+                        marketingPreferences: {
+                            tax: c.riivo_taxmarketing,
+                            accounting: c.riivo_accountingmarketing,
+                            insurance: c.riivo_insurancemarketing,
+                        },
+                        whatsappOptIn: c.riivo_whatsappoptinout,
+                        emailNotifications: c.icon_sendemailclientnotifications,
+                        smsNotifications: c.icon_sendclientssmsnotifications,
+                        createdOn: c.createdon,
+                        modifiedOn: c.modifiedon,
+                    });
+                }
+            },
+        });
 
-            for (const c of contactResponse.value) {
-                contacts.push({
-                    id: c.contactid,
-                    fullName: c.fullname,
-                    firstName: c.firstname,
-                    lastName: c.lastname,
-                    email: c.emailaddress1,
-                    phone: c.mobilephone,
-                    internationalPhone: c.icon_formattedmobilenumber,
-                    isActive: c.statecode === 0,
-                    clientType: c.riivo_clienttypenew,
-                    marketingPreferences: {
-                        tax: c.riivo_taxmarketing,
-                        accounting: c.riivo_accountingmarketing,
-                        insurance: c.riivo_insurancemarketing,
-                    },
-                    whatsappOptIn: c.riivo_whatsappoptinout,
-                    emailNotifications: c.icon_sendemailclientnotifications,
-                    smsNotifications: c.icon_sendclientssmsnotifications,
-                    createdOn: c.createdon,
-                    modifiedOn: c.modifiedon,
-                });
-            }
-        }
-
-        console.log(`[fetchReferralParticipants] Final referrer contacts returned: ${contacts.length}`);
         return { contacts, totalCount: contacts.length };
     },
 });

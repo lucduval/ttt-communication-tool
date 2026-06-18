@@ -274,3 +274,95 @@ export function taxReturnScanAdapter(filters: TaxReturnAudienceFilters): ScanAda
         },
     };
 }
+
+/** A scanned invoice row — only the columns the bad-debt collapse needs. */
+interface BadDebtScanRow {
+    _ttt_customer_value: string;
+    ttt_outstanding: number | null;
+}
+
+const BAD_DEBT_SCAN_SELECT = "_ttt_customer_value,ttt_outstanding";
+
+/** statuscode of an open (unpaid) `new_invoiceses` row. */
+const BAD_DEBT_OPEN_STATUSCODE = 958140000;
+
+/**
+ * The bad-debt scan adapter: scan `new_invoiceses` for open invoices carrying a
+ * positive outstanding balance, and collapse to each contact's highest
+ * outstanding amount.
+ *
+ * Like the tax-return adapter there is *no* in-memory membership test — having an
+ * open invoice with `ttt_outstanding gt 0` *is* the scan query, so every collapsed
+ * contact qualifies and `contactIds` is simply the keys of the highest-per-contact
+ * map. The scan figure is the outstanding amount, which this audience displays
+ * directly (no Tax Profile join), so the resolver is called with `withTaxProfile`
+ * unset and the mapper reads `extra.scanFigure`.
+ */
+export function badDebtScanAdapter(): ScanAdapter {
+    return {
+        async scan(request: DynamicsRequestFn): Promise<ScanResult> {
+            const scanFilter =
+                `statecode eq 0 and statuscode eq ${BAD_DEBT_OPEN_STATUSCODE}` +
+                ` and ttt_outstanding gt 0 and _ttt_customer_value ne null`;
+
+            const figures = new Map<string, number | null>();
+            await streamEntity<BadDebtScanRow>(scanFilter, {
+                entity: "new_invoiceses",
+                select: BAD_DEBT_SCAN_SELECT,
+                orderby: "ttt_outstanding desc",
+                request,
+                onPage: (rows) => {
+                    for (const row of rows) {
+                        const cid = row._ttt_customer_value;
+                        if (!cid) continue;
+                        const amount = row.ttt_outstanding ?? 0;
+                        const existing = figures.get(cid);
+                        if (existing === undefined || amount > (existing ?? 0)) {
+                            figures.set(cid, row.ttt_outstanding ?? null);
+                        }
+                    }
+                },
+            });
+
+            return { contactIds: Array.from(figures.keys()), figures };
+        },
+    };
+}
+
+/** A scanned contact row — only the referrer-lookup column the referral scan needs. */
+interface ReferralScanRow {
+    _riivo_referredby_value: string | null;
+}
+
+/**
+ * The referral scan adapter: scan `contacts` for the distinct set of
+ * `_riivo_referredby_value` ids — the referrers. The lookup on contact A holds the
+ * id of whoever referred A, so the referrers are the distinct values appearing in
+ * that field across every contact that has it set.
+ *
+ * There is no membership test and no per-contact figure: `contactIds` is the
+ * distinct referrer-id set and `figures` is empty (the resolver joins null). The
+ * resolver re-queries those ids through the contactIds dimension, so referrers who
+ * are inactive or otherwise filtered out fall away exactly as the contact-level
+ * filter dictates.
+ */
+export function referralScanAdapter(): ScanAdapter {
+    return {
+        async scan(request: DynamicsRequestFn): Promise<ScanResult> {
+            const referrerIds = new Set<string>();
+            await streamEntity<ReferralScanRow>("_riivo_referredby_value ne null", {
+                entity: "contacts",
+                select: "_riivo_referredby_value",
+                orderby: "createdon asc",
+                request,
+                onPage: (rows) => {
+                    for (const row of rows) {
+                        if (row._riivo_referredby_value) referrerIds.add(row._riivo_referredby_value);
+                    }
+                },
+            });
+
+            return { contactIds: Array.from(referrerIds), figures: new Map() };
+        },
+    };
+}

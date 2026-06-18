@@ -1,79 +1,69 @@
 # Handoff — RALPH iteration
 
-## Just completed: #29 — migrate the tax-return (SARS reimbursement) audience
+## Just completed: #30 — migrate the bad-debt + referral audiences
 
-**Branch:** `sandcastle/contact-query`. Issue #29 to be closed.
+**Branch:** `sandcastle/contact-query`. Issue #30 to be closed.
 
-Migrated the tax-return audience onto the Specialised Audience module (stood up in
-#28) and deleted both hand-rolled tax-return pipelines.
+Migrated the last two specialised audiences (bad-debt, referral) onto the shared
+resolver and deleted both hand-rolled pipelines. **This was the final slice: no
+`contactid eq` id-clause building survives outside Contact Query anywhere in the
+repo.**
 
 What landed:
-- **`taxReturnScanAdapter`** (`convex/lib/specialisedAudience.ts`): scans
-  `new_invoiceses` for `ttt_sarsreimbursement ge threshold` within the target-year
-  window (`createdon` ge/lt, `_ttt_customer_value ne null`, `statecode eq 1`) via
-  Contact Query's `streamEntity` (paging/retry reused), and collapses to each
-  contact's **highest reimbursement**. There is **no** in-memory membership test —
-  the threshold *is* the scan query — so `contactIds` = all keys of the
-  highest-per-contact figures map, and the scan figure is the reimbursement amount.
-  `targetYear` is passed in resolved (caller owns the previous-year default), so the
-  adapter is deterministic and testable.
-- **Both consumers migrated; both hand-rolled tax-return pipelines deleted:**
-  - List/preview `fetchContactsByTaxReturn` (`actions/dynamics.ts` ~line 777) is now
-    the rich-list mapper around the resolver. `withTaxProfile` stays **unset** —
-    this audience displays the reimbursement directly, read from
-    `extra.scanFigure` into `sarsReimbursement` (no Tax Profile join).
-  - Send `fetchMatchingContactsByTaxReturn` (`dynamics_util.ts` ~line 127) is now the
-    slim send-shape mapper around the resolver. Its `dynamicsRequest` import and the
-    `buildExtraContactFilter` helper (plus its `buildContactFilterClauses` import)
-    were removed as dead code.
-  Re-query routes through Contact Query's `contactIds` dimension; **no** `contactid
-  eq` building survives in either tax-return path. Membership + highest-reimbursement
-  selection are identical by construction, so the reviewed list and the sent audience
-  match.
+- **`badDebtScanAdapter`** (`convex/lib/specialisedAudience.ts`): scans
+  `new_invoiceses` for open invoices (`statecode eq 0`, `statuscode eq 958140000`,
+  `ttt_outstanding gt 0`, `_ttt_customer_value ne null`) via `streamEntity`, and
+  collapses to each contact's **highest outstanding** amount. Like tax-return there
+  is **no** membership test — the open-invoice predicate *is* the scan query — so
+  `contactIds` = all keys of the highest-per-contact map and the scan figure is the
+  outstanding amount.
+- **`referralScanAdapter`** (`convex/lib/specialisedAudience.ts`): scans `contacts`
+  for `_riivo_referredby_value ne null` and collects the **distinct referrer-id
+  set**. No membership test and **no per-contact figure** — `contactIds` = the
+  distinct set, `figures` is empty (resolver joins null). Inactive / non-contactable
+  referrers fall away on the resolver's re-query (`statecode eq 0` + channel filter),
+  exactly as before.
+- **Both consumers migrated; both hand-rolled pipelines deleted** (`actions/dynamics.ts`):
+  - `fetchContactsByBadDebt` is now the rich-list mapper around the resolver.
+    `withTaxProfile` stays **unset** — it displays the outstanding amount directly,
+    read from `extra.scanFigure` into `outstandingAmount`.
+  - `fetchReferralParticipants` is now the rich-list mapper around the resolver. No
+    figure displayed.
+  - The now-dead `buildContactFilterClauses` import was removed from
+    `actions/dynamics.ts` (the helper still lives + is tested in `contactQuery.ts`).
+- **Send paths:** bad-debt and referral are **list-only / client-side-mode**
+  audiences — the frontend (`campaigns/new/page.tsx`, `isClientSideMode`) fetches the
+  full matching set via these actions into `allFilteredContactsRef` and sends it as an
+  **explicit recipient list**. They never route through the filter-based send path in
+  `campaignQueue.ts` (which only branches tax-return / ITA34 / default), so there is
+  **no** `dynamics_util.ts` send function to migrate or delete. List = sent audience
+  by construction, since the same resolved list is what gets sent.
 
-Tests: extended `convex/lib/__tests__/specialisedAudience.test.ts` with a
-`taxReturnScanAdapter` describe block (highest-reimbursement collapse with
-every-contact-qualifies, plus the threshold + year-window + statecode/customer
-scan-clause invariant), driven through the injected `request` boundary.
+Tests: extended `convex/lib/__tests__/specialisedAudience.test.ts` with
+`badDebtScanAdapter` (highest-outstanding collapse + open-invoice scan-clause
+invariant) and `referralScanAdapter` (distinct referrer-set collapse + nulls skipped
++ contacts scan-clause) describe blocks, driven through the injected `request`
+boundary.
 
-**Verification:** `npm run typecheck` clean; `npm run test` = 1405 passed.
+**Verification:** `npm run typecheck` clean; `npm run test` = 1409 passed.
+Repo-wide grep for `contactid eq` outside Contact Query returns only the explanatory
+comment in `specialisedAudience.ts` — no clause building.
 
-## Next up: #30 — migrate the bad-debt + referral audiences
+## Next up: nothing queued
 
-#30 is now **unblocked** (it was blocked by #29). Highest-priority remaining.
+#30 was the only open `ready-for-agent` issue, and the Specialised Audience
+migration end-state is now **reached**: every specialised audience (income / ITA34,
+tax-return, bad-debt, referral) resolves through the shared resolver, and `contactid
+eq` id-clause building lives **only** in Contact Query. No follow-up issue is open —
+wait for the next issue to be filed/triaged before continuing.
 
-Scope (see #30 body for full acceptance criteria):
-- Route the **bad-debt** and **referral** audiences through the shared resolver and
-  delete their hand-rolled pipelines, ending with **no `contactid eq` id-clause
-  building anywhere outside Contact Query**.
-
-### Pointers for #30
-- Hand-rolled pipelines / `contactid eq` chunking still to replace
-  (`convex/actions/dynamics.ts`):
-  - `fetchContactsByBadDebt` action (~line 1086), `contactid eq` chunking ~line 1184.
-  - `fetchReferralParticipants` action (~line 1232), `contactid eq` chunking ~line 1311.
-  - These are the **last two** `contactid eq` sites in the repo — grep
-    `contactid eq` across `actions/dynamics.ts` + `dynamics_util.ts` should return
-    nothing once #30 lands.
-- Note the send paths: `dynamics_util.ts` currently has **no** bad-debt/referral send
-  function (only `fetchMatchingContacts`, `…ByTaxReturn`, `…WithITA34`). Confirm how
-  each of these audiences actually sends before deleting — they may resolve list-only,
-  or the send may route differently. Map this first.
-- **Adapter pattern to copy:** `taxReturnScanAdapter` is the closest model — like
-  tax-return, these are reimbursement/threshold-style audiences whose displayed value
-  is the scan figure, so `withTaxProfile` stays unset and the mapper reads
-  `extra.scanFigure`. If an audience needs no membership test, `contactIds` = all keys
-  of the figures map (as in tax-return). Inspect each pipeline's collapse rule before
-  copying — bad-debt and referral may differ.
+### If picking up new work in this area
+- The four adapters in `convex/lib/specialisedAudience.ts` are the reference pattern:
+  `ita34IncomeScanAdapter` (membership test + Tax Profile join), and
+  `taxReturnScanAdapter` / `badDebtScanAdapter` / `referralScanAdapter`
+  (membership-free, displayed value = scan figure or none).
 - Tests: the `specialisedAudience.test.ts` patterns (injected `request`, routed-by-
   endpoint fake, scan-clause + collapse assertions) are the model.
-
-## After #30
-- End-state goal reached when **no `contactid eq` id-clause building survives outside
-  Contact Query** — verify across `actions/dynamics.ts` and `dynamics_util.ts`
-  (after #28 ITA34's are gone, after #29 tax-return's are gone, after #30 bad-debt +
-  referral's are gone → repo-wide grep for `contactid eq` outside Contact Query is
-  empty).
 
 ## Workflow reminders (RALPH)
 - One issue per iteration. RGR: failing test first, then implementation.
