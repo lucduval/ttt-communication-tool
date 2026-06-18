@@ -601,36 +601,9 @@ const IRP5_SELECT_FIELDS = [
     "_riivo_client_value",
 ].join(",");
 
-export interface TaxProfileData {
-    contactId: string;
-    ita34: {
-        yearOfAssessment: number;
-        income: number;
-        taxableIncome: number;
-        raContributions: number;
-        retirementFundContributions: number;
-        providentFundContributions: number;
-        medicalSchemeTaxCredit: number;
-        medicalRebate: number;
-        dateOfAssessment: string | null;
-        referenceNumber: string | null;
-    } | null;
-    irp5: {
-        assessmentYear: number;
-        incomePaye: number;
-        grossTaxableIncome: number;
-        totalDeductions: number;
-        raContributions: number | null;
-        providentFundContribution: number;
-        totalProvidentFund: number;
-        medicalAidContributions: number;
-        medicalSchemeTaxCredit: number;
-        taxableTravel: number;
-        employerName: string | null;
-        taxPeriodStart: string | null;
-        taxPeriodEnd: string | null;
-    } | null;
-}
+// The canonical tax-figure shape is owned by the Tax Profile module.
+import type { TaxProfileData } from "../lib/taxProfile";
+export type { TaxProfileData };
 
 export const fetchContactTaxData = action({
     args: {
