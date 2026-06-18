@@ -467,13 +467,6 @@ export const whatsappSender: ChannelSender = {
     sendBatch: sendWhatsAppBatch_,
 };
 
-// Dynamics `$select` projections for the per-recipient tax fetch. Pulled out as
-// constants so the long field lists stay out of the send loop.
-const ITA34_SEL =
-    "riivo_ita34id,riivo_yearofassessment,riivo_income,riivo_taxableincomeassessedloss,riivo_retirementannuityfundcontributions,riivo_retirementfundcontributions,riivo_providendfundcontributions,riivo_medicalschemefeestaxcredit,riivo_medicalrebatebelow65withnodisability,riivo_dateofassessment,riivo_referencenumber";
-const IRP5_SEL =
-    "riivo_irp5id,riivo_assessmentyearint,riivo_incomepaye,riivo_grosstaxableincome,riivo_totaldeductionscontributions,riivo_racontributions,riivo_providentfundcontributionpaye,riivo_totalprovidentfundcontributions,riivo_medicalaidcontributions,riivo_medicalschemetaxcredit,riivo_taxabletravelremuneration,riivo_employertradingothername,riivo_taxperiodstartdate,riivo_taxperiodenddate";
-
 const DEFAULT_SYS_PROMPT =
     "You are a friendly and professional tax advisor at TTT Group. Write warm but concise emails. Do NOT invent or change any numbers.";
 
@@ -499,6 +492,7 @@ async function sendPersonalisedBatch_(
     });
 
     const { dynamicsRequest } = await import("./lib/dynamics_auth");
+    const { fetchTaxProfile } = await import("./lib/taxProfile");
     const { calculateOptions, parseAgeFromIdNumber } = await import("./lib/taxCalculator");
     const { generatePersonalisedCopy } = await import("./lib/claude");
     const { buildPersonalisedEmail } = await import("./lib/emailTemplatePersonalised");
@@ -522,55 +516,20 @@ async function sendPersonalisedBatch_(
 
     for (const recipient of batch.recipients) {
         try {
-            // 1. Fetch tax data
-            const [ita34Res, irp5Res, contactRes] = await Promise.all([
-                dynamicsRequest<{ value: any[] }>(
-                    `riivo_ita34s?$select=${ITA34_SEL}&$filter=_riivo_taxpayercontact_value eq '${recipient.id}'&$orderby=riivo_yearofassessment desc&$top=1`
-                ),
-                dynamicsRequest<{ value: any[] }>(
-                    `riivo_irp5s?$select=${IRP5_SEL}&$filter=_riivo_client_value eq '${recipient.id}'&$orderby=riivo_assessmentyearint desc&$top=1`
-                ),
+            // 1. Fetch tax data. The Tax Profile module owns the ITA34/IRP5 read,
+            // latest-year selection, and field mapping; the contact lookup (name,
+            // ID number, age) stays here because it isn't part of the tax profile.
+            const [taxProfile, contactRes] = await Promise.all([
+                fetchTaxProfile(recipient.id),
                 dynamicsRequest<{ fullname: string; firstname: string | null; ttt_idnumber: string | null; riivo_age: number | null }>(
                     `contacts(${recipient.id})?$select=fullname,firstname,ttt_idnumber,riivo_age`
                 ),
             ]);
 
-            const ita34 = ita34Res.value[0];
-            if (!ita34) {
+            if (!taxProfile.ita34) {
                 await emit([{ recipientId: recipient.id, success: false, error: "No ITA34 data" }]);
                 continue;
             }
-
-            const taxProfile = {
-                contactId: recipient.id,
-                ita34: {
-                    yearOfAssessment: ita34.riivo_yearofassessment ?? 0,
-                    income: ita34.riivo_income ?? 0,
-                    taxableIncome: ita34.riivo_taxableincomeassessedloss ?? 0,
-                    raContributions: ita34.riivo_retirementannuityfundcontributions ?? 0,
-                    retirementFundContributions: ita34.riivo_retirementfundcontributions ?? 0,
-                    providentFundContributions: ita34.riivo_providendfundcontributions ?? 0,
-                    medicalSchemeTaxCredit: ita34.riivo_medicalschemefeestaxcredit ?? 0,
-                    medicalRebate: ita34.riivo_medicalrebatebelow65withnodisability ?? 0,
-                    dateOfAssessment: ita34.riivo_dateofassessment ?? null,
-                    referenceNumber: ita34.riivo_referencenumber ?? null,
-                },
-                irp5: irp5Res.value[0] ? {
-                    assessmentYear: irp5Res.value[0].riivo_assessmentyearint ?? 0,
-                    incomePaye: irp5Res.value[0].riivo_incomepaye ?? 0,
-                    grossTaxableIncome: irp5Res.value[0].riivo_grosstaxableincome ?? 0,
-                    totalDeductions: irp5Res.value[0].riivo_totaldeductionscontributions ?? 0,
-                    raContributions: irp5Res.value[0].riivo_racontributions ?? null,
-                    providentFundContribution: irp5Res.value[0].riivo_providentfundcontributionpaye ?? 0,
-                    totalProvidentFund: irp5Res.value[0].riivo_totalprovidentfundcontributions ?? 0,
-                    medicalAidContributions: irp5Res.value[0].riivo_medicalaidcontributions ?? 0,
-                    medicalSchemeTaxCredit: irp5Res.value[0].riivo_medicalschemetaxcredit ?? 0,
-                    taxableTravel: irp5Res.value[0].riivo_taxabletravelremuneration ?? 0,
-                    employerName: irp5Res.value[0].riivo_employertradingothername ?? null,
-                    taxPeriodStart: irp5Res.value[0].riivo_taxperiodstartdate ?? null,
-                    taxPeriodEnd: irp5Res.value[0].riivo_taxperiodenddate ?? null,
-                } : null,
-            };
 
             // 2. Calculate tax scenarios (with age from ID number for retirement projection)
             const age = (contactRes.ttt_idnumber ? parseAgeFromIdNumber(contactRes.ttt_idnumber) : null) ?? contactRes.riivo_age;
