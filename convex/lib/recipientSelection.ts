@@ -11,8 +11,12 @@
  * projections are the test surface. The projections (`count`, `toCampaignArgs`)
  * always agree because they derive from the same value: `count` is
  * `total − excluded` for the filtered shape, and `toCampaignArgs` hands the
- * backend a `{ filters }` payload to re-resolve. (`sample` arrives in a later
- * slice — it needs a query fetch for the filtered shape.)
+ * backend a `{ filters }` payload to re-resolve.
+ *
+ * `sample(n)` (issue #21) yields up to `n` concrete contacts for the preview.
+ * It can stay pure only for the explicit shape (the hand-picks are already in
+ * memory); the filtered shape needs a query fetch, which a React hook layers on
+ * top (see `useRecipientSample`) — so `sample` returns nothing for it here.
  */
 
 /** The minimal contact fields the selection needs to count and materialise sends. */
@@ -156,6 +160,22 @@ export function count(selection: RecipientSelection): number {
         return Math.max(0, selection.total - selection.excludeContactIds.length);
     }
     return selection.contacts.length;
+}
+
+/**
+ * `sample(n)` projection: up to `n` concrete contacts to show in the preview.
+ *
+ * Explicit → the first `n` hand-picks, straight from memory, in selection order.
+ * Filtered → empty here: the pure core never touches Convex, and "select all"
+ * holds only the captured filter, not materialised contacts. The filtered
+ * shape's sample is fetched asynchronously by the page (the first `n` clients
+ * matching the captured query) and layered on top — see `useRecipientSample`.
+ *
+ * `n` is clamped at zero, so a non-positive `n` yields an empty array.
+ */
+export function sample(selection: RecipientSelection, n: number): SelectableContact[] {
+    if (selection.shape !== "explicit") return [];
+    return selection.contacts.slice(0, Math.max(0, n));
 }
 
 /**

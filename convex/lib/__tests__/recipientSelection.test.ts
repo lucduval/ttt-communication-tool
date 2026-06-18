@@ -13,6 +13,7 @@ import {
     toggleContact,
     clearSelection,
     count,
+    sample,
     selectedContactIds,
     toCampaignArgs,
     filteredSelection,
@@ -108,6 +109,31 @@ describe("recipientSelection — explicit shape", () => {
         });
     });
 
+    describe("sample projection", () => {
+        it("returns the first n hand-picks in selection order", () => {
+            expect(sample(explicitSelection([alice, bob, carol]), 2)).toEqual([alice, bob]);
+        });
+
+        it("returns all contacts when n exceeds the count", () => {
+            expect(sample(explicitSelection([alice, bob]), 8)).toEqual([alice, bob]);
+        });
+
+        it("returns an empty array for a non-positive n", () => {
+            expect(sample(explicitSelection([alice, bob]), 0)).toEqual([]);
+            expect(sample(explicitSelection([alice, bob]), -1)).toEqual([]);
+        });
+
+        it("returns an empty array for an empty selection", () => {
+            expect(sample(emptySelection(), 8)).toEqual([]);
+        });
+
+        it("does not mutate the selection", () => {
+            const sel = explicitSelection([alice, bob, carol]);
+            sample(sel, 1);
+            expect(count(sel)).toBe(3);
+        });
+    });
+
     describe("toCampaignArgs projection", () => {
         it("email yields { id, email, name } for contacts with an email", () => {
             const args = toCampaignArgs(explicitSelection([alice, bob, carol]), {
@@ -195,6 +221,10 @@ describe("recipientSelection — filtered shape", () => {
             sel = deselectContact(sel, "a");
             sel = deselectContact(sel, "b");
             expect(count(sel)).toBe(0);
+        });
+
+        it("sample is empty in the filtered shape (the page fetches it via a query)", () => {
+            expect(sample(filteredSelection(clientsFilter, 1200), 8)).toEqual([]);
         });
 
         it("selectedContactIds is empty in the filtered shape (checks are driven by exclusions)", () => {

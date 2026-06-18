@@ -23,7 +23,8 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, type Contact } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, type Contact } from "@/components/recipients";
+import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
 import {
     getConvexSiteUrl,
     normalizeInlineBase64Images,
@@ -153,12 +154,10 @@ export default function NewCampaignPage() {
     const [filters, setFilters] = useState<FilterState>(INITIAL_FILTERS);
     const [totalCount, setTotalCount] = useState<number | null>(null);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-    // Recipient Selection module (explicit shape) owns who the campaign sends to.
-    // The materialised hand-picked contacts and the send payload both derive from
-    // this single selection value. `selectedContacts` aliases the value's contacts
-    // so existing read sites stay unchanged.
+    // Recipient Selection module owns who the campaign sends to as a single value.
+    // The count, the preview sample, and the send payload all derive from it — so
+    // there is no separate materialised `selectedContacts` array to keep in sync.
     const recipientSelection = useRecipientSelection();
-    const selectedContacts = recipientSelection.contacts as Contact[];
     // Load More state — replaces page-based pagination
     const [nextPageToken, setNextPageToken] = useState<string | null>(null);
     const [clientSideOffset, setClientSideOffset] = useState(LOAD_MORE_SIZE);
@@ -293,6 +292,37 @@ export default function NewCampaignPage() {
     const getLeadCount = useAction(api.actions.dynamics.getLeadCount);
     const fetchContactsByBadDebt = useAction(api.actions.dynamics.fetchContactsByBadDebt);
     const fetchReferralParticipants = useAction(api.actions.dynamics.fetchReferralParticipants);
+
+    // Fetch the first `n` clients matching a captured "select all" filter, for the
+    // preview sample (issue #21). The filtered shape is only ever activated from
+    // the standard server-side query path, so we resolve the sample with the exact
+    // same `fetchContacts` args that path uses for the recipient list (name range
+    // and channel clause are already baked into the captured `filter` string) —
+    // picking only the fields the action accepts, since the captured payload also
+    // carries unrelated ITA34/tax keys. Used only for the filtered shape; the
+    // explicit shape samples from memory with no fetch.
+    const fetchSampleContacts = useCallback(
+        async (capturedFilters: FilterPayload, n: number): Promise<SelectableContact[]> => {
+            const f = capturedFilters as Record<string, unknown>;
+            const result = await fetchContacts({
+                filter: f.filter as string | undefined,
+                search: f.search as string | undefined,
+                top: n,
+                clientType: f.clientType as number[] | undefined,
+                entityType: f.entityType as number | undefined,
+                bank: f.bank as number | undefined,
+                sourceCode: f.sourceCode as number[] | undefined,
+                province: f.province as string | undefined,
+                geographicLocation: f.geographicLocation as number | undefined,
+                ageMin: f.ageMin as number | undefined,
+                ageMax: f.ageMax as number | undefined,
+                ownerId: f.ownerId as string | undefined,
+                industryId: f.industryId as string | undefined,
+            });
+            return result.contacts as SelectableContact[];
+        },
+        [fetchContacts],
+    );
 
     // Build channel-appropriate filter
     const getChannelFilter = useCallback(() => {
@@ -976,7 +1006,7 @@ export default function NewCampaignPage() {
                 // Instead we just select all explicitly
             } else if (audience === "leads") {
                 // Leads have no backend filter-based send path — paginate client-side
-                // and populate selectedContacts directly. Volume is expected to stay
+                // and set them as an explicit selection. Volume is expected to stay
                 // in the low hundreds.
                 const allLeads: Contact[] = [];
                 let skipToken: string | null = null;
@@ -1113,10 +1143,33 @@ export default function NewCampaignPage() {
     // the recipients step. (Only meaningful while the filtered shape is active.)
     const selectAllRecipientCount = recipientSelection.count;
 
+    // The preview sample — up to N concrete contacts to render. Personalised shows
+    // up to 8 AI emails; email/WhatsApp show one. In the explicit shape these come
+    // straight from the hand-picks; in the filtered shape they're fetched from the
+    // captured query (issue #21), which is what fills the once-blank select-all
+    // preview. Read by every preview/composer below in place of the old
+    // `selectedContacts` array.
+    const previewSampleSize = campaignChannel === "personalised" ? 8 : 1;
+    const previewSample = useRecipientSample(
+        recipientSelection.selection,
+        previewSampleSize,
+        fetchSampleContacts,
+    );
+
+    // Reachable-recipient counts for the explicit (hand-picked) shape, derived from
+    // the same value the send path uses so the displayed count matches exactly what
+    // gets sent: email/personalised → contacts with an email; WhatsApp → contacts
+    // reachable by phone. (In the filtered shape these read 0 and the select-all
+    // count is shown instead.)
+    const explicitEmailCount =
+        recipientSelection.toCampaignArgs({ channel: "email" }).recipients?.length ?? 0;
+    const explicitWhatsappCount =
+        recipientSelection.toCampaignArgs({ channel: "whatsapp" }).recipients?.length ?? 0;
+
     // Estimated WhatsApp cost
     const whatsappRecipientCount = isSelectAllActive
         ? selectAllRecipientCount
-        : selectedContacts.filter((c) => c.internationalPhone || c.phone).length;
+        : explicitWhatsappCount;
     // Assuming roughly R0.75 per message as a safe estimate, but displayed as Estimated
     const estimatedCost = ((Number(whatsappRecipientCount) || 0) * 0.75).toFixed(2);
 
@@ -1575,8 +1628,8 @@ export default function NewCampaignPage() {
                                         subject={subject}
                                         htmlContent={extractAndConvertBase64Images(htmlContent, true).processedHtml}
                                         senderEmail={selectedMailbox || undefined}
-                                        recipientName={selectedContacts[0]?.fullName || "Recipient Name"}
-                                        recipientEmail={selectedContacts[0]?.email || "recipient@example.com"}
+                                        recipientName={previewSample[0]?.fullName || "Recipient Name"}
+                                        recipientEmail={previewSample[0]?.email || "recipient@example.com"}
                                         attachments={attachments}
                                     />
                                 </div>
@@ -1596,8 +1649,8 @@ export default function NewCampaignPage() {
                                         <WhatsAppPreview
                                             template={selectedTemplate}
                                             variableValues={variableValues}
-                                            recipientName={selectedContacts[0]?.fullName}
-                                            recipientPhone={selectedContacts[0]?.phone || undefined}
+                                            recipientName={previewSample[0]?.fullName}
+                                            recipientPhone={previewSample[0]?.phone || undefined}
                                         />
                                     </Card>
                                 </div>
@@ -1614,7 +1667,7 @@ export default function NewCampaignPage() {
                                             {campaignChannel === "email" || campaignChannel === "personalised"
                                                 ? isSelectAllActive
                                                     ? selectAllRecipientCount
-                                                    : selectedContacts.filter((c) => c.email).length
+                                                    : explicitEmailCount
                                                 : whatsappRecipientCount}
                                         </div>
                                         <div className="text-sm text-gray-600">Recipients</div>
@@ -1698,7 +1751,7 @@ export default function NewCampaignPage() {
                             {campaignChannel === "personalised" ? (
                                 <Card title="AI Email Previews">
                                     <PersonalisedPreview
-                                        selectedContacts={selectedContacts}
+                                        selectedContacts={previewSample as Contact[]}
                                         aiSystemPrompt={aiSystemPrompt}
                                         aiUserPrompt={aiUserPrompt}
                                         subject={subject}
@@ -1713,16 +1766,16 @@ export default function NewCampaignPage() {
                                                 subject={subject}
                                                 htmlContent={htmlContent}
                                                 senderEmail={selectedMailbox || undefined}
-                                                recipientName={selectedContacts[0]?.fullName}
-                                                recipientEmail={selectedContacts[0]?.email || undefined}
+                                                recipientName={previewSample[0]?.fullName}
+                                                recipientEmail={previewSample[0]?.email || undefined}
                                                 attachments={attachments}
                                             />
                                         ) : (
                                             <WhatsAppPreview
                                                 template={selectedTemplate}
                                                 variableValues={variableValues}
-                                                recipientName={selectedContacts[0]?.fullName}
-                                                recipientPhone={selectedContacts[0]?.phone || undefined}
+                                                recipientName={previewSample[0]?.fullName}
+                                                recipientPhone={previewSample[0]?.phone || undefined}
                                             />
                                         )}
                                     </Card>
@@ -1790,7 +1843,7 @@ export default function NewCampaignPage() {
                                                     {isSelectAllActive
                                                         ? selectAllRecipientCount
                                                         : (campaignChannel === "email" || campaignChannel === "personalised")
-                                                            ? selectedContacts.filter((c) => c.email).length
+                                                            ? explicitEmailCount
                                                             : whatsappRecipientCount}
                                                 </strong>{" "}
                                                 recipients.
@@ -1963,8 +2016,8 @@ export default function NewCampaignPage() {
                 title={sendMode === "schedule" ? "Schedule Campaign?" : "Send Campaign?"}
                 description={
                     sendMode === "schedule"
-                        ? `This ${channelLabel.toLowerCase()} campaign will be queued and sent automatically at ${formatSastForDisplay(scheduleDate, scheduleTime)} to ${isSelectAllActive ? selectAllRecipientCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients.`
-                        : `Are you sure you want to send this ${channelLabel.toLowerCase()} campaign to ${isSelectAllActive ? selectAllRecipientCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? selectedContacts.filter((c) => c.email).length : whatsappRecipientCount)} recipients? This action cannot be undone once processing starts.`
+                        ? `This ${channelLabel.toLowerCase()} campaign will be queued and sent automatically at ${formatSastForDisplay(scheduleDate, scheduleTime)} to ${isSelectAllActive ? selectAllRecipientCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? explicitEmailCount : whatsappRecipientCount)} recipients.`
+                        : `Are you sure you want to send this ${channelLabel.toLowerCase()} campaign to ${isSelectAllActive ? selectAllRecipientCount : ((campaignChannel === "email" || campaignChannel === "personalised") ? explicitEmailCount : whatsappRecipientCount)} recipients? This action cannot be undone once processing starts.`
                 }
                 confirmLabel={sendMode === "schedule" ? "Yes, Schedule" : "Yes, Send Campaign"}
                 cancelLabel="Cancel"
