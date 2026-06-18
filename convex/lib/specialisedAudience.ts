@@ -208,3 +208,69 @@ export function ita34IncomeScanAdapter(filters: ITA34AudienceFilters): ScanAdapt
         },
     };
 }
+
+/** A scanned invoice row — only the columns the tax-return collapse needs. */
+interface InvoiceScanRow {
+    _ttt_customer_value: string;
+    ttt_sarsreimbursement: number | null;
+    createdon: string;
+}
+
+const INVOICE_SCAN_SELECT = "_ttt_customer_value,ttt_sarsreimbursement,createdon";
+
+/** The reimbursement threshold and year window that shape a tax-return scan. */
+export interface TaxReturnAudienceFilters {
+    /** Minimum `ttt_sarsreimbursement`; defaults to 0. */
+    taxReturnMin?: number;
+    /**
+     * Calendar year whose invoices to scan (matched on `createdon`). The caller
+     * resolves the default (previous year), so the adapter stays deterministic.
+     */
+    targetYear: number;
+}
+
+/**
+ * The tax-return scan adapter: scan `new_invoiceses` for SARS reimbursements at
+ * or above the threshold within the target-year window, and collapse to each
+ * contact's highest reimbursement.
+ *
+ * Unlike the ITA34 adapter there is *no* in-memory membership test — the
+ * threshold is the scan query itself, so every collapsed contact qualifies and
+ * `contactIds` is simply the keys of the highest-per-contact map. The scan figure
+ * is the reimbursement amount, which this audience displays directly (no Tax
+ * Profile join), so the resolver is called with `withTaxProfile` unset.
+ */
+export function taxReturnScanAdapter(filters: TaxReturnAudienceFilters): ScanAdapter {
+    return {
+        async scan(request: DynamicsRequestFn): Promise<ScanResult> {
+            const min = filters.taxReturnMin ?? 0;
+            const yearStart = `${filters.targetYear}-01-01T00:00:00Z`;
+            const yearEnd = `${filters.targetYear + 1}-01-01T00:00:00Z`;
+            const scanFilter =
+                `ttt_sarsreimbursement ge ${min}` +
+                ` and createdon ge ${yearStart} and createdon lt ${yearEnd}` +
+                ` and _ttt_customer_value ne null and statecode eq 1`;
+
+            const figures = new Map<string, number | null>();
+            await streamEntity<InvoiceScanRow>(scanFilter, {
+                entity: "new_invoiceses",
+                select: INVOICE_SCAN_SELECT,
+                orderby: "ttt_sarsreimbursement desc",
+                request,
+                onPage: (rows) => {
+                    for (const row of rows) {
+                        const cid = row._ttt_customer_value;
+                        if (!cid) continue;
+                        const amount = row.ttt_sarsreimbursement ?? 0;
+                        const existing = figures.get(cid);
+                        if (existing === undefined || amount > (existing ?? 0)) {
+                            figures.set(cid, row.ttt_sarsreimbursement ?? null);
+                        }
+                    }
+                },
+            });
+
+            return { contactIds: Array.from(figures.keys()), figures };
+        },
+    };
+}

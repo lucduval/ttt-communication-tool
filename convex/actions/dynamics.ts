@@ -604,7 +604,7 @@ const IRP5_SELECT_FIELDS = [
 // The canonical tax-figure shape (and the readers that produce it) are owned by
 // the Tax Profile module.
 import type { TaxProfileData } from "../lib/taxProfile";
-import { resolveSpecialisedAudience, ita34IncomeScanAdapter } from "../lib/specialisedAudience";
+import { resolveSpecialisedAudience, ita34IncomeScanAdapter, taxReturnScanAdapter } from "../lib/specialisedAudience";
 export type { TaxProfileData };
 
 export const fetchContactTaxData = action({
@@ -798,56 +798,12 @@ export const fetchContactsByTaxReturn = action({
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
 
         const targetYear = args.taxReturnYear ?? (new Date().getFullYear() - 1);
-        const yearStart = `${targetYear}-01-01T00:00:00Z`;
-        const yearEnd = `${targetYear + 1}-01-01T00:00:00Z`;
 
-        // Build invoice filter: reimbursement above threshold within the target year
-        let invoiceFilter = `ttt_sarsreimbursement ge ${args.taxReturnMin}`;
-        invoiceFilter += ` and createdon ge ${yearStart} and createdon lt ${yearEnd}`;
-        invoiceFilter += ` and _ttt_customer_value ne null`;
-        invoiceFilter += ` and statecode eq 1`; // Inactive/completed invoices
-
-        const invoiceEndpoint = `new_invoiceses?$select=_ttt_customer_value,ttt_sarsreimbursement,createdon&$filter=${invoiceFilter}&$orderby=ttt_sarsreimbursement desc`;
-
-        interface InvoiceRow {
-            _ttt_customer_value: string;
-            ttt_sarsreimbursement: number | null;
-            createdon: string;
-        }
-
-        let allInvoices: InvoiceRow[] = [];
-        let nextLink: string | null = invoiceEndpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 100) {
-            pageCount++;
-            const endpoint: string = nextLink.startsWith("http")
-                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : nextLink;
-            const response = await dynamicsRequest<{ value: InvoiceRow[]; "@odata.nextLink"?: string }>(endpoint);
-            if (response.value?.length) {
-                allInvoices.push(...response.value);
-            }
-            nextLink = response["@odata.nextLink"] ?? null;
-        }
-
-        // De-duplicate: keep the highest reimbursement per contact
-        const contactMap = new Map<string, InvoiceRow>();
-        for (const row of allInvoices) {
-            const cid = row._ttt_customer_value;
-            if (!cid) continue;
-            const existing = contactMap.get(cid);
-            if (!existing || (row.ttt_sarsreimbursement ?? 0) > (existing.ttt_sarsreimbursement ?? 0)) {
-                contactMap.set(cid, row);
-            }
-        }
-
-        const contactIds = Array.from(contactMap.keys());
-        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
-
-        // Build additional contact-level filter conditions
-        const extraFilter = buildContactFilterClauses(resolvedArgs);
-
+        // The scan (highest reimbursement per contact in the year window) and the
+        // id-chunked contact re-query live in the Specialised Audience module /
+        // Contact Query. This handler is the rich-list-shape mapper. This audience
+        // displays the reimbursement amount directly — it is the scan figure — so
+        // no Tax Profile join is requested and `extra.scanFigure` carries it.
         const contacts: Array<{
             id: string;
             fullName: string;
@@ -867,38 +823,40 @@ export const fetchContactsByTaxReturn = action({
             sarsReimbursement: number | null;
         }> = [];
 
-        for (let i = 0; i < contactIds.length; i += 50) {
-            const batch = contactIds.slice(i, i + 50);
-            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
-            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
-            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
-
-            for (const c of contactResponse.value) {
-                const invoiceRow = contactMap.get(c.contactid);
-                contacts.push({
-                    id: c.contactid,
-                    fullName: c.fullname,
-                    firstName: c.firstname,
-                    lastName: c.lastname,
-                    email: c.emailaddress1,
-                    phone: c.mobilephone,
-                    internationalPhone: c.icon_formattedmobilenumber,
-                    isActive: c.statecode === 0,
-                    clientType: c.riivo_clienttypenew,
-                    marketingPreferences: {
-                        tax: c.riivo_taxmarketing,
-                        accounting: c.riivo_accountingmarketing,
-                        insurance: c.riivo_insurancemarketing,
-                    },
-                    whatsappOptIn: c.riivo_whatsappoptinout,
-                    emailNotifications: c.icon_sendemailclientnotifications,
-                    smsNotifications: c.icon_sendclientssmsnotifications,
-                    createdOn: c.createdon,
-                    modifiedOn: c.modifiedon,
-                    sarsReimbursement: invoiceRow?.ttt_sarsreimbursement ?? null,
-                });
-            }
-        }
+        await resolveSpecialisedAudience<DynamicsContact>({
+            adapter: taxReturnScanAdapter({
+                taxReturnMin: args.taxReturnMin,
+                targetYear,
+            }),
+            filter: resolvedArgs,
+            select: CONTACT_SELECT_FIELDS,
+            onChunk: (resolved) => {
+                for (const { contact: c, extra } of resolved) {
+                    contacts.push({
+                        id: c.contactid,
+                        fullName: c.fullname,
+                        firstName: c.firstname,
+                        lastName: c.lastname,
+                        email: c.emailaddress1,
+                        phone: c.mobilephone,
+                        internationalPhone: c.icon_formattedmobilenumber,
+                        isActive: c.statecode === 0,
+                        clientType: c.riivo_clienttypenew,
+                        marketingPreferences: {
+                            tax: c.riivo_taxmarketing,
+                            accounting: c.riivo_accountingmarketing,
+                            insurance: c.riivo_insurancemarketing,
+                        },
+                        whatsappOptIn: c.riivo_whatsappoptinout,
+                        emailNotifications: c.icon_sendemailclientnotifications,
+                        smsNotifications: c.icon_sendclientssmsnotifications,
+                        createdOn: c.createdon,
+                        modifiedOn: c.modifiedon,
+                        sarsReimbursement: extra.scanFigure,
+                    });
+                }
+            },
+        });
 
         return { contacts, totalCount: contacts.length };
     },

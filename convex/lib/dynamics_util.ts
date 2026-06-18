@@ -1,7 +1,6 @@
 
-import { dynamicsRequest } from "../actions/dynamics";
-import { buildContactFilterClauses, streamContacts, type ContactFilter } from "./contactQuery";
-import { resolveSpecialisedAudience, ita34IncomeScanAdapter } from "./specialisedAudience";
+import { streamContacts, type ContactFilter } from "./contactQuery";
+import { resolveSpecialisedAudience, ita34IncomeScanAdapter, taxReturnScanAdapter } from "./specialisedAudience";
 
 interface SimpleContact {
     contactid: string;
@@ -113,76 +112,43 @@ export async function fetchMatchingContacts(
     });
 }
 
-/**
- * Build extra contact-level filter from CampaignFilters (shared by tax return and ITA34 fetches).
- *
- * Delegates to the Contact Query module's clause builder so the two-step audience
- * sends apply exactly the same contact-level filtering as a standard query — they
- * append these clauses to their own contact-id-batch base.
- */
-function buildExtraContactFilter(filters: CampaignFilters): string {
-    return buildContactFilterClauses(toContactFilter(filters));
-}
-
 const CONTACT_SELECT_SIMPLE = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber,riivo_referralcode";
 
 /**
  * Fetch contacts by tax return (SARS reimbursement) filter, then stream in chunks.
  * Used when taxReturnMin is set in campaign filters.
+ *
+ * The scan (highest reimbursement per contact in the year window) and the
+ * id-chunked re-query now live in the Specialised Audience module / Contact
+ * Query; this is the slim send-shape mapper around the shared resolver. The send
+ * path displays no figure, so `withTaxProfile` stays unset and the reimbursement
+ * scan figure is not read here.
  */
 export async function fetchMatchingContactsByTaxReturn(
     filters: CampaignFilters,
     onChunk: (contacts: ShimmedContact[]) => Promise<void>
 ) {
-    const { taxReturnMin = 0, taxReturnYear } = filters;
-    const targetYear = taxReturnYear ?? (new Date().getFullYear() - 1);
-    const yearStart = `${targetYear}-01-01T00:00:00Z`;
-    const yearEnd = `${targetYear + 1}-01-01T00:00:00Z`;
-
-    const invoiceFilter = `ttt_sarsreimbursement ge ${taxReturnMin} and createdon ge ${yearStart} and createdon lt ${yearEnd} and _ttt_customer_value ne null and statecode eq 1`;
-    const invoiceEndpoint = `new_invoiceses?$select=_ttt_customer_value,ttt_sarsreimbursement,createdon&$filter=${invoiceFilter}&$orderby=ttt_sarsreimbursement desc`;
-
-    interface InvoiceRow { _ttt_customer_value: string; ttt_sarsreimbursement: number | null; createdon: string }
-    let allInvoices: InvoiceRow[] = [];
-    let nextLink: string | null = invoiceEndpoint;
-    let pageCount = 0;
-
-    while (nextLink && pageCount < 100) {
-        pageCount++;
-        const endpoint: string = nextLink.startsWith("http") ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "") : nextLink;
-        const response = await dynamicsRequest<{ value: InvoiceRow[]; "@odata.nextLink"?: string }>(endpoint);
-        if (response.value?.length) allInvoices.push(...response.value);
-        nextLink = response["@odata.nextLink"] ?? null;
-    }
-
-    const contactMap = new Map<string, InvoiceRow>();
-    for (const row of allInvoices) {
-        const cid = row._ttt_customer_value;
-        if (!cid) continue;
-        const existing = contactMap.get(cid);
-        if (!existing || (row.ttt_sarsreimbursement ?? 0) > (existing.ttt_sarsreimbursement ?? 0)) contactMap.set(cid, row);
-    }
-    const contactIds = Array.from(contactMap.keys());
-    if (contactIds.length === 0) return;
-
-    const extraFilter = buildExtraContactFilter(filters);
-    for (let i = 0; i < contactIds.length; i += 500) {
-        const batch = contactIds.slice(i, i + 500);
-        const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
-        const contactEndpoint = `contacts?$select=${CONTACT_SELECT_SIMPLE}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
-        const contactResponse = await dynamicsRequest<{ value: SimpleContact[] }>(contactEndpoint);
-        if (contactResponse.value?.length) {
-            const chunk = contactResponse.value.map((c) => ({
-                id: c.contactid,
-                fullName: c.fullname || "",
-                email: c.emailaddress1,
-                phone: c.mobilephone,
-                internationalPhone: (c as any).icon_formattedmobilenumber || null,
-                referralCode: c.riivo_referralcode || null,
-            }));
-            await onChunk(chunk);
-        }
-    }
+    const targetYear = filters.taxReturnYear ?? (new Date().getFullYear() - 1);
+    await resolveSpecialisedAudience<SimpleContact>({
+        adapter: taxReturnScanAdapter({
+            taxReturnMin: filters.taxReturnMin ?? 0,
+            targetYear,
+        }),
+        filter: toContactFilter(filters),
+        select: CONTACT_SELECT_SIMPLE,
+        onChunk: async (resolved) => {
+            await onChunk(
+                resolved.map(({ contact: c }) => ({
+                    id: c.contactid,
+                    fullName: c.fullname || "",
+                    email: c.emailaddress1,
+                    phone: c.mobilephone,
+                    internationalPhone: (c as any).icon_formattedmobilenumber || null,
+                    referralCode: c.riivo_referralcode || null,
+                }))
+            );
+        },
+    });
 }
 
 /**

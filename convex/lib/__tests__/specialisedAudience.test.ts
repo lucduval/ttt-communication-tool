@@ -15,6 +15,7 @@
 import { describe, it, expect } from "vitest";
 import {
     ita34IncomeScanAdapter,
+    taxReturnScanAdapter,
     resolveSpecialisedAudience,
     type ScanAdapter,
 } from "../specialisedAudience";
@@ -101,6 +102,58 @@ describe("ita34IncomeScanAdapter", () => {
         const adapter = ita34IncomeScanAdapter({ incomeMin: 100, incomeMax: 300 });
         const result = await adapter.scan(request);
         expect(result.contactIds).toEqual([]);
+    });
+});
+
+function invoiceRow(contactId: string, reimbursement: number, createdon = "2025-06-01T00:00:00Z") {
+    return {
+        _ttt_customer_value: contactId,
+        ttt_sarsreimbursement: reimbursement,
+        createdon,
+    };
+}
+
+describe("taxReturnScanAdapter", () => {
+    it("collapses to each contact's highest reimbursement; every collapsed contact qualifies", async () => {
+        const { request } = routedRequest([
+            {
+                match: "new_invoiceses",
+                pages: [
+                    {
+                        value: [
+                            // c1 has two invoices; the higher reimbursement wins.
+                            invoiceRow("c1", 500),
+                            invoiceRow("c1", 1200),
+                            invoiceRow("c2", 800),
+                        ],
+                    },
+                ],
+            },
+        ]);
+
+        const adapter = taxReturnScanAdapter({ taxReturnMin: 100, targetYear: 2025 });
+        const result = await adapter.scan(request);
+
+        // No income-range membership: every collapsed contact qualifies.
+        expect([...result.contactIds].sort()).toEqual(["c1", "c2"]);
+        expect(result.figures.get("c1")).toBe(1200);
+        expect(result.figures.get("c2")).toBe(800);
+    });
+
+    it("applies the threshold and year window in the scan query", async () => {
+        const { request, endpoints } = routedRequest([
+            { match: "new_invoiceses", pages: [{ value: [invoiceRow("c1", 900)] }] },
+        ]);
+
+        const adapter = taxReturnScanAdapter({ taxReturnMin: 250, targetYear: 2024 });
+        await adapter.scan(request);
+
+        const scan = endpoints.find((e) => e.includes("new_invoiceses"))!;
+        expect(scan).toContain("ttt_sarsreimbursement ge 250");
+        expect(scan).toContain("createdon ge 2024-01-01T00:00:00Z");
+        expect(scan).toContain("createdon lt 2025-01-01T00:00:00Z");
+        expect(scan).toContain("_ttt_customer_value ne null");
+        expect(scan).toContain("statecode eq 1");
     });
 });
 
