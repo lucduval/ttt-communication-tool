@@ -2,6 +2,7 @@ import { describe, test, expect } from "vitest";
 import {
     buildContactFilter,
     buildContactFilterClauses,
+    buildContactIdClause,
     escapeODataValue,
     normalizeEndpoint,
     streamPages,
@@ -215,6 +216,13 @@ describe("buildContactFilterClauses", () => {
         );
     });
 
+    test("contactIds is an execution-level streaming dimension, not a single filter clause", () => {
+        // contactIds must never be flattened into one filter expression — it fans
+        // out over chunked queries in streamContacts. Both clause builders ignore it.
+        expect(buildContactFilter({ contactIds: ["a", "b"] })).toBe("statecode eq 0");
+        expect(buildContactFilterClauses({ contactIds: ["a", "b"] })).toBe("");
+    });
+
     test("characterizes the extra-filter clause ordering for a representative spread", () => {
         const filter: ContactFilter = {
             filter: "riivo_taxmarketing eq true",
@@ -355,6 +363,123 @@ describe("streamContacts", () => {
                 { select: "contactid", request, sleep: noSleep, onPage: () => {} }
             )
         ).rejects.toThrow("always");
+    });
+});
+
+describe("buildContactIdClause", () => {
+    test("ORs one contactid eq clause per id", () => {
+        expect(buildContactIdClause(["a", "b", "c"])).toBe(
+            "contactid eq 'a' or contactid eq 'b' or contactid eq 'c'"
+        );
+    });
+
+    test("escapes apostrophes in ids", () => {
+        expect(buildContactIdClause(["o'x"])).toBe("contactid eq 'o''x'");
+    });
+});
+
+describe("streamContacts with contactIds", () => {
+    test("a single chunk restricts the filter to the id set alongside the active-only base", async () => {
+        const { request, endpoints } = fakeRequest([
+            { value: [{ contactid: "a" }, { contactid: "b" }] },
+        ]);
+        const collected: Array<{ contactid: string }> = [];
+        await streamContacts<{ contactid: string }>(
+            { contactIds: ["a", "b"] },
+            {
+                select: "contactid",
+                request,
+                onPage: (rows) => {
+                    collected.push(...rows);
+                },
+            }
+        );
+        expect(collected.map((c) => c.contactid)).toEqual(["a", "b"]);
+        expect(endpoints).toHaveLength(1);
+        expect(endpoints[0]).toContain(
+            "$filter=statecode eq 0 and (contactid eq 'a' or contactid eq 'b')"
+        );
+    });
+
+    test("fans out over the OR-ceiling, one query per chunk, streaming every chunk in order", async () => {
+        const { request, endpoints } = fakeRequest([
+            { value: [{ contactid: "1" }, { contactid: "2" }] },
+            { value: [{ contactid: "3" }] },
+        ]);
+        const collected: Array<{ contactid: string }> = [];
+        await streamContacts<{ contactid: string }>(
+            { contactIds: ["1", "2", "3"] },
+            {
+                select: "contactid",
+                request,
+                contactIdChunkSize: 2,
+                onPage: (rows) => {
+                    collected.push(...rows);
+                },
+            }
+        );
+        expect(collected.map((c) => c.contactid)).toEqual(["1", "2", "3"]);
+        expect(endpoints).toHaveLength(2);
+        expect(endpoints[0]).toContain("contactid eq '1' or contactid eq '2'");
+        expect(endpoints[0]).not.toContain("contactid eq '3'");
+        expect(endpoints[1]).toContain("contactid eq '3'");
+        expect(endpoints[1]).not.toContain("contactid eq '1'");
+    });
+
+    test("paginates each chunk independently, following its nextLink", async () => {
+        const { request, endpoints } = fakeRequest([
+            {
+                value: [{ contactid: "1" }],
+                "@odata.nextLink":
+                    "https://org.api.crm.dynamics.com/api/data/v9.2/contacts?$skiptoken=p2",
+            },
+            { value: [{ contactid: "2" }] },
+        ]);
+        const collected: Array<{ contactid: string }> = [];
+        await streamContacts<{ contactid: string }>(
+            { contactIds: ["a"] },
+            {
+                select: "contactid",
+                request,
+                onPage: (rows) => {
+                    collected.push(...rows);
+                },
+            }
+        );
+        expect(collected.map((c) => c.contactid)).toEqual(["1", "2"]);
+        expect(endpoints[1]).toBe("contacts?$skiptoken=p2");
+    });
+
+    test("composes with all other filter clauses on every chunk", async () => {
+        const { request, endpoints } = fakeRequest([{ value: [] }]);
+        await streamContacts(
+            { contactIds: ["x"], ownerId: "owner-1", clientType: [4] },
+            { select: "contactid", request, onPage: () => {} }
+        );
+        expect(endpoints[0]).toContain("_ownerid_value eq 'owner-1'");
+        expect(endpoints[0]).toContain(
+            "Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['4'])"
+        );
+        expect(endpoints[0]).toContain("contactid eq 'x'");
+    });
+
+    test("an empty id set yields nothing and issues no requests", async () => {
+        const { request, endpoints } = fakeRequest([
+            { value: [{ contactid: "should-not-appear" }] },
+        ]);
+        const collected: Array<{ contactid: string }> = [];
+        await streamContacts<{ contactid: string }>(
+            { contactIds: [] },
+            {
+                select: "contactid",
+                request,
+                onPage: (rows) => {
+                    collected.push(...rows);
+                },
+            }
+        );
+        expect(collected).toEqual([]);
+        expect(endpoints).toHaveLength(0);
     });
 });
 

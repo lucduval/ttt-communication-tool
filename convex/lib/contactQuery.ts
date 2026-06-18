@@ -55,6 +55,21 @@ export interface ContactFilter {
      * of "Z" contributes no upper bound (the range extends to the end).
      */
     nameRangeEnd?: string;
+    /**
+     * Restrict the query to a specific set of contact ids. This is an
+     * execution-level *streaming* dimension, not a single OData clause: when set,
+     * {@link streamContacts} owns the `contactid eq` encoding and fans the ids out
+     * over the OData OR-ceiling in chunks (see {@link CONTACT_ID_OR_CEILING}),
+     * paginating each chunk and re-applying every other clause (owner scope, client
+     * type, etc.) to it. The clause builders deliberately ignore this field — it can
+     * never be flattened into one filter expression. Specialised audiences use this
+     * to re-query their scanned ids through Contact Query instead of hand-building
+     * id clauses.
+     *
+     * Ordering note: results stream per chunk. `$orderby` applies within each chunk,
+     * but there is no global ordering across chunks.
+     */
+    contactIds?: string[];
 }
 
 /**
@@ -63,6 +78,23 @@ export interface ContactFilter {
  */
 export function escapeODataValue(value: string): string {
     return value.replace(/'/g, "''");
+}
+
+/**
+ * Maximum number of `contactid eq` terms ORed into a single chunk's filter. The
+ * `contactIds` dimension fans out over this ceiling so each chunk stays under the
+ * OData query limit. Conservative to keep request URLs well within the Dynamics
+ * length limit even alongside the rest of the filter clauses.
+ */
+export const CONTACT_ID_OR_CEILING = 50;
+
+/**
+ * Build the `contactid eq '…' or …` disjunction for a single chunk of ids. Each
+ * id is escaped for an OData single-quoted literal. Only ever applied to a chunk
+ * sized under {@link CONTACT_ID_OR_CEILING} — never the full id set.
+ */
+export function buildContactIdClause(ids: string[]): string {
+    return ids.map((id) => `contactid eq '${escapeODataValue(id)}'`).join(" or ");
 }
 
 /**
@@ -400,6 +432,8 @@ interface StreamContactsOptions<T> extends StreamPagesOptions<T> {
     orderby?: string;
     /** Collection to query; defaults to "contacts". */
     entity?: string;
+    /** Per-chunk id ceiling for the contactIds dimension; defaults to {@link CONTACT_ID_OR_CEILING}. */
+    contactIdChunkSize?: number;
 }
 
 /**
@@ -407,17 +441,32 @@ interface StreamContactsOptions<T> extends StreamPagesOptions<T> {
  * here from the typed object so the owner scope (and every other clause) is always
  * applied — callers cannot pass a pre-built string that bypasses it. A thin facade
  * over {@link streamEntity}.
+ *
+ * When the filter carries a `contactIds` set, the stream is restricted to those
+ * ids: the ids are chunked under {@link CONTACT_ID_OR_CEILING} and each chunk runs
+ * as its own query (with every other clause re-applied), paginated independently.
+ * Rows stream per chunk in chunk order — `$orderby` is honoured within a chunk but
+ * not across chunks. An empty `contactIds` set yields nothing and issues no request.
  */
 export async function streamContacts<T>(
     filter: ContactFilter,
     opts: StreamContactsOptions<T>
 ): Promise<void> {
-    await streamEntity<T>(buildContactFilter(filter), {
-        ...opts,
-        entity: opts.entity ?? "contacts",
-        select: opts.select,
-        orderby: opts.orderby ?? "fullname asc",
-    });
+    const entity = opts.entity ?? "contacts";
+    const orderby = opts.orderby ?? "fullname asc";
+    const base = buildContactFilter(filter);
+
+    if (filter.contactIds !== undefined) {
+        const chunkSize = opts.contactIdChunkSize ?? CONTACT_ID_OR_CEILING;
+        for (let i = 0; i < filter.contactIds.length; i += chunkSize) {
+            const idChunk = filter.contactIds.slice(i, i + chunkSize);
+            const expression = `${base} and (${buildContactIdClause(idChunk)})`;
+            await streamEntity<T>(expression, { ...opts, entity, select: opts.select, orderby });
+        }
+        return;
+    }
+
+    await streamEntity<T>(base, { ...opts, entity, select: opts.select, orderby });
 }
 
 /** Options for {@link countContacts}. */
