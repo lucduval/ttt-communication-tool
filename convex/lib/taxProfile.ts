@@ -68,17 +68,18 @@ export const IRP5_SELECT = [
 ].join(",");
 
 /**
- * The latest-year selection rule: given a contact's ITA34 rows, return the one
- * with the maximum year of assessment. A missing year counts as 0 so a dated
- * row never beats a real one. Returns null for an empty list.
+ * The latest-year selection rule: given a contact's rows, return the one with
+ * the maximum year. A missing year counts as 0 so a dated row never beats a real
+ * one. Returns null for an empty list. The year accessor defaults to ITA34's
+ * `riivo_yearofassessment`; pass an accessor for entities that name the year
+ * differently (e.g. IRP5's `riivo_assessmentyearint`).
  */
-export function pickLatest<T extends { riivo_yearofassessment?: number | null }>(
-    rows: T[]
+export function pickLatest<T extends Record<string, any>>(
+    rows: T[],
+    year: (row: T) => number | null | undefined = (row) => row.riivo_yearofassessment
 ): T | null {
     if (!rows || rows.length === 0) return null;
-    return rows.reduce((latest, row) =>
-        (row.riivo_yearofassessment ?? 0) > (latest.riivo_yearofassessment ?? 0) ? row : latest
-    );
+    return rows.reduce((latest, row) => ((year(row) ?? 0) > (year(latest) ?? 0) ? row : latest));
 }
 
 /**
@@ -143,4 +144,56 @@ export async function fetchTaxProfile(contactId: string): Promise<TaxProfileData
     const irp5 = irp5Res.value[0] || null;
 
     return mapTaxProfile(contactId, ita34, irp5);
+}
+
+/**
+ * Batch read used by the recipient list: fetch ITA34/IRP5 for a page of
+ * contacts, select each contact's latest year (the same `pickLatest` rule as
+ * the singular read), and map into `TaxProfileData`. Reads are batched ~50 ids
+ * per request (OR-joined contact-link filters) rather than looping
+ * `fetchTaxProfile` per id. Latest-year selection lives in `pickLatest`, in
+ * memory — not in the query — so the list figure matches the preview and the
+ * sent email.
+ *
+ * Returns a map keyed by contactId; every requested id gets an entry (its
+ * `ita34`/`irp5` are null when that contact has no rows).
+ */
+export async function fetchTaxProfiles(contactIds: string[]): Promise<Map<string, TaxProfileData>> {
+    const profiles = new Map<string, TaxProfileData>();
+    if (!contactIds || contactIds.length === 0) return profiles;
+
+    const ita34ByContact = new Map<string, any[]>();
+    const irp5ByContact = new Map<string, any[]>();
+    const push = (map: Map<string, any[]>, key: string | undefined, row: any) => {
+        if (!key) return;
+        const list = map.get(key);
+        if (list) list.push(row);
+        else map.set(key, [row]);
+    };
+
+    for (let i = 0; i < contactIds.length; i += 50) {
+        const batch = contactIds.slice(i, i + 50);
+        const ita34Filter = batch.map((id) => `_riivo_taxpayercontact_value eq '${id}'`).join(" or ");
+        const irp5Filter = batch.map((id) => `_riivo_client_value eq '${id}'`).join(" or ");
+
+        const [ita34Res, irp5Res] = await Promise.all([
+            dynamicsRequest<{ value: any[] }>(
+                `riivo_ita34s?$select=${ITA34_SELECT},_riivo_taxpayercontact_value&$filter=${ita34Filter}`
+            ),
+            dynamicsRequest<{ value: any[] }>(
+                `riivo_irp5s?$select=${IRP5_SELECT},_riivo_client_value&$filter=${irp5Filter}`
+            ),
+        ]);
+
+        for (const row of ita34Res.value ?? []) push(ita34ByContact, row._riivo_taxpayercontact_value, row);
+        for (const row of irp5Res.value ?? []) push(irp5ByContact, row._riivo_client_value, row);
+    }
+
+    for (const contactId of contactIds) {
+        const ita34 = pickLatest(ita34ByContact.get(contactId) ?? []);
+        const irp5 = pickLatest(irp5ByContact.get(contactId) ?? [], (row) => row.riivo_assessmentyearint);
+        profiles.set(contactId, mapTaxProfile(contactId, ita34, irp5));
+    }
+
+    return profiles;
 }

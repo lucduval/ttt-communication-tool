@@ -601,7 +601,9 @@ const IRP5_SELECT_FIELDS = [
     "_riivo_client_value",
 ].join(",");
 
-// The canonical tax-figure shape is owned by the Tax Profile module.
+// The canonical tax-figure shape (and the readers that produce it) are owned by
+// the Tax Profile module.
+import { fetchTaxProfiles } from "../lib/taxProfile";
 import type { TaxProfileData } from "../lib/taxProfile";
 export type { TaxProfileData };
 
@@ -696,12 +698,11 @@ export const fetchContactsWithITA34 = action({
         if (args.taxYear) {
             ita34Filter += ` and riivo_yearofassessment eq ${args.taxYear}`;
         }
-        if (args.incomeMin !== undefined) {
-            ita34Filter += ` and riivo_income ge ${args.incomeMin}`;
-        }
-        if (args.incomeMax !== undefined) {
-            ita34Filter += ` and riivo_income le ${args.incomeMax}`;
-        }
+        // NOTE: the income range is intentionally NOT applied here. Applying it as
+        // an OData clause tests *every* ITA34 row, so a contact qualified if any
+        // year fell in range — even when their latest year did not, leaving the
+        // displayed (latest-year) figure disagreeing with the filter. The range is
+        // tested in memory against each contact's latest row below.
         if (args.retirementFundMin !== undefined) {
             ita34Filter += ` and riivo_retirementfundcontributions ge ${args.retirementFundMin}`;
         }
@@ -734,6 +735,8 @@ export const fetchContactsWithITA34 = action({
             nextLink = response["@odata.nextLink"] ?? null;
         }
 
+        // Dedup each contact's ITA34 rows to their latest year first; membership
+        // (income range) is then decided on that latest row, not on any row.
         const contactMap = new Map<string, ITA34Row>();
         for (const row of allIta34s) {
             const cid = row._riivo_taxpayercontact_value;
@@ -744,7 +747,18 @@ export const fetchContactsWithITA34 = action({
             }
         }
 
-        const contactIds = Array.from(contactMap.keys());
+        // Income-range membership: test the latest-year row's `riivo_income`. The
+        // filter dimension stays `riivo_income` (today's semantic); the displayed
+        // column is taxable income, sourced from the Tax Profile module below.
+        let contactIds = Array.from(contactMap.keys());
+        if (args.incomeMin !== undefined || args.incomeMax !== undefined) {
+            contactIds = contactIds.filter((cid) => {
+                const income = contactMap.get(cid)!.riivo_income ?? 0;
+                if (args.incomeMin !== undefined && income < args.incomeMin) return false;
+                if (args.incomeMax !== undefined && income > args.incomeMax) return false;
+                return true;
+            });
+        }
         if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
 
         // Build additional contact-level filter conditions
@@ -771,6 +785,12 @@ export const fetchContactsWithITA34 = action({
             ita34Year: number | null;
         }> = [];
 
+        // Canonical display figures come from the Tax Profile module, so the
+        // list shows the same latest-year taxable income as the preview and the
+        // sent email. Membership above owns *who* is in range; the module owns
+        // *what figure* is shown.
+        const profiles = await fetchTaxProfiles(contactIds);
+
         for (let i = 0; i < contactIds.length; i += 50) {
             const batch = contactIds.slice(i, i + 50);
             const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
@@ -778,7 +798,7 @@ export const fetchContactsWithITA34 = action({
             const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
 
             for (const c of contactResponse.value) {
-                const ita34Row = contactMap.get(c.contactid);
+                const ita34 = profiles.get(c.contactid)?.ita34 ?? null;
                 contacts.push({
                     id: c.contactid,
                     fullName: c.fullname,
@@ -799,9 +819,10 @@ export const fetchContactsWithITA34 = action({
                     smsNotifications: c.icon_sendclientssmsnotifications,
                     createdOn: c.createdon,
                     modifiedOn: c.modifiedon,
-                    ita34Income: ita34Row?.riivo_income ?? null,
-                    ita34RetirementFund: ita34Row?.riivo_retirementfundcontributions ?? null,
-                    ita34Year: ita34Row?.riivo_yearofassessment ?? null,
+                    // ita34Income carries the displayed figure: taxable income.
+                    ita34Income: ita34?.taxableIncome ?? null,
+                    ita34RetirementFund: ita34?.retirementFundContributions ?? null,
+                    ita34Year: ita34?.yearOfAssessment ?? null,
                 });
             }
         }
