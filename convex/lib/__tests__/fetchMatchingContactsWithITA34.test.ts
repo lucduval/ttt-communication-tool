@@ -6,9 +6,10 @@
  * tested against each contact's *latest* ITA34 row; this path must agree, or a
  * select-all income campaign sends to contacts the advisor never saw in the list.
  *
- * The Dynamics boundary is faked; the module's dedup + in-memory range test run
- * for real. `dynamicsRequest` reaches this module via `../actions/dynamics`, so
- * that re-export is the seam we fake.
+ * The Dynamics boundary is faked; the scan's latest-year collapse + in-memory
+ * range test run for real through the Specialised Audience module. That module
+ * (and Contact Query / Tax Profile beneath it) reaches Dynamics via the
+ * low-level `dynamics_auth` primitive, so that is the seam we fake.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -16,7 +17,7 @@ const boundary = vi.hoisted(() => ({
     dynamicsRequest: vi.fn(),
 }));
 
-vi.mock("../../actions/dynamics", () => ({
+vi.mock("../dynamics_auth", () => ({
     dynamicsRequest: boundary.dynamicsRequest,
 }));
 

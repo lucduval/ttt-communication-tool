@@ -603,8 +603,8 @@ const IRP5_SELECT_FIELDS = [
 
 // The canonical tax-figure shape (and the readers that produce it) are owned by
 // the Tax Profile module.
-import { fetchTaxProfiles } from "../lib/taxProfile";
 import type { TaxProfileData } from "../lib/taxProfile";
+import { resolveSpecialisedAudience, ita34IncomeScanAdapter } from "../lib/specialisedAudience";
 export type { TaxProfileData };
 
 export const fetchContactTaxData = action({
@@ -693,77 +693,12 @@ export const fetchContactsWithITA34 = action({
         // Replace args.ownerId with the enforced value for the rest of the handler
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
 
-        let ita34Filter = "statecode eq 0 and _riivo_taxpayercontact_value ne null";
-
-        if (args.taxYear) {
-            ita34Filter += ` and riivo_yearofassessment eq ${args.taxYear}`;
-        }
-        // NOTE: the income range is intentionally NOT applied here. Applying it as
-        // an OData clause tests *every* ITA34 row, so a contact qualified if any
-        // year fell in range — even when their latest year did not, leaving the
-        // displayed (latest-year) figure disagreeing with the filter. The range is
-        // tested in memory against each contact's latest row below.
-        if (args.retirementFundMin !== undefined) {
-            ita34Filter += ` and riivo_retirementfundcontributions ge ${args.retirementFundMin}`;
-        }
-        if (args.retirementFundMax !== undefined) {
-            ita34Filter += ` and riivo_retirementfundcontributions le ${args.retirementFundMax}`;
-        }
-
-        const ita34Endpoint = `riivo_ita34s?$select=_riivo_taxpayercontact_value,riivo_income,riivo_retirementfundcontributions,riivo_yearofassessment&$filter=${ita34Filter}&$orderby=riivo_yearofassessment desc`;
-
-        interface ITA34Row {
-            _riivo_taxpayercontact_value: string;
-            riivo_income: number | null;
-            riivo_retirementfundcontributions: number | null;
-            riivo_yearofassessment: number | null;
-        }
-
-        let allIta34s: ITA34Row[] = [];
-        let nextLink: string | null = ita34Endpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 100) {
-            pageCount++;
-            const endpoint: string = nextLink.startsWith("http")
-                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : nextLink;
-            const response = await dynamicsRequest<{ value: ITA34Row[]; "@odata.nextLink"?: string }>(endpoint);
-            if (response.value?.length) {
-                allIta34s.push(...response.value);
-            }
-            nextLink = response["@odata.nextLink"] ?? null;
-        }
-
-        // Dedup each contact's ITA34 rows to their latest year first; membership
-        // (income range) is then decided on that latest row, not on any row.
-        const contactMap = new Map<string, ITA34Row>();
-        for (const row of allIta34s) {
-            const cid = row._riivo_taxpayercontact_value;
-            if (!cid) continue;
-            const existing = contactMap.get(cid);
-            if (!existing || (row.riivo_yearofassessment ?? 0) > (existing.riivo_yearofassessment ?? 0)) {
-                contactMap.set(cid, row);
-            }
-        }
-
-        // Income-range membership: test the latest-year row's `riivo_income`. The
-        // filter dimension stays `riivo_income` (today's semantic); the displayed
-        // column is taxable income, sourced from the Tax Profile module below.
-        let contactIds = Array.from(contactMap.keys());
-        if (args.incomeMin !== undefined || args.incomeMax !== undefined) {
-            contactIds = contactIds.filter((cid) => {
-                const income = contactMap.get(cid)!.riivo_income ?? 0;
-                if (args.incomeMin !== undefined && income < args.incomeMin) return false;
-                if (args.incomeMax !== undefined && income > args.incomeMax) return false;
-                return true;
-            });
-        }
-        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
-
-        // Build additional contact-level filter conditions
-        const extraFilter = buildContactFilterClauses(resolvedArgs);
-
+        // Membership (who has latest-year income in range), latest-year selection,
+        // and the id-chunked contact re-query all live in the Specialised Audience
+        // module / Contact Query. This handler is now the rich-list-shape mapper:
+        // the resolver hands back each contact joined with its Tax Profile display
+        // figures so the list shows the same latest-year taxable income as the
+        // preview and the sent email.
         const contacts: Array<{
             id: string;
             fullName: string;
@@ -785,47 +720,48 @@ export const fetchContactsWithITA34 = action({
             ita34Year: number | null;
         }> = [];
 
-        // Canonical display figures come from the Tax Profile module, so the
-        // list shows the same latest-year taxable income as the preview and the
-        // sent email. Membership above owns *who* is in range; the module owns
-        // *what figure* is shown.
-        const profiles = await fetchTaxProfiles(contactIds);
-
-        for (let i = 0; i < contactIds.length; i += 50) {
-            const batch = contactIds.slice(i, i + 50);
-            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
-            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
-            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
-
-            for (const c of contactResponse.value) {
-                const ita34 = profiles.get(c.contactid)?.ita34 ?? null;
-                contacts.push({
-                    id: c.contactid,
-                    fullName: c.fullname,
-                    firstName: c.firstname,
-                    lastName: c.lastname,
-                    email: c.emailaddress1,
-                    phone: c.mobilephone,
-                    internationalPhone: c.icon_formattedmobilenumber,
-                    isActive: c.statecode === 0,
-                    clientType: c.riivo_clienttypenew,
-                    marketingPreferences: {
-                        tax: c.riivo_taxmarketing,
-                        accounting: c.riivo_accountingmarketing,
-                        insurance: c.riivo_insurancemarketing,
-                    },
-                    whatsappOptIn: c.riivo_whatsappoptinout,
-                    emailNotifications: c.icon_sendemailclientnotifications,
-                    smsNotifications: c.icon_sendclientssmsnotifications,
-                    createdOn: c.createdon,
-                    modifiedOn: c.modifiedon,
-                    // ita34Income carries the displayed figure: taxable income.
-                    ita34Income: ita34?.taxableIncome ?? null,
-                    ita34RetirementFund: ita34?.retirementFundContributions ?? null,
-                    ita34Year: ita34?.yearOfAssessment ?? null,
-                });
-            }
-        }
+        await resolveSpecialisedAudience<DynamicsContact>({
+            adapter: ita34IncomeScanAdapter({
+                incomeMin: args.incomeMin,
+                incomeMax: args.incomeMax,
+                retirementFundMin: args.retirementFundMin,
+                retirementFundMax: args.retirementFundMax,
+                taxYear: args.taxYear,
+            }),
+            filter: resolvedArgs,
+            select: CONTACT_SELECT_FIELDS,
+            withTaxProfile: true,
+            onChunk: (resolved) => {
+                for (const { contact: c, extra } of resolved) {
+                    const ita34 = extra.taxProfile?.ita34 ?? null;
+                    contacts.push({
+                        id: c.contactid,
+                        fullName: c.fullname,
+                        firstName: c.firstname,
+                        lastName: c.lastname,
+                        email: c.emailaddress1,
+                        phone: c.mobilephone,
+                        internationalPhone: c.icon_formattedmobilenumber,
+                        isActive: c.statecode === 0,
+                        clientType: c.riivo_clienttypenew,
+                        marketingPreferences: {
+                            tax: c.riivo_taxmarketing,
+                            accounting: c.riivo_accountingmarketing,
+                            insurance: c.riivo_insurancemarketing,
+                        },
+                        whatsappOptIn: c.riivo_whatsappoptinout,
+                        emailNotifications: c.icon_sendemailclientnotifications,
+                        smsNotifications: c.icon_sendclientssmsnotifications,
+                        createdOn: c.createdon,
+                        modifiedOn: c.modifiedon,
+                        // ita34Income carries the displayed figure: taxable income.
+                        ita34Income: ita34?.taxableIncome ?? null,
+                        ita34RetirementFund: ita34?.retirementFundContributions ?? null,
+                        ita34Year: ita34?.yearOfAssessment ?? null,
+                    });
+                }
+            },
+        });
 
         return { contacts, totalCount: contacts.length };
     },
