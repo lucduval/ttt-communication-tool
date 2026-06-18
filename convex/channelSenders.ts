@@ -466,3 +466,241 @@ export const whatsappSender: ChannelSender = {
     errorRetryDelayMs: 500,
     sendBatch: sendWhatsAppBatch_,
 };
+
+// Dynamics `$select` projections for the per-recipient tax fetch. Pulled out as
+// constants so the long field lists stay out of the send loop.
+const ITA34_SEL =
+    "riivo_ita34id,riivo_yearofassessment,riivo_income,riivo_taxableincomeassessedloss,riivo_retirementannuityfundcontributions,riivo_retirementfundcontributions,riivo_providendfundcontributions,riivo_medicalschemefeestaxcredit,riivo_medicalrebatebelow65withnodisability,riivo_dateofassessment,riivo_referencenumber";
+const IRP5_SEL =
+    "riivo_irp5id,riivo_assessmentyearint,riivo_incomepaye,riivo_grosstaxableincome,riivo_totaldeductionscontributions,riivo_racontributions,riivo_providentfundcontributionpaye,riivo_totalprovidentfundcontributions,riivo_medicalaidcontributions,riivo_medicalschemetaxcredit,riivo_taxabletravelremuneration,riivo_employertradingothername,riivo_taxperiodstartdate,riivo_taxperiodenddate";
+
+const DEFAULT_SYS_PROMPT =
+    "You are a friendly and professional tax advisor at TTT Group. Write warm but concise emails. Do NOT invent or change any numbers.";
+
+/**
+ * Personalised Channel Sender. Owns the sequential per-recipient pipeline —
+ * fetch tax data (ITA34/IRP5/contact) → calculate RA scenarios → generate AI
+ * copy (Claude) → build + track the email → send → opportunity creation — plus
+ * the pending-message-record creation and the personalised-history dedup write.
+ * Per-recipient results stream to the driver via `emit`; flushing, claim, and
+ * lifecycle are the driver's. The 1.5s inter-recipient pacing keeps the AI
+ * provider under its RPM ceiling.
+ */
+async function sendPersonalisedBatch_(
+    ctx: ActionCtx,
+    campaign: any,
+    batch: DriverBatch,
+    emit: EmitFn
+): Promise<{ halt?: string; nextDelayMs?: number }> {
+    const campaignId = campaign._id as Id<"campaigns">;
+
+    const campaignContent = await ctx.runQuery(internal.campaignBatches.getCampaignContent, {
+        campaignId,
+    });
+
+    const { dynamicsRequest } = await import("./lib/dynamics_auth");
+    const { calculateOptions, parseAgeFromIdNumber } = await import("./lib/taxCalculator");
+    const { generatePersonalisedCopy } = await import("./lib/claude");
+    const { buildPersonalisedEmail } = await import("./lib/emailTemplatePersonalised");
+    const { sendEmail } = await import("./lib/graph_client");
+
+    // Create pending message records so click/open tracking and setOpportunityId can find them.
+    await ctx.runMutation(internal.messages.createBatch, {
+        messages: batch.recipients.map((r) => ({
+            campaignId,
+            recipientId: r.id,
+            recipientEmail: r.email ?? undefined,
+            recipientName: r.name,
+            status: "pending" as const,
+            channel: "personalised" as const,
+        })),
+    });
+
+    // The driver owns the result buffer, so track successful recipientIds locally
+    // for the post-loop personalised-history dedup write.
+    const successfulIds: string[] = [];
+
+    for (const recipient of batch.recipients) {
+        try {
+            // 1. Fetch tax data
+            const [ita34Res, irp5Res, contactRes] = await Promise.all([
+                dynamicsRequest<{ value: any[] }>(
+                    `riivo_ita34s?$select=${ITA34_SEL}&$filter=_riivo_taxpayercontact_value eq '${recipient.id}'&$orderby=riivo_yearofassessment desc&$top=1`
+                ),
+                dynamicsRequest<{ value: any[] }>(
+                    `riivo_irp5s?$select=${IRP5_SEL}&$filter=_riivo_client_value eq '${recipient.id}'&$orderby=riivo_assessmentyearint desc&$top=1`
+                ),
+                dynamicsRequest<{ fullname: string; firstname: string | null; ttt_idnumber: string | null; riivo_age: number | null }>(
+                    `contacts(${recipient.id})?$select=fullname,firstname,ttt_idnumber,riivo_age`
+                ),
+            ]);
+
+            const ita34 = ita34Res.value[0];
+            if (!ita34) {
+                await emit([{ recipientId: recipient.id, success: false, error: "No ITA34 data" }]);
+                continue;
+            }
+
+            const taxProfile = {
+                contactId: recipient.id,
+                ita34: {
+                    yearOfAssessment: ita34.riivo_yearofassessment ?? 0,
+                    income: ita34.riivo_income ?? 0,
+                    taxableIncome: ita34.riivo_taxableincomeassessedloss ?? 0,
+                    raContributions: ita34.riivo_retirementannuityfundcontributions ?? 0,
+                    retirementFundContributions: ita34.riivo_retirementfundcontributions ?? 0,
+                    providentFundContributions: ita34.riivo_providendfundcontributions ?? 0,
+                    medicalSchemeTaxCredit: ita34.riivo_medicalschemefeestaxcredit ?? 0,
+                    medicalRebate: ita34.riivo_medicalrebatebelow65withnodisability ?? 0,
+                    dateOfAssessment: ita34.riivo_dateofassessment ?? null,
+                    referenceNumber: ita34.riivo_referencenumber ?? null,
+                },
+                irp5: irp5Res.value[0] ? {
+                    assessmentYear: irp5Res.value[0].riivo_assessmentyearint ?? 0,
+                    incomePaye: irp5Res.value[0].riivo_incomepaye ?? 0,
+                    grossTaxableIncome: irp5Res.value[0].riivo_grosstaxableincome ?? 0,
+                    totalDeductions: irp5Res.value[0].riivo_totaldeductionscontributions ?? 0,
+                    raContributions: irp5Res.value[0].riivo_racontributions ?? null,
+                    providentFundContribution: irp5Res.value[0].riivo_providentfundcontributionpaye ?? 0,
+                    totalProvidentFund: irp5Res.value[0].riivo_totalprovidentfundcontributions ?? 0,
+                    medicalAidContributions: irp5Res.value[0].riivo_medicalaidcontributions ?? 0,
+                    medicalSchemeTaxCredit: irp5Res.value[0].riivo_medicalschemetaxcredit ?? 0,
+                    taxableTravel: irp5Res.value[0].riivo_taxabletravelremuneration ?? 0,
+                    employerName: irp5Res.value[0].riivo_employertradingothername ?? null,
+                    taxPeriodStart: irp5Res.value[0].riivo_taxperiodstartdate ?? null,
+                    taxPeriodEnd: irp5Res.value[0].riivo_taxperiodenddate ?? null,
+                } : null,
+            };
+
+            // 2. Calculate tax scenarios (with age from ID number for retirement projection)
+            const age = (contactRes.ttt_idnumber ? parseAgeFromIdNumber(contactRes.ttt_idnumber) : null) ?? contactRes.riivo_age;
+            const scenarios = calculateOptions(taxProfile, age);
+            const recipientFirstName = contactRes.firstname || contactRes.fullname || recipient.name;
+
+            // 3. Generate AI copy
+            const targetYear = new Date().getFullYear() + 1;
+            const copy = await generatePersonalisedCopy({
+                systemPrompt: campaignContent?.aiSystemPrompt || DEFAULT_SYS_PROMPT,
+                userPrompt: campaignContent?.aiPrompt || "",
+                scenarios: {
+                    recipientName: recipientFirstName,
+                    yearOfAssessment: scenarios.yearOfAssessment,
+                    targetYear,
+                    currentIncome: scenarios.currentSituation.income,
+                    currentTaxableIncome: scenarios.currentSituation.taxableIncome,
+                    currentRaContribution: scenarios.currentSituation.currentRa,
+                    maxAllowableRa: scenarios.currentSituation.maxAllowableRa,
+                    currentTaxLiability: scenarios.currentSituation.taxLiability,
+                    optionA: { additionalRa: scenarios.optionA.additionalRaContribution, monthlyRa: scenarios.optionA.monthlyAdditionalRa, taxSaving: scenarios.optionA.taxSaving, newTaxLiability: scenarios.optionA.taxAfter },
+                    optionB: { additionalRa: scenarios.optionB.additionalRaContribution, monthlyRa: scenarios.optionB.monthlyAdditionalRa, taxSaving: scenarios.optionB.taxSaving, newTaxLiability: scenarios.optionB.taxAfter },
+                    optionC: { additionalRa: scenarios.optionC.additionalRaContribution, monthlyRa: scenarios.optionC.monthlyAdditionalRa, taxSaving: scenarios.optionC.taxSaving, newTaxLiability: scenarios.optionC.taxAfter },
+                    retirementProjection: scenarios.retirementProjection ?? undefined,
+                },
+            });
+
+            // 4. Build final HTML
+            const queueSiteUrl = process.env.CONVEX_SITE_URL ?? "";
+            const queueLogoUrl = queueSiteUrl ? `${queueSiteUrl}/logo` : undefined;
+            let emailBody = buildPersonalisedEmail({
+                copy,
+                scenarios,
+                recipientName: recipientFirstName,
+                yearOfAssessment: scenarios.yearOfAssessment,
+                targetYear,
+                logoUrl: queueLogoUrl,
+                siteUrl: queueSiteUrl,
+            });
+
+            // 5. Add tracking
+            const siteUrl = process.env.CONVEX_SITE_URL || "";
+            if (siteUrl) {
+                const { rewriteEmailLinks } = await import("./lib/tracking_utils");
+                emailBody = (await rewriteEmailLinks(emailBody, siteUrl, campaignId, recipient.id)) as string;
+            }
+
+            // 6. Build subject
+            const subjectTemplate = campaign.subject || "{firstName}, your personalised RA plan";
+            const emailSubject = subjectTemplate.replace(/\{firstName\}/g, recipientFirstName);
+
+            // 7. Send
+            const result = await sendEmail({
+                subject: emailSubject,
+                body: emailBody,
+                toRecipients: [{ email: recipient.email!, name: recipient.name }],
+                ccRecipients: campaign.ccEmail ? [{ email: campaign.ccEmail }] : undefined,
+                bccRecipients: campaign.bccEmail ? [{ email: campaign.bccEmail }] : undefined,
+                attachments: [],
+                fromMailbox: campaign.fromMailbox,
+                headers: {
+                    "X-Campaign-ID": campaignId,
+                    "X-Recipient-ID": recipient.id,
+                },
+            });
+
+            if (result.success) {
+                successfulIds.push(recipient.id);
+                await emit([{ recipientId: recipient.id, success: true }]);
+
+                // 8. Create CRM opportunity if enabled
+                if (campaign.createOpportunities) {
+                    try {
+                        const opportunityId = await ctx.runAction(
+                            internal.actions.dynamics.createOpportunity,
+                            {
+                                contactId: recipient.id,
+                                contactName: recipient.name,
+                                campaignId,
+                                ownerId: undefined,
+                            }
+                        );
+
+                        if (opportunityId) {
+                            await ctx.runMutation(internal.messages.setOpportunityId, {
+                                campaignId,
+                                recipientId: recipient.id,
+                                opportunityId,
+                            });
+                        }
+                    } catch (oppErr) {
+                        console.error(`Failed to create opportunity for ${recipient.id}:`, oppErr);
+                    }
+                }
+            } else {
+                await emit([{ recipientId: recipient.id, success: false, error: result.error }]);
+            }
+
+            // 1.5s between recipients — keeps Gemini well under 40 RPM
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+        } catch (err) {
+            // One recipient's failure must not kill the batch.
+            await emit([
+                {
+                    recipientId: recipient.id,
+                    success: false,
+                    error: err instanceof Error ? err.message : "Unknown error",
+                },
+            ]);
+        }
+    }
+
+    // Record successful sends in personalised campaign history (enables dedup for future campaigns).
+    if (successfulIds.length > 0 && campaign.name) {
+        const sentAt = Date.now();
+        await ctx.runMutation(internal.personalisedHistory.recordSentBatch, {
+            records: successfulIds.map((contactId) => ({
+                contactId,
+                campaignId,
+                campaignName: campaign.name,
+                sentAt,
+            })),
+        });
+    }
+
+    return { nextDelayMs: 500 };
+}
+
+export const personalisedSender: ChannelSender = {
+    channel: "personalised",
+    errorRetryDelayMs: 500,
+    sendBatch: sendPersonalisedBatch_,
+};
