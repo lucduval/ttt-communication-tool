@@ -195,14 +195,18 @@ export async function fetchMatchingContactsWithITA34(
     let ita34Filter = "statecode eq 0 and _riivo_taxpayercontact_value ne null";
     const { taxReturnYear: taxYear, incomeMin, incomeMax, retirementFundMin, retirementFundMax } = filters;
     if (taxYear) ita34Filter += ` and riivo_yearofassessment eq ${taxYear}`;
-    if (incomeMin !== undefined) ita34Filter += ` and riivo_income ge ${incomeMin}`;
-    if (incomeMax !== undefined) ita34Filter += ` and riivo_income le ${incomeMax}`;
+    // NOTE: the income range is intentionally NOT applied as an OData clause here.
+    // Applied server-side it tests *every* ITA34 row, so a contact qualifies if
+    // any year falls in range — even when their latest year does not, which makes
+    // the send disagree with the recipient list the advisor reviewed (#26, mirror
+    // of the list-path fix in #25). The range is tested in memory against each
+    // contact's latest row below.
     if (retirementFundMin !== undefined) ita34Filter += ` and riivo_retirementfundcontributions ge ${retirementFundMin}`;
     if (retirementFundMax !== undefined) ita34Filter += ` and riivo_retirementfundcontributions le ${retirementFundMax}`;
 
     const ita34Endpoint = `riivo_ita34s?$select=_riivo_taxpayercontact_value,riivo_income,riivo_retirementfundcontributions,riivo_yearofassessment&$filter=${ita34Filter}&$orderby=riivo_yearofassessment desc`;
 
-    interface ITA34Row { _riivo_taxpayercontact_value: string; riivo_yearofassessment: number | null }
+    interface ITA34Row { _riivo_taxpayercontact_value: string; riivo_income: number | null; riivo_yearofassessment: number | null }
     let allIta34s: ITA34Row[] = [];
     let nextLink: string | null = ita34Endpoint;
     let pageCount = 0;
@@ -222,7 +226,19 @@ export async function fetchMatchingContactsWithITA34(
         const existing = contactMap.get(cid);
         if (!existing || (row.riivo_yearofassessment ?? 0) > (existing.riivo_yearofassessment ?? 0)) contactMap.set(cid, row);
     }
-    const contactIds = Array.from(contactMap.keys());
+
+    // Income-range membership is decided on each contact's latest-year row (not on
+    // any row), matching the recipient-list path (#25/#26). The filter dimension
+    // stays `riivo_income`.
+    let contactIds = Array.from(contactMap.keys());
+    if (incomeMin !== undefined || incomeMax !== undefined) {
+        contactIds = contactIds.filter((cid) => {
+            const income = contactMap.get(cid)!.riivo_income ?? 0;
+            if (incomeMin !== undefined && income < incomeMin) return false;
+            if (incomeMax !== undefined && income > incomeMax) return false;
+            return true;
+        });
+    }
     if (contactIds.length === 0) return;
 
     const extraFilter = buildExtraContactFilter(filters);
