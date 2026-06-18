@@ -23,7 +23,7 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, useRecipientSample, type Contact } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, type Contact } from "@/components/recipients";
 import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
 import {
     getConvexSiteUrl,
@@ -158,9 +158,16 @@ export default function NewCampaignPage() {
     // The count, the preview sample, and the send payload all derive from it — so
     // there is no separate materialised `selectedContacts` array to keep in sync.
     const recipientSelection = useRecipientSelection();
-    // Load More state — replaces page-based pagination
-    const [nextPageToken, setNextPageToken] = useState<string | null>(null);
-    const [clientSideOffset, setClientSideOffset] = useState(LOAD_MORE_SIZE);
+    // Load More / scroll-accumulation state lives in one hook (issue #22) so a
+    // real filter-value change resets it via `resetPagination()` while incidental
+    // re-renders that re-create the filter object leave scroll progress intact.
+    const {
+        nextPageToken,
+        setNextPageToken,
+        setClientSideOffset,
+        allFilteredContactsRef,
+        reset: resetPagination,
+    } = useRecipientPagination(LOAD_MORE_SIZE);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [audience, setAudience] = useState<"clients" | "employees" | "leads">("clients");
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
@@ -177,8 +184,6 @@ export default function NewCampaignPage() {
         industryId: null,
     });
     const [allEmployees, setAllEmployees] = useState<Contact[]>([]);
-    // Holds the full client-side dataset for employee/ITA34/TaxReturn modes so Load More can slice it
-    const allFilteredContactsRef = useRef<Contact[]>([]);
     const [availableDomains, setAvailableDomains] = useState<string[]>([]);
 
     // Email state
@@ -648,7 +653,7 @@ export default function NewCampaignPage() {
             setIsLoadingContacts(false);
             setIsLoadingMore(false);
         }
-    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, fetchContactsByBadDebt, fetchReferralParticipants, fetchLeads, getLeadCount, filters, leadFilters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, hasBadDebtFilter, hasReferralFilter, nextPageToken, canAccessPersonalised]);
+    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, fetchContactsByBadDebt, fetchReferralParticipants, fetchLeads, getLeadCount, filters, leadFilters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, hasBadDebtFilter, hasReferralFilter, nextPageToken, canAccessPersonalised, setNextPageToken, setClientSideOffset, allFilteredContactsRef]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -664,16 +669,19 @@ export default function NewCampaignPage() {
     const loadContactsRef = useRef(loadContacts);
     useEffect(() => { loadContactsRef.current = loadContacts; });
 
-    // Reload contacts when filters or step changes — reset to fresh first batch
+    // Reload contacts when the step or any filter *value* changes — reset to a
+    // fresh first batch. Keyed on a stable serialisation of the filter values
+    // (not the object identity) so a re-render that merely re-creates `filters`
+    // with the same values doesn't reset pagination/scroll (issue #22). A real
+    // filter-value change still flips the signature and reloads from page 1.
+    const reloadSignature = filterSignature({ filters, audience, employeeFilters, leadFilters });
     useEffect(() => {
         if (currentStep === "recipients") {
-            setNextPageToken(null);
-            setClientSideOffset(LOAD_MORE_SIZE);
-            allFilteredContactsRef.current = [];
+            resetPagination();
             const timer = setTimeout(() => loadContactsRef.current(false), 300);
             return () => clearTimeout(timer);
         }
-    }, [currentStep, filters, audience, employeeFilters, leadFilters]);
+    }, [currentStep, reloadSignature, resetPagination]);
 
     // Clear selection when audience changes or when navigating TO the recipients step
     // (but NOT when search/filter text changes while already on the recipients step)
@@ -696,7 +704,7 @@ export default function NewCampaignPage() {
                 : contacts;
             recipientSelection.setExplicit(source.filter((c) => selectedIds.has(c.id)));
         }
-    }, [currentStep, contacts, selectedIds, isSelectAllActive]);
+    }, [currentStep, contacts, selectedIds, isSelectAllActive, allFilteredContactsRef]);
 
     // Reset template selection when switching channels
     useEffect(() => {
