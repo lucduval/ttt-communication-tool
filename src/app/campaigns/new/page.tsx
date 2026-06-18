@@ -622,10 +622,11 @@ export default function NewCampaignPage() {
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
-    const [isSelectAllActive, setIsSelectAllActive] = useState(false);
-    const [virtualTotalCount, setVirtualTotalCount] = useState<number | null>(null);
-    // Tracks contacts explicitly excluded while select-all is active
-    const [deselectedIds, setDeselectedIds] = useState<Set<string>>(new Set());
+    // The filtered ("select all minus unchecks") shape now lives in the single
+    // Recipient Selection value, not in free-floating state. These derive from it:
+    // `isSelectAllActive` is the shape flag, `deselectedIds` the unchecked set.
+    const isSelectAllActive = recipientSelection.isFiltered;
+    const deselectedIds = recipientSelection.deselectedIds;
 
     // Keep a stable ref to loadContacts so the filter-change effect doesn't need it as a dep
     // (Convex useAction hooks return a new function reference on every render, which would
@@ -649,10 +650,8 @@ export default function NewCampaignPage() {
     useEffect(() => {
         if (currentStep === "recipients") {
             setSelectedIds(new Set());
-            recipientSelection.setExplicit([]);
-            setIsSelectAllActive(false);
-            setVirtualTotalCount(null);
-            setDeselectedIds(new Set());
+            // Resets to the empty explicit shape — clears any filtered select-all too.
+            recipientSelection.clear();
         }
     }, [currentStep, audience]);
 
@@ -814,47 +813,17 @@ export default function NewCampaignPage() {
         setIsSending(true);
         setShowConfirmation(false);
         try {
-            let recipients: { id: string; email?: string; phone?: string; name: string; variables?: string }[] = [];
-            let filtersJson = undefined;
-
-            if (isSelectAllActive && audience === "clients") {
-                // In Select All mode for clients, we pass the filters to the backend
-                // The backend will fetch contacts and create batches
-                filtersJson = JSON.stringify({
-                    filter: getChannelFilter(),
-                    search: filters.search || undefined,
-                    clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
-                    entityType: filters.entityType ?? undefined,
-                    bank: filters.bank ?? undefined,
-                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
-                    province: filters.province || undefined,
-                    geographicLocation: filters.geographicLocation ?? undefined,
-                    ageMin: filters.ageMin ?? undefined,
-                    ageMax: filters.ageMax ?? undefined,
-                    ownerId: filters.ownerId || undefined,
-                    industryId: filters.industryId || undefined,
-                    // Tax return filters (must match backend fetchMatchingContactsByTaxReturn)
-                    taxReturnMin: filters.taxReturnMin ?? undefined,
-                    taxReturnYear: filters.taxReturnYear ?? undefined,
-                    // ITA34 / income filters (must match backend fetchMatchingContactsWithITA34)
-                    incomeMin: filters.incomeMin ?? undefined,
-                    incomeMax: filters.incomeMax ?? undefined,
-                    retirementFundMin: filters.retirementFundMin ?? undefined,
-                    retirementFundMax: filters.retirementFundMax ?? undefined,
-                    // Alphabetical range for batch sending
-                    nameRangeStart: filters.nameRangeStart ?? undefined,
-                    nameRangeEnd: filters.nameRangeEnd ?? undefined,
-                    // Contacts explicitly excluded via individual unchecks
-                    excludeContactIds: deselectedIds.size > 0 ? [...deselectedIds] : undefined,
-                });
-            } else {
-                // Explicit (hand-picked) shape — the Recipient Selection module
-                // materialises the recipient payload from the single selection value.
-                recipients = recipientSelection.toCampaignArgs({
-                    channel: campaignChannel,
-                    whatsappVariables: JSON.stringify(variableValues),
-                }).recipients;
-            }
+            // The Recipient Selection value yields exactly one payload by shape:
+            // `recipients` (materialised, hand-picked) or `filters` (a JSON Contact
+            // Query the backend re-resolves, for the filtered "select all"). The
+            // filter capture + excludeContactIds now live in the selection value,
+            // not inline here.
+            const campaignArgs = recipientSelection.toCampaignArgs({
+                channel: campaignChannel,
+                whatsappVariables: JSON.stringify(variableValues),
+            });
+            const recipients = campaignArgs.recipients;
+            const filtersJson = campaignArgs.filters;
 
             // 1. Process attachments: upload files to Storage if present
             const backendAttachments = [];
@@ -900,7 +869,7 @@ export default function NewCampaignPage() {
             const campaignId = await startCampaign({
                 name: campaignTitle || `${channelLabel} Campaign - ${new Date().toLocaleDateString()}`,
                 channel: campaignChannel,
-                recipients: isSelectAllActive ? undefined : recipients,
+                recipients,
                 filters: filtersJson,
                 subject: (campaignChannel === "email" || campaignChannel === "personalised") ? subject : undefined,
                 htmlBody: processedHtml,
@@ -927,7 +896,7 @@ export default function NewCampaignPage() {
             // (fetching/batching/sending) until that time via the Convex scheduler.
             await queueBatches({
                 campaignId,
-                recipients: isSelectAllActive ? undefined : recipients,
+                recipients,
                 filters: filtersJson,
                 channel: campaignChannel,
                 attachments: backendAttachments,
@@ -1069,16 +1038,41 @@ export default function NewCampaignPage() {
                     industryId: filters.industryId || undefined,
                 });
 
-                // Set select all mode active
-                setIsSelectAllActive(true);
+                // Capture the Contact Query verbatim alongside the matching total,
+                // so the filtered selection can re-resolve it at send time and report
+                // `total − unchecks` without a refetch. Keys mirror what the backend
+                // re-resolves (see fetchMatchingContactsBy*); excludeContactIds is
+                // appended by the selection value as the user unchecks rows.
+                const campaignFilters = {
+                    filter: channelFilter,
+                    search: filters.search || undefined,
+                    clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
+                    entityType: filters.entityType ?? undefined,
+                    bank: filters.bank ?? undefined,
+                    sourceCode: filters.sourceCode.length > 0 ? filters.sourceCode : undefined,
+                    province: filters.province || undefined,
+                    geographicLocation: filters.geographicLocation ?? undefined,
+                    ageMin: filters.ageMin ?? undefined,
+                    ageMax: filters.ageMax ?? undefined,
+                    ownerId: filters.ownerId || undefined,
+                    industryId: filters.industryId || undefined,
+                    // Tax return filters (must match backend fetchMatchingContactsByTaxReturn)
+                    taxReturnMin: filters.taxReturnMin ?? undefined,
+                    taxReturnYear: filters.taxReturnYear ?? undefined,
+                    // ITA34 / income filters (must match backend fetchMatchingContactsWithITA34)
+                    incomeMin: filters.incomeMin ?? undefined,
+                    incomeMax: filters.incomeMax ?? undefined,
+                    retirementFundMin: filters.retirementFundMin ?? undefined,
+                    retirementFundMax: filters.retirementFundMax ?? undefined,
+                    // Alphabetical range for batch sending
+                    nameRangeStart: filters.nameRangeStart ?? undefined,
+                    nameRangeEnd: filters.nameRangeEnd ?? undefined,
+                };
 
-                // Clear specific selections / exclusions as we are now selecting everything matching the filter
+                // Activating the filtered shape clears any hand-picks (one shape at
+                // a time); the checkbox-gesture set is reset to match.
                 setSelectedIds(new Set());
-                recipientSelection.setExplicit([]);
-                setDeselectedIds(new Set());
-
-                // Store the total count for display
-                setVirtualTotalCount(countResult.count);
+                recipientSelection.activateFiltered(campaignFilters, countResult.count);
             }
 
         } catch (error) {
@@ -1090,10 +1084,8 @@ export default function NewCampaignPage() {
 
     const handleClearSelection = () => {
         setSelectedIds(new Set());
-        recipientSelection.setExplicit([]);
-        setIsSelectAllActive(false);
-        setVirtualTotalCount(null);
-        setDeselectedIds(new Set());
+        // Back to the empty explicit shape — drops a filtered select-all and its unchecks.
+        recipientSelection.clear();
     };
 
     const handleLoadMore = () => {
@@ -1114,11 +1106,12 @@ export default function NewCampaignPage() {
 
     const channelLabel = campaignChannel === "personalised" ? "Personalised" : campaignChannel === "email" ? "Email" : "WhatsApp";
 
-    // Effective recipient count in Select All mode — the server-side count minus
-    // anything the user unchecked. Used everywhere we display "X recipients" so
-    // the preview, send-step, and confirmation modal stay in sync with the badge
-    // at the top of the recipients step.
-    const selectAllRecipientCount = Math.max(0, (virtualTotalCount ?? 0) - deselectedIds.size);
+    // Effective recipient count in Select All mode — the captured server-side
+    // count minus anything the user unchecked, straight from the selection value's
+    // `count` projection. Used everywhere we display "X recipients" so the preview,
+    // send-step, and confirmation modal stay in sync with the badge at the top of
+    // the recipients step. (Only meaningful while the filtered shape is active.)
+    const selectAllRecipientCount = recipientSelection.count;
 
     // Estimated WhatsApp cost
     const whatsappRecipientCount = isSelectAllActive
@@ -1440,16 +1433,8 @@ export default function NewCampaignPage() {
                                     showSarsColumn={campaignChannel === "personalised" && hasTaxReturnFilters}
                                     isSelectAllActive={isSelectAllActive}
                                     deselectedIds={deselectedIds}
-                                    onDeselectOne={(id) => {
-                                        setDeselectedIds(prev => new Set(prev).add(id));
-                                    }}
-                                    onReselectOne={(id) => {
-                                        setDeselectedIds(prev => {
-                                            const next = new Set(prev);
-                                            next.delete(id);
-                                            return next;
-                                        });
-                                    }}
+                                    onDeselectOne={(id) => recipientSelection.deselect(id)}
+                                    onReselectOne={(id) => recipientSelection.reselect(id)}
                                     onSelectAll={handleSelectAll}
                                     onClearAll={handleClearSelection}
                                     personalisedHistory={campaignChannel === "personalised" ? (personalisedHistory ?? {}) : undefined}
