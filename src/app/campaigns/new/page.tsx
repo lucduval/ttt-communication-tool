@@ -23,7 +23,7 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, type Contact } from "@/components/recipients";
+import { ContactList, useRecipientSelection, type Contact } from "@/components/recipients";
 import {
     getConvexSiteUrl,
     normalizeInlineBase64Images,
@@ -153,7 +153,12 @@ export default function NewCampaignPage() {
     const [filters, setFilters] = useState<FilterState>(INITIAL_FILTERS);
     const [totalCount, setTotalCount] = useState<number | null>(null);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-    const [selectedContacts, setSelectedContacts] = useState<Contact[]>([]);
+    // Recipient Selection module (explicit shape) owns who the campaign sends to.
+    // The materialised hand-picked contacts and the send payload both derive from
+    // this single selection value. `selectedContacts` aliases the value's contacts
+    // so existing read sites stay unchanged.
+    const recipientSelection = useRecipientSelection();
+    const selectedContacts = recipientSelection.contacts as Contact[];
     // Load More state — replaces page-based pagination
     const [nextPageToken, setNextPageToken] = useState<string | null>(null);
     const [clientSideOffset, setClientSideOffset] = useState(LOAD_MORE_SIZE);
@@ -644,7 +649,7 @@ export default function NewCampaignPage() {
     useEffect(() => {
         if (currentStep === "recipients") {
             setSelectedIds(new Set());
-            setSelectedContacts([]);
+            recipientSelection.setExplicit([]);
             setIsSelectAllActive(false);
             setVirtualTotalCount(null);
             setDeselectedIds(new Set());
@@ -660,7 +665,7 @@ export default function NewCampaignPage() {
             const source = allFilteredContactsRef.current.length > 0
                 ? allFilteredContactsRef.current
                 : contacts;
-            setSelectedContacts(source.filter((c) => selectedIds.has(c.id)));
+            recipientSelection.setExplicit(source.filter((c) => selectedIds.has(c.id)));
         }
     }, [currentStep, contacts, selectedIds, isSelectAllActive]);
 
@@ -843,24 +848,12 @@ export default function NewCampaignPage() {
                     excludeContactIds: deselectedIds.size > 0 ? [...deselectedIds] : undefined,
                 });
             } else {
-                if (campaignChannel === "email" || campaignChannel === "personalised") {
-                    recipients = selectedContacts
-                        .filter((c) => c.email)
-                        .map((c) => ({
-                            id: c.id,
-                            email: c.email!,
-                            name: c.fullName,
-                        }));
-                } else {
-                    recipients = selectedContacts
-                        .filter((c) => c.internationalPhone || c.phone)
-                        .map((c) => ({
-                            id: c.id,
-                            phone: c.internationalPhone || c.phone!,
-                            name: c.fullName,
-                            variables: JSON.stringify(variableValues),
-                        }));
-                }
+                // Explicit (hand-picked) shape — the Recipient Selection module
+                // materialises the recipient payload from the single selection value.
+                recipients = recipientSelection.toCampaignArgs({
+                    channel: campaignChannel,
+                    whatsappVariables: JSON.stringify(variableValues),
+                }).recipients;
             }
 
             // 1. Process attachments: upload files to Storage if present
@@ -1009,7 +1002,7 @@ export default function NewCampaignPage() {
                 // For employees, we just select all loaded contacts since we fetch all of them
                 const allIds = new Set(contacts.map(c => c.id));
                 setSelectedIds(allIds);
-                setSelectedContacts(contacts);
+                recipientSelection.setExplicit(contacts);
                 // We don't set isSelectAllActive to true for employees to avoid backend filtering logic
                 // Instead we just select all explicitly
             } else if (audience === "leads") {
@@ -1036,12 +1029,12 @@ export default function NewCampaignPage() {
 
                 const allIds = new Set(allLeads.map(c => c.id));
                 setSelectedIds(allIds);
-                setSelectedContacts(allLeads);
+                recipientSelection.setExplicit(allLeads);
             } else if (filters.personalisedCampaignFilter !== "all") {
                 // Client-side personalised history filter is active — select only the displayed subset
                 const allIds = new Set(displayedContacts.map(c => c.id));
                 setSelectedIds(allIds);
-                setSelectedContacts(displayedContacts);
+                recipientSelection.setExplicit(displayedContacts);
                 // Do NOT set isSelectAllActive — that would bypass the client-side filter
             } else if (
                 hasReferralFilter ||
@@ -1056,7 +1049,7 @@ export default function NewCampaignPage() {
                 const all = allFilteredContactsRef.current;
                 const allIds = new Set(all.map(c => c.id));
                 setSelectedIds(allIds);
-                setSelectedContacts(all);
+                recipientSelection.setExplicit(all);
             } else {
                 const channelFilter = getChannelFilter();
 
@@ -1081,7 +1074,7 @@ export default function NewCampaignPage() {
 
                 // Clear specific selections / exclusions as we are now selecting everything matching the filter
                 setSelectedIds(new Set());
-                setSelectedContacts([]);
+                recipientSelection.setExplicit([]);
                 setDeselectedIds(new Set());
 
                 // Store the total count for display
@@ -1097,7 +1090,7 @@ export default function NewCampaignPage() {
 
     const handleClearSelection = () => {
         setSelectedIds(new Set());
-        setSelectedContacts([]);
+        recipientSelection.setExplicit([]);
         setIsSelectAllActive(false);
         setVirtualTotalCount(null);
         setDeselectedIds(new Set());
