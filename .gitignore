@@ -42,3 +42,13 @@ next-env.d.ts
 
 # clerk configuration (can include secrets)
 /.clerk/
+
+# local agent config / skills
+/.claude/
+
+# data export blobs (not source)
+*.zip
+
+# agent scratch analysis notes (not source)
+/*_ANALYSIS.md
+/IMPLEMENTATION_PLAN.md
