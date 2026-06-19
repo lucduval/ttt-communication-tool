@@ -160,25 +160,6 @@ export const create = mutation({
     },
 });
 
-export const updateStats = internalMutation({
-    args: {
-        campaignId: v.id("campaigns"),
-        sentCount: v.number(),
-        deliveredCount: v.number(),
-        failedCount: v.number(),
-    },
-    handler: async (ctx, args) => {
-        const campaign = await ctx.db.get(args.campaignId);
-        if (campaign) {
-            await ctx.db.patch(args.campaignId, {
-                sentCount: (campaign.sentCount || 0) + args.sentCount,
-                deliveredCount: (campaign.deliveredCount || 0) + args.deliveredCount,
-                failedCount: (campaign.failedCount || 0) + args.failedCount,
-            });
-        }
-    },
-});
-
 export const updateStatus = internalMutation({
     args: {
         campaignId: v.id("campaigns"),

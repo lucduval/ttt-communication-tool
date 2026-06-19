@@ -5,6 +5,45 @@ import type { Id } from "./_generated/dataModel";
 import { checkAccessHelper } from "./users";
 import { batchProcessorFor } from "./lib/channelDispatch";
 import { isDead } from "./lib/batchLease";
+import { tallyCampaign } from "./lib/campaignTally";
+
+/**
+ * Recompute the denormalised stat cache (`sentCount` / `deliveredCount` /
+ * `failedCount`) on a campaign document from the messages table — the single
+ * source of truth — via the Campaign Tally (PRD #44, slice #46).
+ *
+ * It SETS the three counters; it never increments them. That is the whole point:
+ * no matter how many times a batch settles, is recovered, or is re-run, the
+ * cache converges on the tally of the per-recipient statuses, so the
+ * crash → fail → recover → re-run drift class cannot inflate the counts.
+ *
+ * Reads the campaign's messages through the `by_campaign_status` index (the four
+ * message statuses) and patches only the three counters by id — it deliberately
+ * does not re-read the (potentially multi-MB) campaign document, so callers that
+ * already hold it pay no extra read-budget cost.
+ */
+export async function recomputeCampaignStats(
+    ctx: { db: any },
+    campaignId: Id<"campaigns">
+): Promise<void> {
+    const statuses: string[] = [];
+    for (const status of ["pending", "sent", "delivered", "failed"]) {
+        const msgs = await ctx.db
+            .query("messages")
+            .withIndex("by_campaign_status", (q: any) =>
+                q.eq("campaignId", campaignId).eq("status", status)
+            )
+            .collect();
+        for (const m of msgs) statuses.push(m.status);
+    }
+
+    const tally = tallyCampaign(statuses);
+    await ctx.db.patch(campaignId, {
+        sentCount: tally.sent,
+        deliveredCount: tally.delivered,
+        failedCount: tally.failed,
+    });
+}
 
 // Constants for batch sizing.
 // EMAIL_BATCH_SIZE is the # of recipients per campaign batch. With Graph $batch
@@ -226,11 +265,10 @@ export const markBatchComplete = internalMutation({
 
         const campaign = await ctx.db.get(batch.campaignId);
         if (campaign) {
-            await ctx.db.patch(batch.campaignId, {
-                sentCount: (campaign.sentCount || 0) + args.successCount + args.failedCount,
-                deliveredCount: (campaign.deliveredCount || 0) + args.successCount,
-                failedCount: (campaign.failedCount || 0) + args.failedCount,
-            });
+            // Recompute the stat cache from the messages table (source of truth)
+            // rather than adding this batch's counts — the per-recipient statuses
+            // were written idempotently during processing, so the tally is exact.
+            await recomputeCampaignStats(ctx, batch.campaignId);
         }
 
         const pendingBatches = await ctx.db
@@ -288,11 +326,11 @@ export const markBatchFailed = internalMutation({
 
         const campaign = await ctx.db.get(batch.campaignId);
         if (campaign) {
-            // Increment failedCount properly (not overwrite)
-            await ctx.db.patch(batch.campaignId, {
-                failedCount: (campaign.failedCount || 0) + batch.recipients.length,
-                sentCount: (campaign.sentCount || 0) + batch.recipients.length,
-            });
+            // Recompute from the messages table instead of charging the whole
+            // batch as failed: recipients already flushed as "sent" stay sent,
+            // and the rest are restored by the recovery re-run. This is what
+            // kills the old crash → fail → recover → re-run double-count.
+            await recomputeCampaignStats(ctx, batch.campaignId);
         }
 
         // Check if there are remaining pending batches

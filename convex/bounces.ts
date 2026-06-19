@@ -3,7 +3,9 @@
 import { v } from "convex/values";
 import { action, internalMutation, internalAction } from "./_generated/server";
 import { internal, api } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import { getGraphAccessToken } from "./lib/graph_client";
+import { recomputeCampaignStats } from "./campaignBatches";
 
 /**
  * Process bounced emails (NDRs) from the shared mailbox.
@@ -177,6 +179,61 @@ async function markMessageAsRead(token: string, mailbox: string, messageId: stri
     }
 }
 
+/**
+ * Plain implementation of bounce recording, with the Convex `ctx` injected so
+ * the recompute-funnel behaviour is unit-testable (mirrors `recoverStuckBatchesImpl`).
+ *
+ * Each bounce flips its recipient's message to "failed" (the source of truth);
+ * then the stat cache for every affected campaign is recomputed exactly once,
+ * AFTER all per-message patches land. The recompute reads the messages table —
+ * so a delivered→failed flip lowers `delivered` and raises `failed` for free,
+ * with no additive delta arithmetic that could drift. Recomputing once per
+ * unique campaign keeps the (potentially multi-MB) campaign doc out of the inner
+ * loop, preserving the old per-campaign read-budget guarantee.
+ */
+export async function recordBouncesImpl(
+    ctx: { db: any },
+    bounces: Array<{ campaignId: string; recipientId: string; messageId: string }>
+): Promise<void> {
+    const affectedCampaigns = new Set<Id<"campaigns">>();
+
+    for (const bounce of bounces) {
+        const { campaignId: rawCampaignId, recipientId } = bounce;
+
+        const campaignId = ctx.db.normalizeId("campaigns", rawCampaignId);
+        if (!campaignId) {
+            console.warn(`Invalid campaign ID in bounce: ${rawCampaignId}`);
+            continue;
+        }
+
+        const message = await ctx.db
+            .query("messages")
+            .withIndex("by_campaign_recipient", (q: any) =>
+                q.eq("campaignId", campaignId).eq("recipientId", recipientId)
+            )
+            .first();
+
+        if (!message) {
+            console.warn(`Message not found for bounce: Campaign ${campaignId}, Recipient ${recipientId}`);
+            continue;
+        }
+
+        // Idempotent: an already-failed message needs no re-patch and no recompute.
+        if (message.status !== "failed") {
+            await ctx.db.patch(message._id, {
+                status: "failed",
+                errorMessage: "Bounced (NDR received)",
+            });
+            affectedCampaigns.add(campaignId);
+        }
+    }
+
+    // One recompute per affected campaign, after every per-message patch has landed.
+    for (const campaignId of affectedCampaigns) {
+        await recomputeCampaignStats(ctx, campaignId);
+    }
+}
+
 export const recordBounces = internalMutation({
     args: {
         bounces: v.array(v.object({
@@ -185,64 +242,7 @@ export const recordBounces = internalMutation({
             messageId: v.string(),
         })),
     },
-    handler: async (ctx, args) => {
-        // Accumulate per-campaign stat deltas so we only fetch each campaign
-        // document once, regardless of how many bounces belong to it.
-        // Campaign docs can be very large (htmlBody, base64 attachments), so
-        // reading the same one N times quickly exhausts the 16 MB bytes-read budget.
-        type CampaignDelta = { failedDelta: number; deliveredDelta: number };
-        const campaignDeltas = new Map<string, CampaignDelta>();
-
-        for (const bounce of args.bounces) {
-            const { campaignId: rawCampaignId, recipientId } = bounce;
-
-            const campaignId = ctx.db.normalizeId("campaigns", rawCampaignId);
-            if (!campaignId) {
-                console.warn(`Invalid campaign ID in bounce: ${rawCampaignId}`);
-                continue;
-            }
-
-            const message = await ctx.db
-                .query("messages")
-                .withIndex("by_campaign_recipient", (q) =>
-                    q.eq("campaignId", campaignId).eq("recipientId", recipientId)
-                )
-                .first();
-
-            if (message) {
-                if (message.status !== "failed") {
-                    await ctx.db.patch(message._id, {
-                        status: "failed",
-                        errorMessage: "Bounced (NDR received)",
-                    });
-
-                    const delta = campaignDeltas.get(campaignId) ?? { failedDelta: 0, deliveredDelta: 0 };
-                    delta.failedDelta += 1;
-                    if (message.status === "sent" || message.status === "delivered") {
-                        delta.deliveredDelta -= 1;
-                    }
-                    campaignDeltas.set(campaignId, delta);
-                }
-            } else {
-                console.warn(`Message not found for bounce: Campaign ${campaignId}, Recipient ${recipientId}`);
-            }
-        }
-
-        // Apply stat changes — one campaign fetch per unique campaign.
-        for (const [campaignId, delta] of campaignDeltas) {
-            const id = ctx.db.normalizeId("campaigns", campaignId);
-            if (!id) continue;
-            const campaign = await ctx.db.get(id);
-            if (campaign) {
-                await ctx.db.patch(id, {
-                    failedCount: (campaign.failedCount || 0) + delta.failedDelta,
-                    ...(delta.deliveredDelta !== 0 && {
-                        deliveredCount: Math.max(0, (campaign.deliveredCount || 0) + delta.deliveredDelta),
-                    }),
-                });
-            }
-        }
-    },
+    handler: async (ctx, args) => recordBouncesImpl(ctx, args.bounces),
 });
 
 /**
