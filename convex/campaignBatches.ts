@@ -152,9 +152,13 @@ export const markBatchProcessing = internalMutation({
             return { acquired: false };
         }
 
+        // Set an initial heartbeat alongside startedAt so a freshly claimed batch
+        // has a live lease (see lib/batchLease) before its worker's first emit.
+        const claimedAt = Date.now();
         await ctx.db.patch(args.batchId, {
             status: "processing",
-            startedAt: Date.now(),
+            startedAt: claimedAt,
+            heartbeatAt: claimedAt,
         });
 
         // Update campaign status
@@ -183,6 +187,18 @@ export const markBatchProcessing = internalMutation({
         }
 
         return { acquired: true };
+    },
+});
+
+/**
+ * Bump a batch's heartbeat so its lease (see lib/batchLease) stays live while a
+ * worker is actively emitting results. Called by the Channel Send driver — not
+ * adapters — and throttled there via `shouldBeat`, so writes stay bounded.
+ */
+export const beatBatch = internalMutation({
+    args: { batchId: v.id("campaignBatches") },
+    handler: async (ctx, args) => {
+        await ctx.db.patch(args.batchId, { heartbeatAt: Date.now() });
     },
 });
 

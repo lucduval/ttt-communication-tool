@@ -11,6 +11,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { getFunctionName } from "convex/server";
 import { runChannelSend, FLUSH_INTERVAL, type ChannelSender, type EmitFn } from "../channelSend";
+import { HEARTBEAT_THROTTLE_MS } from "../batchLease";
 
 type Update = {
     recipientId: string;
@@ -187,6 +188,47 @@ describe("runChannelSend driver", () => {
 
         expect(sendBatch).not.toHaveBeenCalled();
         expect(scheduled).toEqual([{ ms: 250, name: "campaignQueue:processEmailBatch" }]);
+    });
+
+    it("relies on the claim for the initial lease — does not beat within the first throttle window", async () => {
+        // The claim's markBatchProcessing establishes a live heartbeat, so a batch
+        // that emits a few results immediately (clock fixed within one window) must
+        // not issue a redundant beatBatch. This is what "initial lease from claim"
+        // means at the driver seam.
+        const clock = 1_000_000;
+        const sender = fakeSender(async (_ctx, _campaign, _batch, emit: EmitFn) => {
+            for (let i = 0; i < 5; i++) await emit([{ recipientId: `r${i}`, success: true }]);
+            return {};
+        });
+
+        const { ctx, mutations } = createCtx({ campaign, batch });
+
+        await runChannelSend(ctx as any, { campaignId: "c1" as any, sender, now: () => clock });
+
+        expect(mutations.some((m) => m.name === "campaignBatches:beatBatch")).toBe(false);
+    });
+
+    it("beats at most once per throttle window across a stream of results, not once per result", async () => {
+        // 60 emits spaced so the stream spans two throttle windows. The driver must
+        // bound heartbeat writes to one per window (2 total), not one per result (60).
+        let clock = 1_000_000;
+        const step = HEARTBEAT_THROTTLE_MS / 30; // 60 emits → ~2 windows
+        const sender = fakeSender(async (_ctx, _campaign, _batch, emit: EmitFn) => {
+            for (let i = 0; i < 60; i++) {
+                clock += step;
+                await emit([{ recipientId: `r${i}`, success: true }]);
+            }
+            return {};
+        });
+
+        const { ctx, mutations } = createCtx({ campaign, batch });
+
+        await runChannelSend(ctx as any, { campaignId: "c1" as any, sender, now: () => clock });
+
+        const beats = mutations.filter((m) => m.name === "campaignBatches:beatBatch");
+        expect(beats.length).toBe(2);
+        expect(beats.length).toBeLessThan(60);
+        expect(beats[0].args).toEqual({ batchId: "batch-1" });
     });
 
     it("marks the batch failed and continues when the adapter throws, flushing partial progress", async () => {

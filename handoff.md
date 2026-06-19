@@ -1,51 +1,74 @@
 # Handoff — RALPH iteration
 
-## Just completed: #38 — wire `materialiseExplicit` into the navigation effect (PRD #36)
+## Just completed: #41 — Write heartbeats: claim lease + `beatBatch` mutation + driver emit path (PRD #39)
 
-**Issue #38 closed.** Branch: `main`.
+**Issue #41 closed.** Branch: `main`.
 
-Wired the `materialiseExplicit` helper (from #37) into the campaign builder so
-the explicit recipient selection can no longer shrink when the consultant
-advances from the recipients step to compose/preview.
+Second slice of PRD #39 (*campaigns must never silently stall mid-send*). Wires
+the pure Batch Lease predicate (#40) into the **write side** of the live send
+path: a claim now establishes a lease, and the Channel Send driver bumps it as
+results stream, throttled so writes stay bounded across every channel. The
+recovery/reaper side (reading `isDead`) is still **not** wired — that's #42.
 
 What landed:
-- **`src/app/campaigns/new/page.tsx`** — the navigation effect (~L734) that
-  re-derives the explicit selection on entering `compose`/`preview` no longer
-  picks a **single** record source (the old `allFilteredContactsRef.current ??
-  contacts` intersection that collapsed Leads Select All to the first page).
-  It now calls `materialiseExplicit(selectedIds, recipientSelection.contacts,
-  contacts, allFilteredContactsRef.current)` — the prioritised union of the
-  contacts already in the selection value, the on-screen page, and the
-  first-page ref — so every selected id resolves to its full record.
-  `materialiseExplicit` added to the `@/components/recipients` import.
-- The headline 148→50 bug is fixed because `handleSelectAll` for Leads already
-  stores all 148 records in the selection value via `setExplicit(allLeads)`;
-  `recipientSelection.contacts` is now the highest-priority source, so the full
-  148 survive navigation. Hand-picked leads on later pages survive the same way.
-- `RecipientSelection` stays the single source of truth read by `toCampaignArgs`
-  on the send path — unchanged.
+- **`convex/campaignBatches.ts`**
+  - `markBatchProcessing` now sets `heartbeatAt = claimedAt` alongside
+    `startedAt` on the `pending → processing` transition, so a freshly claimed
+    batch has a live lease *before* its worker's first emit.
+  - New `beatBatch` internal mutation — patches `heartbeatAt = Date.now()` on
+    the batch. One-line patch; called only by the driver, throttled there.
+- **`convex/lib/channelSend.ts`** (the driver)
+  - `runChannelSend` takes an optional injected clock `now?: () => number`
+    (defaults to `Date.now`) so heartbeat throttling is unit-testable. Used for
+    both the heartbeat check and `sentAt` in flush.
+  - Seeds `lastBeatAt = now()` right after the claim (the claim's
+    `heartbeatAt` is the initial lease).
+  - In the serialised `emit` chain, after appending/flushing results, calls
+    `shouldBeat(lastBeatAt, now())` (from `lib/batchLease`); when true, bumps
+    `lastBeatAt` and calls `internal.campaignBatches.beatBatch`. The beat
+    piggybacks on the existing 25-recipient flush mechanism — **adapters stay
+    thin and never touch the heartbeat**. Bounds writes to ≤1 / ~30s for both
+    per-recipient channels (email/personalised) and the WhatsApp ≤1000 path.
+- **`convex/lib/__tests__/channelSend.test.ts`** (+2 driver tests)
+  - "initial lease from claim" — a short batch emitting within one window issues
+    **no** `beatBatch` (lease already live from the claim).
+  - "≤1 beat per throttle window" — 60 emits spanning ~2 windows produce exactly
+    2 beats, not 60. Drives the injected clock; window size taken from the
+    imported `HEARTBEAT_THROTTLE_MS`, not a hardcoded number.
 
-**Verification:** `npm run typecheck` clean; `npm run test` = 1421 passed. The
-union-resolution logic is covered by `materialiseExplicit.test.ts` (Select All
-across multiple lead pages, manual cross-page selection, unchecks, client-side
-filter modes). The wiring itself is a one-line swap into an already-tested pure
-helper, so no new page-level test was added (the page has no render harness).
+**Verification:** `npm run typecheck` clean; `npm run test` = 1437 passed.
 
-## Next up: no unblocked issue queued for this area
+## Next up: #42 — Heartbeat-aware recovery sweep + faster cron (PRD #39)
 
-PRD #36's navigation-collapse slices (#37 helper, #38 wiring) are both done.
-Check `gh issue list --label ready-for-agent` for the next highest-priority
-unblocked issue.
+#42 is unblocked now (#41 done). It's the **read side** of the lease — the
+operator-facing payoff:
+- In `recoverStuckBatches` (`convex/campaignBatches.ts` ~L520), replace the
+  `startedAt < now - 20min` test with `isDead(batch, now)` from
+  `lib/batchLease`. Death keys on last progress (`heartbeatAt`), so a
+  slow-but-alive emitting worker is never falsely revived. Pre-heartbeat batches
+  stay recoverable via the `startedAt` fallback in `lastBeat`.
+- Drop the `recover-stuck-batches` cron interval from 5 min to ~1 min (find it
+  in `convex/crons.ts`).
+- **Keep the single-worker guards unchanged**: one worker per affected campaign,
+  skip if another batch is still `processing`.
+- Tests assert relative lease/throttle ordering, not the exact `LEASE_MS` /
+  `HEARTBEAT_THROTTLE_MS` numbers.
+
+**Note:** #43 (Channel Send flush exceeds Convex write-rate limit / strands the
+batch on error) does **not** block #42 but "should land alongside" it — once
+recovery is fast, a batch that dies on a `TooManyWrites` write wall would
+thrash a reap→re-kill loop. Consider doing #43 immediately after #42.
 
 ### If picking up new work in this area
-- Pure recipients primitives live in `src/components/recipients/`:
-  `filterSignature.ts` and `materialiseExplicit.ts` are the pure-function
-  reference pattern (+ their `.test.ts` siblings). The pure selection core is
-  `convex/lib/recipientSelection.ts` (`SelectableContact`, the explicit/filtered
-  shapes). The React seam is `useRecipientSelection.ts`.
-- The consumer is `src/app/campaigns/new/page.tsx` — `selectedIds` (gesture
-  Set), `contacts` (on-screen page), `allFilteredContactsRef` (first-page / full
-  client-side set), and the `setExplicit` navigation effect at ~L734.
+- The pure predicate is **`convex/lib/batchLease.ts`** — import `isDead` /
+  `lastBeat` / `shouldBeat` and the constants from here; do not re-derive
+  timings. Pure-module + `__tests__/` sibling pattern (as `retry.ts`,
+  `recipientSelection.ts`).
+- The write side is now live: `markBatchProcessing` seeds the lease, the driver
+  in `lib/channelSend.ts` beats via `beatBatch`. #42 only adds the reaper read.
+- The batch row shape lives in `convex/schema.ts` → `campaignBatches`
+  (`status`, `startedAt`, `heartbeatAt`, the `by_status` /
+  `by_campaign_status` indexes).
 
 ## Workflow reminders (RALPH)
 - One issue per iteration. RGR: failing test first, then implementation.

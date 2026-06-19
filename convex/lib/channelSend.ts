@@ -2,6 +2,7 @@ import { internal } from "../_generated/api";
 import type { ActionCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { batchProcessorFor, handleBatchError, type Channel } from "./channelDispatch";
+import { shouldBeat } from "./batchLease";
 
 /**
  * One per-recipient outcome streamed back to the Channel Send driver via `emit`.
@@ -63,9 +64,9 @@ export const FLUSH_INTERVAL = 25;
  */
 export async function runChannelSend(
     ctx: ActionCtx,
-    args: { campaignId: Id<"campaigns">; sender: ChannelSender }
+    args: { campaignId: Id<"campaigns">; sender: ChannelSender; now?: () => number }
 ): Promise<void> {
-    const { campaignId, sender } = args;
+    const { campaignId, sender, now = Date.now } = args;
 
     const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, { campaignId });
     if (!campaign) {
@@ -101,6 +102,11 @@ export async function runChannelSend(
     let failedCount = 0;
     const buffer: SendResult[] = [];
 
+    // The claim's markBatchProcessing has just set an initial heartbeat, so the
+    // lease is already live. Seed lastBeatAt from it so a short batch that emits
+    // within one throttle window does not issue a redundant beatBatch.
+    let lastBeatAt = now();
+
     const flush = async () => {
         if (buffer.length === 0) return;
         await ctx.runMutation(internal.messages.updateStatusBatch, {
@@ -108,7 +114,7 @@ export async function runChannelSend(
             updates: buffer.map((r) => ({
                 recipientId: r.recipientId,
                 status: r.success ? ("sent" as const) : ("failed" as const),
-                sentAt: r.success ? Date.now() : undefined,
+                sentAt: r.success ? now() : undefined,
                 errorMessage: r.error,
                 externalMessageId: r.externalMessageId,
             })),
@@ -128,6 +134,17 @@ export async function runChannelSend(
                 if (r.success) successCount++;
                 else failedCount++;
                 if (buffer.length >= FLUSH_INTERVAL) await flush();
+            }
+            // Bump the lease as the adapter makes progress, throttled to ≤1 write
+            // per ~30s so high-fan-out channels (WhatsApp up to 1000 results) and
+            // per-recipient channels alike stay bounded. This is the driver's
+            // responsibility — adapters never touch the heartbeat.
+            const t = now();
+            if (shouldBeat(lastBeatAt, t)) {
+                lastBeatAt = t;
+                await ctx.runMutation(internal.campaignBatches.beatBatch, {
+                    batchId: batch._id,
+                });
             }
         });
         return chain;
