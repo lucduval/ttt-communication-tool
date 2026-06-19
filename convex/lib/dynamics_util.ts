@@ -21,7 +21,6 @@ export interface ShimmedContact {
 }
 
 export interface CampaignFilters {
-    filter?: string;
     search?: string;
     clientType?: number | string | Array<number | string>;  // MultiSelect option codes; legacy values may be a scalar
     entityType?: number;
@@ -79,7 +78,6 @@ function toContactFilter(filters: CampaignFilters): ContactFilter {
     }
 
     return {
-        filter: filters.filter,
         search: filters.search,
         clientType: clientTypeArr,
         entityType: filters.entityType,

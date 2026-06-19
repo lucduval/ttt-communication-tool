@@ -7,7 +7,6 @@ import { Header } from "@/components/layout";
 import { Button, Card, Pagination, LoadingScreen } from "@/components/ui";
 import {
     ContactFilters,
-    buildODataFilter,
     type FilterState,
     LeadFilters,
     type LeadFilterState,
@@ -192,9 +191,7 @@ export default function RecipientsPage() {
                 setTotalCount(countResult.count);
                 setCurrentPage(page);
             } else if (hasReferralFilter) {
-                const odataFilter = buildODataFilter(filters);
                 const result = await fetchReferralParticipantsRef.current({
-                    filter: odataFilter,
                     search: filters.search || undefined,
                     clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                     entityType: filters.entityType ?? undefined,
@@ -222,10 +219,7 @@ export default function RecipientsPage() {
                 setCurrentPage(page);
             } else if (hasBadDebtFilter) {
                 console.log("[loadContacts] → BAD DEBT branch entered");
-                const odataFilter = buildODataFilter(filters);
-                console.log("[loadContacts] calling fetchContactsByBadDebt with odataFilter:", odataFilter);
                 const result = await fetchContactsByBadDebtRef.current({
-                    filter: odataFilter,
                     search: filters.search || undefined,
                     clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                     entityType: filters.entityType ?? undefined,
@@ -256,12 +250,10 @@ export default function RecipientsPage() {
                 setContacts(allContacts.slice(start, start + ITEMS_PER_PAGE));
                 setCurrentPage(page);
             } else {
-                const odataFilter = buildODataFilter(filters);
                 const skip = (page - 1) * ITEMS_PER_PAGE;
 
                 const [contactsResult, countResult] = await Promise.all([
                     fetchContactsRef.current({
-                        filter: odataFilter,
                         search: filters.search || undefined,
                         top: ITEMS_PER_PAGE,
                         skip: skip > 0 ? skip : undefined,
@@ -282,7 +274,6 @@ export default function RecipientsPage() {
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     }),
                     getContactCountRef.current({
-                        filter: odataFilter,
                         search: filters.search || undefined,
                         clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,

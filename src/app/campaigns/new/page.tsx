@@ -316,17 +316,16 @@ export default function NewCampaignPage() {
     // Fetch the first `n` clients matching a captured "select all" filter, for the
     // preview sample (issue #21). The filtered shape is only ever activated from
     // the standard server-side query path, so we resolve the sample with the exact
-    // same `fetchContacts` args that path uses for the recipient list (the channel
-    // clause is baked into the captured `filter` string; the name range rides as the
-    // typed nameRangeStart/nameRangeEnd dimension) — picking only the fields the
-    // action accepts, since the captured payload also carries unrelated ITA34/tax
-    // keys. Used only for the filtered shape; the
-    // explicit shape samples from memory with no fetch.
+    // same `fetchContacts` args that path uses for the recipient list (every concept
+    // — channel reachability, name range, opt-ins — rides as a typed dimension; the
+    // client no longer emits any raw OData) — picking only the fields the action
+    // accepts, since the captured payload also carries unrelated ITA34/tax keys.
+    // Used only for the filtered shape; the explicit shape samples from memory with
+    // no fetch.
     const fetchSampleContacts = useCallback(
         async (capturedFilters: FilterPayload, n: number): Promise<SelectableContact[]> => {
             const f = capturedFilters as Record<string, unknown>;
             const result = await fetchContacts({
-                filter: f.filter as string | undefined,
                 search: f.search as string | undefined,
                 top: n,
                 clientType: f.clientType as number[] | undefined,

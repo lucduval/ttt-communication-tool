@@ -40,9 +40,12 @@ describe("buildContactFilter", () => {
         expect(buildContactFilter({})).toBe("statecode eq 0");
     });
 
-    test("wraps a raw passthrough filter in parentheses", () => {
-        expect(buildContactFilter({ filter: "riivo_taxmarketing eq true" })).toBe(
-            "statecode eq 0 and (riivo_taxmarketing eq true)"
+    test("ignores a raw passthrough filter — the OData escape hatch is removed", () => {
+        // The raw `filter` dimension no longer exists: every contact-level concept
+        // is a typed dimension, so a stray raw string (e.g. from a stale payload)
+        // contributes nothing rather than being concatenated into the query.
+        expect(buildContactFilter({ filter: "riivo_taxmarketing eq true" } as ContactFilter)).toBe(
+            "statecode eq 0"
         );
     });
 
@@ -235,7 +238,6 @@ describe("buildContactFilter", () => {
 
     test("characterizes the full clause ordering for a representative spread", () => {
         const filter: ContactFilter = {
-            filter: "riivo_taxmarketing eq true",
             search: "jo'hn",
             clientType: [4, 5],
             entityType: 2,
@@ -250,7 +252,6 @@ describe("buildContactFilter", () => {
         };
         expect(buildContactFilter(filter)).toBe(
             "statecode eq 0" +
-                " and (riivo_taxmarketing eq true)" +
                 " and (contains(fullname,'jo''hn') or contains(emailaddress1,'jo''hn'))" +
                 " and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['4','5'])" +
                 " and riivo_clienttypeindbus eq 2" +
@@ -279,7 +280,6 @@ describe("buildContactFilterClauses", () => {
 
     test("buildContactFilter is the active-only base concatenated with the clauses", () => {
         const filter: ContactFilter = {
-            filter: "riivo_taxmarketing eq true",
             search: "jo'hn",
             clientType: [4, 5],
             entityType: 2,
@@ -326,7 +326,6 @@ describe("buildContactFilterClauses", () => {
 
     test("characterizes the extra-filter clause ordering for a representative spread", () => {
         const filter: ContactFilter = {
-            filter: "riivo_taxmarketing eq true",
             search: "jo'hn",
             clientType: [4, 5],
             entityType: 2,
@@ -346,8 +345,7 @@ describe("buildContactFilterClauses", () => {
             nameRangeEnd: "F",
         };
         expect(buildContactFilterClauses(filter)).toBe(
-            " and (riivo_taxmarketing eq true)" +
-                " and (contains(fullname,'jo''hn') or contains(emailaddress1,'jo''hn'))" +
+            " and (contains(fullname,'jo''hn') or contains(emailaddress1,'jo''hn'))" +
                 " and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_clienttypenew',PropertyValues=['4','5'])" +
                 " and riivo_clienttypeindbus eq 2" +
                 " and ttt_bank eq 1" +

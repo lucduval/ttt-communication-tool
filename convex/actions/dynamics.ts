@@ -100,7 +100,6 @@ export interface DynamicsContact {
  */
 export const fetchContacts = action({
     args: {
-        filter: v.optional(v.string()), // OData filter expression
         search: v.optional(v.string()), // Search term for name/email
         top: v.optional(v.number()), // Number of records per page
         skip: v.optional(v.number()), // Number of records to skip (for offset pagination)
@@ -128,7 +127,6 @@ export const fetchContacts = action({
         const access = await ctx.runQuery(api.users.checkAccess);
         if (!access.hasAccess) throw new Error("Unauthorized");
         const {
-            filter,
             search,
             top = 50,
             skip,
@@ -158,7 +156,6 @@ export const fetchContacts = action({
         // headers or cursor tokens itself.
         const response = await fetchContactsPage<DynamicsContact>(
             {
-                filter,
                 search,
                 clientType,
                 entityType,
@@ -230,7 +227,6 @@ export const fetchContacts = action({
 export const getContactCount = action({
     args: {
         ownerId: v.optional(v.string()),
-        filter: v.optional(v.string()),
         search: v.optional(v.string()),
         // New filters
         clientType: v.optional(v.array(v.number())),
@@ -253,7 +249,6 @@ export const getContactCount = action({
         const access = await ctx.runQuery(api.users.checkAccess);
         if (!access.hasAccess) throw new Error("Unauthorized");
         const {
-            filter,
             search,
             clientType,
             entityType,
@@ -279,7 +274,6 @@ export const getContactCount = action({
         // The module handles the Dynamics @odata.count 5000 ceiling internally,
         // paginating contactids to recover the true total when it is hit.
         const count = await countContacts({
-            filter,
             search,
             clientType,
             entityType,
@@ -310,7 +304,6 @@ export const getContactCount = action({
 export const fetchAllContactIds = action({
     args: {
         ownerId: v.optional(v.string()),
-        filter: v.optional(v.string()),
         search: v.optional(v.string()),
         // New filters
         clientType: v.optional(v.array(v.number())),
@@ -333,7 +326,6 @@ export const fetchAllContactIds = action({
         const access = await ctx.runQuery(api.users.checkAccess);
         if (!access.hasAccess) throw new Error("Unauthorized");
         const {
-            filter,
             search,
             clientType,
             entityType,
@@ -371,7 +363,6 @@ export const fetchAllContactIds = action({
         const allContacts: SimpleContact[] = [];
         await streamContacts<SimpleContact>(
             {
-                filter,
                 search,
                 clientType,
                 entityType,
@@ -732,7 +723,6 @@ export const fetchContactsWithITA34 = action({
         retirementFundMin: v.optional(v.number()),
         retirementFundMax: v.optional(v.number()),
         taxYear: v.optional(v.number()),
-        filter: v.optional(v.string()),
         search: v.optional(v.string()),
         clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
@@ -843,7 +833,6 @@ export const fetchContactsByTaxReturn = action({
     args: {
         taxReturnMin: v.number(),
         taxReturnYear: v.optional(v.number()),
-        filter: v.optional(v.string()),
         search: v.optional(v.string()),
         clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
@@ -1168,7 +1157,6 @@ export const fetchAllLeadIds = action({
  */
 export const fetchContactsByBadDebt = action({
     args: {
-        filter: v.optional(v.string()),
         search: v.optional(v.string()),
         clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
@@ -1262,7 +1250,6 @@ export const fetchContactsByBadDebt = action({
  */
 export const fetchReferralParticipants = action({
     args: {
-        filter: v.optional(v.string()),
         search: v.optional(v.string()),
         clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),

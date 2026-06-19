@@ -1038,30 +1038,9 @@ function MultiSelect({
     );
 }
 
-/**
- * Convert filter state to OData filter expression
- */
-export function buildODataFilter(filters: FilterState): string | undefined {
-    const conditions: string[] = [];
-
-    // Note: clientType is handled via direct arguments to fetchContacts/getContactCount
-
-    // Marketing type is NOT built here. It is a typed dimension (marketingType)
-    // owned by Contact Query, which emits the riivo_*marketing eq true clause once
-    // on both the count and send paths. The client emits no marketing OData.
-
-    // The opt-in flags are NOT built here. They are typed tri-state dimensions
-    // (whatsappOptIn / emailEnabled) owned by Contact Query, which emits the
-    // riivo_whatsappoptinout / icon_sendemailclientnotifications eq true|false
-    // clause once on both the count and send paths. The client emits no opt-in
-    // OData. Channel eligibility (reachable by email / whatsapp) is likewise a
-    // typed dimension (reachableChannel) owned by Contact Query, derived from the
-    // campaign channel — not built here.
-
-    // The alphabetical name range is NOT built here. It is a typed dimension
-    // (nameRangeStart / nameRangeEnd) owned by Contact Query, which builds the
-    // fullname ge / lt clause (including the Z upper-bound edge case) once on both
-    // the count and send paths. The client emits no fullname OData.
-
-    return conditions.length > 0 ? conditions.join(" and ") : undefined;
-}
+// The client no longer builds any OData. Every contact-level concept — client
+// type, marketing consent, the opt-in flags, channel reachability, the
+// alphabetical name range — is a typed dimension owned by Contact Query, which
+// emits the matching clause exactly once on both the count and send paths. The
+// raw `buildODataFilter` escape hatch has been removed so the count shown for a
+// select-all campaign is guaranteed to resolve from the same query the send uses.

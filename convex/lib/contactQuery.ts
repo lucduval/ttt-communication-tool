@@ -23,8 +23,6 @@ import { dynamicsRequest } from "./dynamics_auth";
  * appended to the base "active contacts only" filter.
  */
 export interface ContactFilter {
-    /** Raw passthrough OData expression, wrapped in parentheses when present. */
-    filter?: string;
     /** Free-text search across fullname / emailaddress1. */
     search?: string;
     /** Client type multi-select option codes (riivo_clienttypenew). */
@@ -165,10 +163,6 @@ const MARKETING_TYPE_FIELD: Record<NonNullable<ContactFilter["marketingType"]>, 
  */
 export function buildContactFilterClauses(filter: ContactFilter): string {
     let clauses = "";
-
-    if (filter.filter) {
-        clauses += ` and (${filter.filter})`;
-    }
 
     if (filter.search) {
         const searchTerm = escapeODataValue(filter.search);
