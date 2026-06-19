@@ -3,3 +3,4 @@ export { useRecipientSelection } from "./useRecipientSelection";
 export { useRecipientSample } from "./useRecipientSample";
 export { useRecipientPagination } from "./useRecipientPagination";
 export { filterSignature } from "./filterSignature";
+export { materialiseExplicit } from "./materialiseExplicit";
