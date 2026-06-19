@@ -120,6 +120,18 @@ describe("buildContactFilter", () => {
         );
     });
 
+    test("a name-range start only emits just the lower bound", () => {
+        expect(buildContactFilter({ nameRangeStart: "A" })).toBe(
+            "statecode eq 0 and fullname ge 'A'"
+        );
+    });
+
+    test("a name-range end only emits just the next-letter upper bound", () => {
+        expect(buildContactFilter({ nameRangeEnd: "F" })).toBe(
+            "statecode eq 0 and fullname lt 'G'"
+        );
+    });
+
     test("an alphabetical name range emits fullname ge / lt bounds", () => {
         expect(buildContactFilter({ nameRangeStart: "A", nameRangeEnd: "F" })).toBe(
             "statecode eq 0 and fullname ge 'A' and fullname lt 'G'"

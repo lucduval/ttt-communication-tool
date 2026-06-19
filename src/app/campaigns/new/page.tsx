@@ -301,10 +301,11 @@ export default function NewCampaignPage() {
     // Fetch the first `n` clients matching a captured "select all" filter, for the
     // preview sample (issue #21). The filtered shape is only ever activated from
     // the standard server-side query path, so we resolve the sample with the exact
-    // same `fetchContacts` args that path uses for the recipient list (name range
-    // and channel clause are already baked into the captured `filter` string) —
-    // picking only the fields the action accepts, since the captured payload also
-    // carries unrelated ITA34/tax keys. Used only for the filtered shape; the
+    // same `fetchContacts` args that path uses for the recipient list (the channel
+    // clause is baked into the captured `filter` string; the name range rides as the
+    // typed nameRangeStart/nameRangeEnd dimension) — picking only the fields the
+    // action accepts, since the captured payload also carries unrelated ITA34/tax
+    // keys. Used only for the filtered shape; the
     // explicit shape samples from memory with no fetch.
     const fetchSampleContacts = useCallback(
         async (capturedFilters: FilterPayload, n: number): Promise<SelectableContact[]> => {
@@ -323,6 +324,8 @@ export default function NewCampaignPage() {
                 ageMax: f.ageMax as number | undefined,
                 ownerId: f.ownerId as string | undefined,
                 industryId: f.industryId as string | undefined,
+                nameRangeStart: f.nameRangeStart as string | undefined,
+                nameRangeEnd: f.nameRangeEnd as string | undefined,
             });
             return result.contacts as SelectableContact[];
         },
@@ -489,6 +492,8 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        nameRangeStart: filters.nameRangeStart || undefined,
+                        nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
                     const allContacts = result.contacts as Contact[];
                     allFilteredContactsRef.current = allContacts;
@@ -518,6 +523,8 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        nameRangeStart: filters.nameRangeStart || undefined,
+                        nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
                     const allContacts = result.contacts as Contact[];
                     allFilteredContactsRef.current = allContacts;
@@ -549,6 +556,8 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        nameRangeStart: filters.nameRangeStart || undefined,
+                        nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
                     const allContacts = result.contacts as Contact[];
                     allFilteredContactsRef.current = allContacts;
@@ -586,6 +595,8 @@ export default function NewCampaignPage() {
                         incomeMax: filters.incomeMax ?? undefined,
                         retirementFundMin: filters.retirementFundMin ?? undefined,
                         retirementFundMax: filters.retirementFundMax ?? undefined,
+                        nameRangeStart: filters.nameRangeStart || undefined,
+                        nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
                     const allContacts = result.contacts as Contact[];
                     allFilteredContactsRef.current = allContacts;
@@ -621,6 +632,8 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        nameRangeStart: filters.nameRangeStart || undefined,
+                        nameRangeEnd: filters.nameRangeEnd || undefined,
                     }),
                     // Only fetch count on initial load (not on append)
                     !append ? getContactCount({
@@ -636,6 +649,8 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        nameRangeStart: filters.nameRangeStart || undefined,
+                        nameRangeEnd: filters.nameRangeEnd || undefined,
                     }) : Promise.resolve(null),
                 ]);
 
@@ -1074,6 +1089,8 @@ export default function NewCampaignPage() {
                     ageMax: filters.ageMax ?? undefined,
                     ownerId: filters.ownerId || undefined,
                     industryId: filters.industryId || undefined,
+                    nameRangeStart: filters.nameRangeStart || undefined,
+                    nameRangeEnd: filters.nameRangeEnd || undefined,
                 });
 
                 // Capture the Contact Query verbatim alongside the matching total,

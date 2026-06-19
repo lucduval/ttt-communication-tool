@@ -117,6 +117,8 @@ export const fetchContacts = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()), // New industry filter
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -136,7 +138,9 @@ export const fetchContacts = action({
             geographicLocation,
             ageMin,
             ageMax,
-            industryId
+            industryId,
+            nameRangeStart,
+            nameRangeEnd
         } = args;
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
@@ -158,6 +162,8 @@ export const fetchContacts = action({
                 ageMax,
                 ownerId,
                 industryId,
+                nameRangeStart,
+                nameRangeEnd,
             },
             {
                 select: CONTACT_SELECT_FIELDS,
@@ -224,6 +230,8 @@ export const getContactCount = action({
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -239,7 +247,9 @@ export const getContactCount = action({
             geographicLocation,
             ageMin,
             ageMax,
-            industryId
+            industryId,
+            nameRangeStart,
+            nameRangeEnd
         } = args;
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
@@ -261,6 +271,8 @@ export const getContactCount = action({
             ageMax,
             ownerId,
             industryId,
+            nameRangeStart,
+            nameRangeEnd,
         });
 
         return { count };
@@ -286,6 +298,8 @@ export const fetchAllContactIds = action({
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -301,7 +315,9 @@ export const fetchAllContactIds = action({
             geographicLocation,
             ageMin,
             ageMax,
-            industryId
+            industryId,
+            nameRangeStart,
+            nameRangeEnd
         } = args;
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
@@ -335,6 +351,8 @@ export const fetchAllContactIds = action({
                 ageMax,
                 ownerId,
                 industryId,
+                nameRangeStart,
+                nameRangeEnd,
             },
             {
                 select: selectFields,
@@ -690,6 +708,8 @@ export const fetchContactsWithITA34 = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -795,6 +815,8 @@ export const fetchContactsByTaxReturn = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -1105,6 +1127,8 @@ export const fetchContactsByBadDebt = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -1193,6 +1217,8 @@ export const fetchReferralParticipants = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);

@@ -1067,17 +1067,10 @@ export function buildODataFilter(filters: FilterState): string | undefined {
         );
     }
 
-    // Alphabetical name range: fullname ge 'A' and fullname lt 'G' (for A-F)
-    // We use lt on the char AFTER nameRangeEnd so "F" includes all names starting with F.
-    if (filters.nameRangeStart) {
-        conditions.push(`fullname ge '${filters.nameRangeStart}'`);
-    }
-    if (filters.nameRangeEnd && filters.nameRangeEnd !== "Z") {
-        // Next letter after the end letter (e.g. F → G) so names starting with the end letter are included.
-        // Skip for Z — no upper bound needed since Z is the last letter.
-        const nextChar = String.fromCharCode(filters.nameRangeEnd.charCodeAt(0) + 1);
-        conditions.push(`fullname lt '${nextChar}'`);
-    }
+    // The alphabetical name range is NOT built here. It is a typed dimension
+    // (nameRangeStart / nameRangeEnd) owned by Contact Query, which builds the
+    // fullname ge / lt clause (including the Z upper-bound edge case) once on both
+    // the count and send paths. The client emits no fullname OData.
 
     return conditions.length > 0 ? conditions.join(" and ") : undefined;
 }

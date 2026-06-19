@@ -206,6 +206,8 @@ export default function RecipientsPage() {
                     ageMax: filters.ageMax ?? undefined,
                     ownerId: filters.ownerId || undefined,
                     industryId: filters.industryId || undefined,
+                    nameRangeStart: filters.nameRangeStart || undefined,
+                    nameRangeEnd: filters.nameRangeEnd || undefined,
                 });
                 const allContacts = result.contacts as Contact[];
                 allReferralContactsRef.current = allContacts;
@@ -232,6 +234,8 @@ export default function RecipientsPage() {
                     ageMax: filters.ageMax ?? undefined,
                     ownerId: filters.ownerId || undefined,
                     industryId: filters.industryId || undefined,
+                    nameRangeStart: filters.nameRangeStart || undefined,
+                    nameRangeEnd: filters.nameRangeEnd || undefined,
                 });
                 console.log("[loadContacts] fetchContactsByBadDebt returned:", {
                     totalCount: result.totalCount,
@@ -265,6 +269,8 @@ export default function RecipientsPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        nameRangeStart: filters.nameRangeStart || undefined,
+                        nameRangeEnd: filters.nameRangeEnd || undefined,
                     }),
                     getContactCountRef.current({
                         filter: odataFilter,
@@ -279,6 +285,8 @@ export default function RecipientsPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        nameRangeStart: filters.nameRangeStart || undefined,
+                        nameRangeEnd: filters.nameRangeEnd || undefined,
                     }),
                 ]);
 
