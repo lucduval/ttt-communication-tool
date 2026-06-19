@@ -37,27 +37,43 @@ Two defects fixed in **`convex/lib/channelSend.ts`** (the driver):
 
 **Verification:** `npm run typecheck` clean; `npm run test` = 1445 passed (+3).
 
-## Next up: #36 — Leads "Select All" count collapses 148 → 50 on the summary step (bug)
+## Closed PRDs (parent epics — all slices done)
+- **PRD #39 (Batch Lease)** — slices #40–#43 all closed; closed the parent.
+- **PRD #36 (Leads Select All 148→50)** — slices #37 & #38 closed; closed the
+  parent. (It was briefly mis-listed here as a work item — it was already a finished
+  PRD, implemented by the `materialiseExplicit` helper.)
 
-PRD #39 is complete, so the next highest-priority unblocked issue is **#36**, a
-silent-data-loss bug: a consultant clicks **Select All (148)** on the Leads
-audience, the recipients step shows "148 selected", but the summary step reads "50
-Recipients" and the campaign is sent to only 50. The same loss affects manual
-cross-page lead selection (leads checked on page 2+ are dropped on navigation
-because only the first page of lead records is retained for materialisation).
+## Next up: #32 — Contact Query: type the marketing-type filter as a dimension
 
-Acceptance (see `gh issue view 36` for full text):
-- Select All (148) on Leads → summary reads "148 Recipients" → all 148 are sent.
-- Hand-picking leads across multiple loaded pages survives navigation forward.
+PRDs #39 and #36 are done. The remaining open issues (#32–#35) are a Contact Query
+sub-chain that retires the raw-OData escape hatch one dimension at a time. **#35**
+(delete the raw `filter` passthrough + unify count/send) is explicitly *blocked by*
+the typed-dimension slices; name-range (#31) is already done, leaving #32, #33, #34
+as the blockers. They're independent of each other, so take the simplest first:
+**#32**.
+
+Promote **marketing type** (tax / accounting / insurance) from a client-built OData
+string (`buildODataFilter()` → `riivo_taxmarketing eq true`, carried through Contact
+Query's raw `filter` passthrough) to a **typed Campaign-filter dimension** owned by
+Contact Query.
+
+Acceptance (see `gh issue view 32` for full text):
+- Marketing type is a typed field on the Campaign filter from the UI through to
+  Contact Query.
+- Contact Query emits the marketing clause; the `riivo_*marketing` field name appears
+  only inside Contact Query (not hand-built by the client).
+- Count and send both resolve it from the same typed value.
 
 ### Pointers
-- This is the **recipients/materialisation** path, not the send driver. Recent
-  related work: `materialiseExplicit` helper (#37) and its navigation wiring (#38) —
-  see `git log` and `convex/lib/recipientSelection.ts` (pure-module + `__tests__/`
-  sibling pattern). Start there to see how the selection is resolved into recipients.
-- The "50" smells like a default page size / first-page-only fetch leaking into the
-  authoritative selection. Trace where Select-All produces a count vs. where the
-  summary/send re-derives the recipient set.
+- This is the **Contact Query** module, not the send driver. The query core + dialect
+  live under `convex/lib/` (see the closed Contact Query slices #2–#7, #31 for the
+  established typed-dimension pattern, and `recipientSelection.ts` for the pure-module
+  + `__tests__/` sibling style).
+- After #32/#33/#34 land, #35 removes `ContactFilter.filter` / `CampaignFilters.filter`,
+  deletes `buildODataFilter()` and the raw clause in `getChannelFilter()`, and routes
+  count + send through one typed filter so they can't drift. Do #35 last.
+- #34 (channel-eligibility) overlaps #33's WhatsApp opt-in flag — Contact Query should
+  compose them without double-emitting. If doing both, #33 before #34 is cleaner.
 
 ### If picking up Batch Lease (#39) area work again
 - The pure predicate is **`convex/lib/batchLease.ts`** — import `isDead` /
