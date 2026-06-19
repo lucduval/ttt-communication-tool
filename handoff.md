@@ -1,74 +1,79 @@
 # Handoff — RALPH iteration
 
-## Just completed: #41 — Write heartbeats: claim lease + `beatBatch` mutation + driver emit path (PRD #39)
+## Just completed: #42 — Heartbeat-aware recovery sweep + faster `recover-stuck-batches` cron (PRD #39)
 
-**Issue #41 closed.** Branch: `main`.
+**Issue #42 closed.** Branch: `main`.
 
-Second slice of PRD #39 (*campaigns must never silently stall mid-send*). Wires
-the pure Batch Lease predicate (#40) into the **write side** of the live send
-path: a claim now establishes a lease, and the Channel Send driver bumps it as
-results stream, throttled so writes stay bounded across every channel. The
-recovery/reaper side (reading `isDead`) is still **not** wired — that's #42.
+Third slice of PRD #39 (*campaigns must never silently stall mid-send*). This is
+the **read side** of the lease — the operator-facing payoff. Recovery now keys on
+last progress (`heartbeatAt`) instead of claim time, and runs ~5× more often, so a
+campaign drains to completion on its own within ~2–3 min of any worker death — no
+pause/unpause ritual.
 
 What landed:
 - **`convex/campaignBatches.ts`**
-  - `markBatchProcessing` now sets `heartbeatAt = claimedAt` alongside
-    `startedAt` on the `pending → processing` transition, so a freshly claimed
-    batch has a live lease *before* its worker's first emit.
-  - New `beatBatch` internal mutation — patches `heartbeatAt = Date.now()` on
-    the batch. One-line patch; called only by the driver, throttled there.
-- **`convex/lib/channelSend.ts`** (the driver)
-  - `runChannelSend` takes an optional injected clock `now?: () => number`
-    (defaults to `Date.now`) so heartbeat throttling is unit-testable. Used for
-    both the heartbeat check and `sentAt` in flush.
-  - Seeds `lastBeatAt = now()` right after the claim (the claim's
-    `heartbeatAt` is the initial lease).
-  - In the serialised `emit` chain, after appending/flushing results, calls
-    `shouldBeat(lastBeatAt, now())` (from `lib/batchLease`); when true, bumps
-    `lastBeatAt` and calls `internal.campaignBatches.beatBatch`. The beat
-    piggybacks on the existing 25-recipient flush mechanism — **adapters stay
-    thin and never touch the heartbeat**. Bounds writes to ≤1 / ~30s for both
-    per-recipient channels (email/personalised) and the WhatsApp ≤1000 path.
-- **`convex/lib/__tests__/channelSend.test.ts`** (+2 driver tests)
-  - "initial lease from claim" — a short batch emitting within one window issues
-    **no** `beatBatch` (lease already live from the claim).
-  - "≤1 beat per throttle window" — 60 emits spanning ~2 windows produce exactly
-    2 beats, not 60. Drives the injected clock; window size taken from the
-    imported `HEARTBEAT_THROTTLE_MS`, not a hardcoded number.
+  - New plain `recoverStuckBatchesImpl(ctx, now = Date.now)` — the recovery sweep
+    extracted with an injected clock so the reap decision is unit-testable (mirrors
+    `runChannelSend`'s `now?` injection). The registered `recoverStuckBatches`
+    internalMutation now just delegates to it.
+  - Reap test swapped from `startedAt < now - 20min` to **`isDead(batch, now)`**
+    (from `lib/batchLease`). Death keys on `lastBeat` (heartbeat, or `startedAt`
+    fallback for pre-heartbeat batches), so a slow-but-alive emitting worker is
+    never falsely revived; pre-heartbeat batches stay recoverable.
+  - **Single-worker guards unchanged**: one worker per affected campaign, skip if
+    another batch for that campaign is still `processing`.
+- **`convex/crons.ts`**
+  - `recover-stuck-batches` interval dropped **5 min → 1 min**. Recovery latency is
+    now ≈ cron interval + lease (~2–3 min) instead of ~25 min.
+- **`convex/__tests__/recoverStuckBatches.test.ts`** (new, +5 tests)
+  - Drives `recoverStuckBatchesImpl` against a faked `ctx` (db + scheduler). Covers:
+    stale-heartbeat reaped + one worker kicked; fresh batch untouched; ≤1 worker per
+    campaign with several dead batches; "another batch still processing" skip
+    preserved; pre-heartbeat batch reaped via `startedAt` fallback. Times are
+    offsets from `LEASE_MS` (e.g. `NOW - LEASE_MS - 1000`), never the raw constant —
+    asserts relative lease ordering, not tuning numbers.
 
-**Verification:** `npm run typecheck` clean; `npm run test` = 1437 passed.
+**Verification:** `npm run typecheck` clean; `npm run test` = 1442 passed.
 
-## Next up: #42 — Heartbeat-aware recovery sweep + faster cron (PRD #39)
+## Next up: #43 — Channel Send flush exceeds Convex write-rate limit / strands the batch on error (PRD #39)
 
-#42 is unblocked now (#41 done). It's the **read side** of the lease — the
-operator-facing payoff:
-- In `recoverStuckBatches` (`convex/campaignBatches.ts` ~L520), replace the
-  `startedAt < now - 20min` test with `isDead(batch, now)` from
-  `lib/batchLease`. Death keys on last progress (`heartbeatAt`), so a
-  slow-but-alive emitting worker is never falsely revived. Pre-heartbeat batches
-  stay recoverable via the `startedAt` fallback in `lastBeat`.
-- Drop the `recover-stuck-batches` cron interval from 5 min to ~1 min (find it
-  in `convex/crons.ts`).
-- **Keep the single-worker guards unchanged**: one worker per affected campaign,
-  skip if another batch is still `processing`.
-- Tests assert relative lease/throttle ordering, not the exact `LEASE_MS` /
-  `HEARTBEAT_THROTTLE_MS` numbers.
+#43 does **not** block anything but "should land alongside #42" — now that recovery
+is fast (1-min cron), a batch that dies on a `TooManyWrites` write wall would thrash
+a reap→re-kill loop every ~2–3 min and the campaign never drains. Recovery needs
+something stable to retry into. **Do this next.**
 
-**Note:** #43 (Channel Send flush exceeds Convex write-rate limit / strands the
-batch on error) does **not** block #42 but "should land alongside" it — once
-recovery is fast, a batch that dies on a `TooManyWrites` write wall would
-thrash a reap→re-kill loop. Consider doing #43 immediately after #42.
+Two distinct defects to fix in **`convex/lib/channelSend.ts`** (the driver):
+- **Error path strands the batch.** When `updateStatusBatch` throws `TooManyWrites`
+  inside the `try`, the `catch` calls `flush()` *again* on the same still-full
+  buffer → throws the same error → `handleBatchError` never runs, the action exits
+  by throwing, the batch stays `processing`, no successor scheduled. Fix: the catch
+  must not re-run a flush guaranteed to throw before it can mark the batch
+  failed/reschedule. Either back-off-and-retry the flush, or run `handleBatchError`
+  so the batch ends recoverable/failed with a scheduled successor.
+- **Aggregate flush throughput exceeds 4 MiB/s.** `updateStatusBatch` flushes every
+  `FLUSH_INTERVAL` (25) recipients; the WhatsApp ≤1000 path fires ~40 back-to-back,
+  and concurrent campaigns/webhook writes share the deployment-wide ceiling. Bound
+  concurrently-flushing workers and/or pace the high-fan-out WhatsApp flushes.
+
+Acceptance (see `gh issue view 43` for full text):
+- A send that previously tripped `TooManyWrites` completes within the write limit.
+- A flush hitting `TooManyWrites` never silently strands the batch in `processing`.
+- The catch-path no longer re-throws from a second `flush()` before `handleBatchError`.
+- Regression test: drive the driver with a flush that throws `TooManyWrites`; assert
+  the batch isn't stranded and partial progress is preserved.
 
 ### If picking up new work in this area
 - The pure predicate is **`convex/lib/batchLease.ts`** — import `isDead` /
-  `lastBeat` / `shouldBeat` and the constants from here; do not re-derive
-  timings. Pure-module + `__tests__/` sibling pattern (as `retry.ts`,
-  `recipientSelection.ts`).
-- The write side is now live: `markBatchProcessing` seeds the lease, the driver
-  in `lib/channelSend.ts` beats via `beatBatch`. #42 only adds the reaper read.
-- The batch row shape lives in `convex/schema.ts` → `campaignBatches`
-  (`status`, `startedAt`, `heartbeatAt`, the `by_status` /
-  `by_campaign_status` indexes).
+  `lastBeat` / `shouldBeat` and the constants from here; do not re-derive timings.
+  Pure-module + `__tests__/` sibling pattern (as `retry.ts`, `recipientSelection.ts`).
+- **Registered Convex mutations don't expose `.handler`** for unit tests. The
+  established pattern (as `runChannelSend`, now `recoverStuckBatchesImpl`) is to
+  extract a plain exported `fooImpl(ctx, now = Date.now)` that the registered wrapper
+  delegates to, then drive it against a faked `ctx` from `convex/__tests__/`.
+- The lease is fully wired now: `markBatchProcessing` seeds it, the driver in
+  `lib/channelSend.ts` beats via `beatBatch`, and the sweep reaps via `isDead`.
+- The batch row shape lives in `convex/schema.ts` → `campaignBatches` (`status`,
+  `startedAt`, `heartbeatAt`, the `by_status` / `by_campaign_status` indexes).
 
 ## Workflow reminders (RALPH)
 - One issue per iteration. RGR: failing test first, then implementation.

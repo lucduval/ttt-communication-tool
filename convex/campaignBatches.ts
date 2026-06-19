@@ -4,6 +4,7 @@ import { internalMutation, internalQuery, mutation, query } from "./_generated/s
 import type { Id } from "./_generated/dataModel";
 import { checkAccessHelper } from "./users";
 import { batchProcessorFor } from "./lib/channelDispatch";
+import { isDead } from "./lib/batchLease";
 
 // Constants for batch sizing.
 // EMAIL_BATCH_SIZE is the # of recipients per campaign batch. With Graph $batch
@@ -521,6 +522,75 @@ export const updateTotalRecipients = internalMutation({
 });
 
 /**
+ * Plain implementation of the recovery sweep, with an injected clock so the
+ * heartbeat-aware reap decision is unit-testable (mirrors `runChannelSend`).
+ *
+ * A batch is reaped when `isDead(batch, now)` — its lease (last heartbeat, or
+ * `startedAt` for a pre-heartbeat batch) has expired while still `processing`.
+ * Keying death on last progress means a slow-but-alive worker that keeps
+ * emitting is never falsely revived.
+ */
+export async function recoverStuckBatchesImpl(
+    ctx: { db: any; scheduler: { runAfter: (ms: number, ref: any, args: any) => Promise<unknown> } },
+    now: () => number = Date.now
+): Promise<{ recovered: number }> {
+    const nowMs = now();
+
+    const processingBatches = await ctx.db
+        .query("campaignBatches")
+        .withIndex("by_status", (q: any) => q.eq("status", "processing"))
+        .collect();
+
+    const recoveredCampaignIds = new Set<Id<"campaigns">>();
+
+    for (const batch of processingBatches) {
+        if (isDead(batch, nowMs)) {
+            await ctx.db.patch(batch._id, {
+                status: "pending",
+                startedAt: undefined,
+            });
+            recoveredCampaignIds.add(batch.campaignId);
+            console.log(`Recovered stuck batch ${batch._id} for campaign ${batch.campaignId}`);
+        }
+    }
+
+    // Re-schedule ONE worker per affected campaign.
+    // Check that there are no OTHER batches still actively processing for this
+    // campaign — if there are, the existing worker chain will pick up the
+    // recovered batch naturally without us spawning a duplicate.
+    for (const campaignId of recoveredCampaignIds) {
+        const campaign = await ctx.db.get(campaignId);
+        if (!campaign || (campaign.status !== "processing" && campaign.status !== "queued")) {
+            continue;
+        }
+
+        // If another batch for this campaign is still processing, the active
+        // worker chain will pick up the recovered (now pending) batch after it
+        // finishes.  Don't spawn a second chain.
+        const stillProcessing = await ctx.db
+            .query("campaignBatches")
+            .withIndex("by_campaign_status", (q: any) =>
+                q.eq("campaignId", campaignId).eq("status", "processing")
+            )
+            .first();
+        if (stillProcessing) {
+            console.log(`Skipping worker schedule for campaign ${campaignId} — another batch is still processing`);
+            continue;
+        }
+
+        await ctx.scheduler.runAfter(0, batchProcessorFor(campaign.channel), {
+            campaignId,
+        });
+    }
+
+    if (recoveredCampaignIds.size > 0) {
+        console.log(`Recovered ${recoveredCampaignIds.size} stuck campaign(s)`);
+    }
+
+    return { recovered: recoveredCampaignIds.size };
+}
+
+/**
  * Recover batches stuck in "processing" state (e.g. after an action crash/timeout).
  * Resets them to "pending" so they can be retried, and re-schedules batch processing.
  *
@@ -531,60 +601,5 @@ export const updateTotalRecipients = internalMutation({
  */
 export const recoverStuckBatches = internalMutation({
     args: {},
-    handler: async (ctx) => {
-        const stuckThreshold = Date.now() - 20 * 60 * 1000; // 20 minutes
-
-        const processingBatches = await ctx.db
-            .query("campaignBatches")
-            .withIndex("by_status", (q) => q.eq("status", "processing"))
-            .collect();
-
-        const recoveredCampaignIds = new Set<Id<"campaigns">>();
-
-        for (const batch of processingBatches) {
-            if (batch.startedAt && batch.startedAt < stuckThreshold) {
-                await ctx.db.patch(batch._id, {
-                    status: "pending",
-                    startedAt: undefined,
-                });
-                recoveredCampaignIds.add(batch.campaignId);
-                console.log(`Recovered stuck batch ${batch._id} for campaign ${batch.campaignId}`);
-            }
-        }
-
-        // Re-schedule ONE worker per affected campaign.
-        // Check that there are no OTHER batches still actively processing for this
-        // campaign — if there are, the existing worker chain will pick up the
-        // recovered batch naturally without us spawning a duplicate.
-        for (const campaignId of recoveredCampaignIds) {
-            const campaign = await ctx.db.get(campaignId);
-            if (!campaign || (campaign.status !== "processing" && campaign.status !== "queued")) {
-                continue;
-            }
-
-            // If another batch for this campaign is still processing, the active
-            // worker chain will pick up the recovered (now pending) batch after it
-            // finishes.  Don't spawn a second chain.
-            const stillProcessing = await ctx.db
-                .query("campaignBatches")
-                .withIndex("by_campaign_status", (q) =>
-                    q.eq("campaignId", campaignId).eq("status", "processing")
-                )
-                .first();
-            if (stillProcessing) {
-                console.log(`Skipping worker schedule for campaign ${campaignId} — another batch is still processing`);
-                continue;
-            }
-
-            await ctx.scheduler.runAfter(0, batchProcessorFor(campaign.channel), {
-                campaignId,
-            });
-        }
-
-        if (recoveredCampaignIds.size > 0) {
-            console.log(`Recovered ${recoveredCampaignIds.size} stuck campaign(s)`);
-        }
-
-        return { recovered: recoveredCampaignIds.size };
-    },
+    handler: async (ctx) => recoverStuckBatchesImpl(ctx),
 });
