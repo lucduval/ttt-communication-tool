@@ -16,7 +16,6 @@ import {
 } from "@/components/whatsapp";
 import {
     ContactFilters,
-    buildODataFilter,
     type FilterState,
     EmployeeFilters,
     type EmployeeFilterState,
@@ -351,22 +350,14 @@ export default function NewCampaignPage() {
         [fetchContacts],
     );
 
-    // Build channel-appropriate filter
-    const getChannelFilter = useCallback(() => {
-        const odataFilter = buildODataFilter(filters);
-        let channelFilter: string;
-
-        if (campaignChannel === "email" || campaignChannel === "personalised") {
-            channelFilter = "emailaddress1 ne null";
-        } else {
-            channelFilter = "(mobilephone ne null or icon_formattedmobilenumber ne null) and riivo_whatsappoptinout eq true";
-        }
-
-        if (odataFilter) {
-            return `${odataFilter} and ${channelFilter}`;
-        }
-        return channelFilter;
-    }, [filters, campaignChannel]);
+    // Channel reachability as a typed Contact Query dimension. The eligibility
+    // OData (emailaddress1 / mobilephone presence + whatsapp opt-in) lives inside
+    // Contact Query; the client only selects which channel to reach by. personalised
+    // reaches email-addressable contacts, same as email.
+    const getReachableChannel = useCallback(
+        (): "email" | "whatsapp" => (campaignChannel === "whatsapp" ? "whatsapp" : "email"),
+        [campaignChannel],
+    );
 
 
 
@@ -500,9 +491,9 @@ export default function NewCampaignPage() {
                 }
             } else if (hasReferralFilter) {
                 if (!append) {
-                    const channelFilter = getChannelFilter();
+                    const reachableChannel = getReachableChannel();
                     const result = await fetchReferralParticipants({
-                        filter: channelFilter,
+                        reachableChannel,
                         search: filters.search || undefined,
                         clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
@@ -534,9 +525,9 @@ export default function NewCampaignPage() {
                 }
             } else if (hasBadDebtFilter) {
                 if (!append) {
-                    const channelFilter = getChannelFilter();
+                    const reachableChannel = getReachableChannel();
                     const result = await fetchContactsByBadDebt({
-                        filter: channelFilter,
+                        reachableChannel,
                         search: filters.search || undefined,
                         clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
@@ -568,11 +559,11 @@ export default function NewCampaignPage() {
                 }
             } else if (campaignChannel === "personalised" && hasTaxReturnFilters) {
                 if (!append) {
-                    const channelFilter = getChannelFilter();
+                    const reachableChannel = getReachableChannel();
                     const result = await fetchContactsByTaxReturn({
                         taxReturnMin: filters.taxReturnMin!,
                         taxReturnYear: filters.taxReturnYear ?? undefined,
-                        filter: channelFilter,
+                        reachableChannel,
                         search: filters.search || undefined,
                         clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
@@ -608,9 +599,9 @@ export default function NewCampaignPage() {
                 && hasITA34Filters
             ) {
                 if (!append) {
-                    const channelFilter = getChannelFilter();
+                    const reachableChannel = getReachableChannel();
                     const result = await fetchContactsWithITA34({
-                        filter: channelFilter,
+                        reachableChannel,
                         search: filters.search || undefined,
                         clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
@@ -647,12 +638,12 @@ export default function NewCampaignPage() {
             } else {
                 // Server-side cursor pagination
                 allFilteredContactsRef.current = [];
-                const channelFilter = getChannelFilter();
+                const reachableChannel = getReachableChannel();
                 const token = append ? nextPageToken ?? undefined : undefined;
 
                 const [contactsResult, countResult] = await Promise.all([
                     fetchContacts({
-                        filter: channelFilter,
+                        reachableChannel,
                         search: filters.search || undefined,
                         top: LOAD_MORE_SIZE,
                         skipToken: token,
@@ -674,7 +665,7 @@ export default function NewCampaignPage() {
                     }),
                     // Only fetch count on initial load (not on append)
                     !append ? getContactCount({
-                        filter: channelFilter,
+                        reachableChannel,
                         search: filters.search || undefined,
                         clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                         entityType: filters.entityType ?? undefined,
@@ -708,7 +699,7 @@ export default function NewCampaignPage() {
             setIsLoadingContacts(false);
             setIsLoadingMore(false);
         }
-    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, fetchContactsByBadDebt, fetchReferralParticipants, fetchLeads, getLeadCount, filters, leadFilters, getChannelFilter, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, hasBadDebtFilter, hasReferralFilter, nextPageToken, canAccessPersonalised, setNextPageToken, setClientSideOffset, allFilteredContactsRef]);
+    }, [fetchContacts, getContactCount, fetchContactsWithITA34, fetchContactsByTaxReturn, fetchContactsByBadDebt, fetchReferralParticipants, fetchLeads, getLeadCount, filters, leadFilters, getReachableChannel, audience, fetchEmployees, campaignChannel, employeeFilters, hasITA34Filters, hasTaxReturnFilters, hasBadDebtFilter, hasReferralFilter, nextPageToken, canAccessPersonalised, setNextPageToken, setClientSideOffset, allFilteredContactsRef]);
 
     // State for select all
     const [isSelectingAll, setIsSelectingAll] = useState(false);
@@ -1123,11 +1114,11 @@ export default function NewCampaignPage() {
                 setSelectedIds(allIds);
                 recipientSelection.setExplicit(all);
             } else {
-                const channelFilter = getChannelFilter();
+                const reachableChannel = getReachableChannel();
 
                 // Get total count (we might already have it, but let's be sure)
                 const countResult = await getContactCount({
-                    filter: channelFilter,
+                    reachableChannel,
                     search: filters.search || undefined,
                     clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                     entityType: filters.entityType ?? undefined,
@@ -1152,7 +1143,9 @@ export default function NewCampaignPage() {
                 // re-resolves (see fetchMatchingContactsBy*); excludeContactIds is
                 // appended by the selection value as the user unchecks rows.
                 const campaignFilters = {
-                    filter: channelFilter,
+                    // Channel reachability is a typed dimension injected from the
+                    // campaign channel at send time (processCampaignFilters), so it
+                    // is not persisted here — count and send can't drift on it.
                     search: filters.search || undefined,
                     clientType: filters.clientType.length > 0 ? filters.clientType : undefined,
                     entityType: filters.entityType ?? undefined,

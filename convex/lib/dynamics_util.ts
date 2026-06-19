@@ -40,6 +40,10 @@ export interface CampaignFilters {
     // (UI "all") has no typed representation — it is simply absent.
     whatsappOptIn?: boolean;
     emailEnabled?: boolean;
+    // Channel reachability (typed dimension owned by Contact Query). On the send
+    // path this is injected from the campaign's channel in processCampaignFilters,
+    // not persisted in the stored filters.
+    reachableChannel?: "email" | "whatsapp";
     // Tax return filters (filters on new_invoiceses entity)
     taxReturnMin?: number;  // minimum ttt_sarsreimbursement
     taxReturnYear?: number; // filter invoices by year (createdon), defaults to previous year
@@ -90,6 +94,7 @@ function toContactFilter(filters: CampaignFilters): ContactFilter {
         marketingType: filters.marketingType,
         whatsappOptIn: filters.whatsappOptIn,
         emailEnabled: filters.emailEnabled,
+        reachableChannel: filters.reachableChannel,
         nameRangeStart: filters.nameRangeStart,
         nameRangeEnd: filters.nameRangeEnd,
     };

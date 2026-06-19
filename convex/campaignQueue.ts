@@ -327,6 +327,15 @@ export const processCampaignFilters = internalAction({
             return; // Or mark campaign as failed
         }
 
+        // Channel reachability is a typed Contact Query dimension derived from the
+        // campaign's own channel — never persisted in the stored filters — so count
+        // (client) and send (here) apply the same email/whatsapp eligibility clause.
+        // personalised reaches email-addressable contacts, same as email.
+        parsedFilters = {
+            ...parsedFilters,
+            reachableChannel: channel === "whatsapp" ? "whatsapp" : "email",
+        };
+
         // Resolve ownerId for non-admins (scheduled action has no user context)
         const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, { campaignId });
         if (campaign) {

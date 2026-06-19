@@ -198,6 +198,41 @@ describe("buildContactFilter", () => {
         expect(buildContactFilter({ emailEnabled: undefined })).toBe("statecode eq 0");
     });
 
+    test("email reachability emits the has-email presence clause", () => {
+        expect(buildContactFilter({ reachableChannel: "email" })).toBe(
+            "statecode eq 0 and emailaddress1 ne null"
+        );
+    });
+
+    test("whatsapp reachability emits the phone-presence + opt-in clause", () => {
+        expect(buildContactFilter({ reachableChannel: "whatsapp" })).toBe(
+            "statecode eq 0 and (mobilephone ne null or icon_formattedmobilenumber ne null) and riivo_whatsappoptinout eq true"
+        );
+    });
+
+    test("an unset reachable channel contributes no clause", () => {
+        expect(buildContactFilter({ reachableChannel: undefined })).toBe("statecode eq 0");
+    });
+
+    test("whatsapp reachability composes with the opt-in dimension without double-emitting", () => {
+        // The whatsapp reachability clause already carries `riivo_whatsappoptinout
+        // eq true`, so the standalone opt-in dimension is suppressed — the field
+        // appears exactly once.
+        const expr = buildContactFilter({ reachableChannel: "whatsapp", whatsappOptIn: true });
+        expect(expr).toBe(
+            "statecode eq 0 and (mobilephone ne null or icon_formattedmobilenumber ne null) and riivo_whatsappoptinout eq true"
+        );
+        expect(expr.match(/riivo_whatsappoptinout/g)).toHaveLength(1);
+    });
+
+    test("email reachability does not suppress the standalone opt-in dimension", () => {
+        // Only whatsapp reachability owns the opt-in equality; on email reachability
+        // the opt-in dimension still emits its own clause.
+        expect(buildContactFilter({ reachableChannel: "email", whatsappOptIn: true })).toBe(
+            "statecode eq 0 and riivo_whatsappoptinout eq true and emailaddress1 ne null"
+        );
+    });
+
     test("characterizes the full clause ordering for a representative spread", () => {
         const filter: ContactFilter = {
             filter: "riivo_taxmarketing eq true",
@@ -306,6 +341,7 @@ describe("buildContactFilterClauses", () => {
             marketingType: "tax",
             whatsappOptIn: true,
             emailEnabled: false,
+            reachableChannel: "email",
             nameRangeStart: "A",
             nameRangeEnd: "F",
         };
@@ -325,6 +361,7 @@ describe("buildContactFilterClauses", () => {
                 " and riivo_taxmarketing eq true" +
                 " and riivo_whatsappoptinout eq true" +
                 " and icon_sendemailclientnotifications eq false" +
+                " and emailaddress1 ne null" +
                 " and fullname ge 'A'" +
                 " and fullname lt 'G'"
         );

@@ -120,6 +120,7 @@ export const fetchContacts = action({
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
         emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
+        reachableChannel: v.optional(v.union(v.literal("email"), v.literal("whatsapp"))), // Channel reachability (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -145,6 +146,7 @@ export const fetchContacts = action({
             marketingType,
             whatsappOptIn,
             emailEnabled,
+            reachableChannel,
             nameRangeStart,
             nameRangeEnd
         } = args;
@@ -171,6 +173,7 @@ export const fetchContacts = action({
                 marketingType,
                 whatsappOptIn,
                 emailEnabled,
+                reachableChannel,
                 nameRangeStart,
                 nameRangeEnd,
             },
@@ -242,6 +245,7 @@ export const getContactCount = action({
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
         emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
+        reachableChannel: v.optional(v.union(v.literal("email"), v.literal("whatsapp"))), // Channel reachability (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -263,6 +267,7 @@ export const getContactCount = action({
             marketingType,
             whatsappOptIn,
             emailEnabled,
+            reachableChannel,
             nameRangeStart,
             nameRangeEnd
         } = args;
@@ -289,6 +294,7 @@ export const getContactCount = action({
             marketingType,
             whatsappOptIn,
             emailEnabled,
+            reachableChannel,
             nameRangeStart,
             nameRangeEnd,
         });
@@ -319,6 +325,7 @@ export const fetchAllContactIds = action({
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
         emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
+        reachableChannel: v.optional(v.union(v.literal("email"), v.literal("whatsapp"))), // Channel reachability (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -340,6 +347,7 @@ export const fetchAllContactIds = action({
             marketingType,
             whatsappOptIn,
             emailEnabled,
+            reachableChannel,
             nameRangeStart,
             nameRangeEnd
         } = args;
@@ -378,6 +386,7 @@ export const fetchAllContactIds = action({
                 marketingType,
                 whatsappOptIn,
                 emailEnabled,
+                reachableChannel,
                 nameRangeStart,
                 nameRangeEnd,
             },
@@ -738,6 +747,7 @@ export const fetchContactsWithITA34 = action({
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
         emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
+        reachableChannel: v.optional(v.union(v.literal("email"), v.literal("whatsapp"))), // Channel reachability (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -848,6 +858,7 @@ export const fetchContactsByTaxReturn = action({
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
         emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
+        reachableChannel: v.optional(v.union(v.literal("email"), v.literal("whatsapp"))), // Channel reachability (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -1172,6 +1183,7 @@ export const fetchContactsByBadDebt = action({
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
         emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
+        reachableChannel: v.optional(v.union(v.literal("email"), v.literal("whatsapp"))), // Channel reachability (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -1265,6 +1277,7 @@ export const fetchReferralParticipants = action({
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
         emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
+        reachableChannel: v.optional(v.union(v.literal("email"), v.literal("whatsapp"))), // Channel reachability (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },

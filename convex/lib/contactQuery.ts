@@ -68,6 +68,19 @@ export interface ContactFilter {
      * clause. The field name lives only inside Contact Query.
      */
     emailEnabled?: boolean;
+    /**
+     * Channel-reachability dimension — "contactable by the campaign's channel".
+     * `"email"` (email / personalised campaigns) emits `emailaddress1 ne null`;
+     * `"whatsapp"` emits the phone-presence disjunction plus `riivo_whatsappoptinout
+     * eq true` (a WhatsApp campaign reaches only opted-in numbers). The
+     * emailaddress1 / mobilephone / icon_formattedmobilenumber / riivo_whatsappoptinout
+     * field names live only here — callers select the typed channel, never the OData.
+     *
+     * The whatsapp clause already carries `riivo_whatsappoptinout eq true`, so when
+     * this is `"whatsapp"` the standalone {@link whatsappOptIn} clause is suppressed
+     * to keep the field from being emitted twice. `undefined` emits no clause.
+     */
+    reachableChannel?: "email" | "whatsapp";
     /** Alphabetical name-range lower bound (fullname ge). Used for batch sending. */
     nameRangeStart?: string;
     /**
@@ -210,13 +223,23 @@ export function buildContactFilterClauses(filter: ContactFilter): string {
     }
 
     // Opt-in flags are tri-state: gate on `!== undefined` so an explicit `false`
-    // still emits its clause (a plain truthiness check would drop it).
-    if (filter.whatsappOptIn !== undefined) {
+    // still emits its clause (a plain truthiness check would drop it). Whatsapp
+    // reachability owns the `riivo_whatsappoptinout eq true` equality itself, so
+    // suppress the standalone opt-in clause there to avoid emitting the field twice.
+    if (filter.whatsappOptIn !== undefined && filter.reachableChannel !== "whatsapp") {
         clauses += ` and riivo_whatsappoptinout eq ${filter.whatsappOptIn}`;
     }
 
     if (filter.emailEnabled !== undefined) {
         clauses += ` and icon_sendemailclientnotifications eq ${filter.emailEnabled}`;
+    }
+
+    // Channel reachability: the field names for "contactable by this channel" live
+    // only here. Whatsapp folds in the opt-in equality (see whatsappOptIn above).
+    if (filter.reachableChannel === "email") {
+        clauses += ` and emailaddress1 ne null`;
+    } else if (filter.reachableChannel === "whatsapp") {
+        clauses += ` and (mobilephone ne null or icon_formattedmobilenumber ne null) and riivo_whatsappoptinout eq true`;
     }
 
     if (filter.nameRangeStart) {

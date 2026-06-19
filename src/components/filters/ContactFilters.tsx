@@ -1054,8 +1054,9 @@ export function buildODataFilter(filters: FilterState): string | undefined {
     // (whatsappOptIn / emailEnabled) owned by Contact Query, which emits the
     // riivo_whatsappoptinout / icon_sendemailclientnotifications eq true|false
     // clause once on both the count and send paths. The client emits no opt-in
-    // OData. (Channel eligibility for WhatsApp is a separate concern — see
-    // getChannelFilter in campaigns/new — not the user-facing opt-in dimension.)
+    // OData. Channel eligibility (reachable by email / whatsapp) is likewise a
+    // typed dimension (reachableChannel) owned by Contact Query, derived from the
+    // campaign channel — not built here.
 
     // The alphabetical name range is NOT built here. It is a typed dimension
     // (nameRangeStart / nameRangeEnd) owned by Contact Query, which builds the
