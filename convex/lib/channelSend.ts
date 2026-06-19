@@ -53,6 +53,23 @@ export interface ChannelSender {
 export const FLUSH_INTERVAL = 25;
 
 /**
+ * Backoff schedule for a flush that trips Convex's deployment-wide write-rate
+ * ceiling (`TooManyWrites`, 4 MiB/s). Retrying the *same* buffer after a short,
+ * growing pause both (a) lets a transient rate-limit window pass so the campaign
+ * does not lose a batch, and (b) reactively paces aggregate write throughput:
+ * when concurrent workers/webhooks have saturated the ceiling, each flusher backs
+ * off, spreading writes out instead of all hammering the wall at once. Sized to
+ * stay well inside Convex's ~10-min action limit even if every attempt is used.
+ */
+export const FLUSH_MAX_RETRIES = 5;
+export const FLUSH_BACKOFF_BASE_MS = 250;
+
+/** Convex surfaces the deployment write-rate breach as a `TooManyWrites` error. */
+export function isTooManyWrites(err: unknown): boolean {
+    return err instanceof Error && /too\s*many\s*writes/i.test(err.message);
+}
+
+/**
  * The Channel Send driver. Owns the whole batch lifecycle independent of channel:
  * the paused-campaign short-circuit, fetching the next pending batch, claiming it
  * with the idempotency guard, buffering + flushing per-recipient results every
@@ -64,9 +81,20 @@ export const FLUSH_INTERVAL = 25;
  */
 export async function runChannelSend(
     ctx: ActionCtx,
-    args: { campaignId: Id<"campaigns">; sender: ChannelSender; now?: () => number }
+    args: {
+        campaignId: Id<"campaigns">;
+        sender: ChannelSender;
+        now?: () => number;
+        /** Injectable for tests so flush backoff costs no real wall-clock. */
+        sleep?: (ms: number) => Promise<void>;
+    }
 ): Promise<void> {
-    const { campaignId, sender, now = Date.now } = args;
+    const {
+        campaignId,
+        sender,
+        now = Date.now,
+        sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+    } = args;
 
     const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, { campaignId });
     if (!campaign) {
@@ -109,17 +137,30 @@ export async function runChannelSend(
 
     const flush = async () => {
         if (buffer.length === 0) return;
-        await ctx.runMutation(internal.messages.updateStatusBatch, {
-            campaignId,
-            updates: buffer.map((r) => ({
-                recipientId: r.recipientId,
-                status: r.success ? ("sent" as const) : ("failed" as const),
-                sentAt: r.success ? now() : undefined,
-                errorMessage: r.error,
-                externalMessageId: r.externalMessageId,
-            })),
-        });
-        buffer.length = 0;
+        const updates = buffer.map((r) => ({
+            recipientId: r.recipientId,
+            status: r.success ? ("sent" as const) : ("failed" as const),
+            sentAt: r.success ? now() : undefined,
+            errorMessage: r.error,
+            externalMessageId: r.externalMessageId,
+        }));
+        // Retry the same buffer on a write-rate breach with growing backoff; only
+        // clear the buffer once the write actually lands. A non-rate-limit error
+        // (or an exhausted retry budget) propagates so the caller's catch can run
+        // handleBatchError — the batch is never silently dropped.
+        for (let attempt = 0; ; attempt++) {
+            try {
+                await ctx.runMutation(internal.messages.updateStatusBatch, {
+                    campaignId,
+                    updates,
+                });
+                buffer.length = 0;
+                return;
+            } catch (err) {
+                if (!isTooManyWrites(err) || attempt >= FLUSH_MAX_RETRIES) throw err;
+                await sleep(FLUSH_BACKOFF_BASE_MS * 2 ** attempt);
+            }
+        }
     };
 
     // Serialise emit so adapters that send concurrently (e.g. WhatsApp's
@@ -170,8 +211,16 @@ export async function runChannelSend(
         }
     } catch (err) {
         // Persist partial progress before marking the batch failed so an
-        // interrupted batch's sent/failed counts stay accurate.
-        await flush();
+        // interrupted batch's sent/failed counts stay accurate. This flush is
+        // best-effort: if it cannot land (e.g. the write wall is still up, even
+        // after backoff), swallow that so handleBatchError ALWAYS runs and the
+        // batch ends failed/recoverable with a successor — never stranded in
+        // `processing` by a second flush that re-throws before the error handler.
+        try {
+            await flush();
+        } catch (flushErr) {
+            console.error("Failed to flush partial progress before batch error:", flushErr);
+        }
         await handleBatchError(ctx, {
             channel: sender.channel,
             campaignId,

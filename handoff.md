@@ -1,79 +1,74 @@
 # Handoff — RALPH iteration
 
-## Just completed: #42 — Heartbeat-aware recovery sweep + faster `recover-stuck-batches` cron (PRD #39)
+## Just completed: #43 — Channel Send flush write-rate-limit resilience (PRD #39, final slice)
 
-**Issue #42 closed.** Branch: `main`.
+**Issue #43 closed.** Branch: `main`.
 
-Third slice of PRD #39 (*campaigns must never silently stall mid-send*). This is
-the **read side** of the lease — the operator-facing payoff. Recovery now keys on
-last progress (`heartbeatAt`) instead of claim time, and runs ~5× more often, so a
-campaign drains to completion on its own within ~2–3 min of any worker death — no
-pause/unpause ritual.
+Fourth and final slice of PRD #39 (*campaigns must never silently stall mid-send*).
+With #42 dropping the recovery cron to 1 min, a batch that died on a `TooManyWrites`
+write wall would thrash a reap→re-kill loop every ~2–3 min and never drain. This
+gives recovery something stable to retry into. **PRD #39's slices (#40–#43) are now
+all done — #39 itself (the parent epic) is a candidate to close after review.**
 
-What landed:
-- **`convex/campaignBatches.ts`**
-  - New plain `recoverStuckBatchesImpl(ctx, now = Date.now)` — the recovery sweep
-    extracted with an injected clock so the reap decision is unit-testable (mirrors
-    `runChannelSend`'s `now?` injection). The registered `recoverStuckBatches`
-    internalMutation now just delegates to it.
-  - Reap test swapped from `startedAt < now - 20min` to **`isDead(batch, now)`**
-    (from `lib/batchLease`). Death keys on `lastBeat` (heartbeat, or `startedAt`
-    fallback for pre-heartbeat batches), so a slow-but-alive emitting worker is
-    never falsely revived; pre-heartbeat batches stay recoverable.
-  - **Single-worker guards unchanged**: one worker per affected campaign, skip if
-    another batch for that campaign is still `processing`.
-- **`convex/crons.ts`**
-  - `recover-stuck-batches` interval dropped **5 min → 1 min**. Recovery latency is
-    now ≈ cron interval + lease (~2–3 min) instead of ~25 min.
-- **`convex/__tests__/recoverStuckBatches.test.ts`** (new, +5 tests)
-  - Drives `recoverStuckBatchesImpl` against a faked `ctx` (db + scheduler). Covers:
-    stale-heartbeat reaped + one worker kicked; fresh batch untouched; ≤1 worker per
-    campaign with several dead batches; "another batch still processing" skip
-    preserved; pre-heartbeat batch reaped via `startedAt` fallback. Times are
-    offsets from `LEASE_MS` (e.g. `NOW - LEASE_MS - 1000`), never the raw constant —
-    asserts relative lease ordering, not tuning numbers.
+Two defects fixed in **`convex/lib/channelSend.ts`** (the driver):
+- **Error path stranded the batch.** When a flush threw `TooManyWrites`, the buffer
+  wasn't cleared (it's cleared only after the write lands), so the `catch`'s second
+  `flush()` re-threw the same error before `handleBatchError` could run → batch
+  stuck in `processing`, no successor. Fixed two ways:
+  - `flush()` now **retries the same buffer on `TooManyWrites`** with exponential
+    backoff (`FLUSH_MAX_RETRIES = 5`, `FLUSH_BACKOFF_BASE_MS = 250`, doubling). The
+    buffer is cleared only once the write lands. A non-rate-limit error, or an
+    exhausted retry budget, propagates to the catch.
+  - The **catch-path flush is now best-effort** (wrapped in its own try/catch that
+    logs and swallows), so `handleBatchError` *always* runs — the batch ends
+    failed/recoverable with a scheduled successor, never stranded.
+- **Aggregate throughput.** The backoff-retry doubles as *reactive pacing*: when
+  concurrent workers/webhooks saturate the deployment-wide 4 MiB/s ceiling, each
+  flusher backs off and spreads its writes out instead of hammering the wall. Self-
+  tuning — no fixed per-send delay penalising healthy campaigns.
+- New exports for testing/reuse: `isTooManyWrites(err)`, `FLUSH_MAX_RETRIES`,
+  `FLUSH_BACKOFF_BASE_MS`. `runChannelSend` gained an injectable `sleep?` arg
+  (mirrors the `now?` injection) so tests pay no real wall-clock for backoff.
+- **`convex/lib/__tests__/channelSend.writeLimit.test.ts`** (new, +3 tests): flush
+  trips `TooManyWrites` once then lands on retry (batch completes, progress
+  preserved); every flush trips it (batch not stranded — `markBatchFailed` +
+  successor scheduled); adapter throws *and* the catch-path flush keeps tripping
+  (still reaches `handleBatchError`).
 
-**Verification:** `npm run typecheck` clean; `npm run test` = 1442 passed.
+**Verification:** `npm run typecheck` clean; `npm run test` = 1445 passed (+3).
 
-## Next up: #43 — Channel Send flush exceeds Convex write-rate limit / strands the batch on error (PRD #39)
+## Next up: #36 — Leads "Select All" count collapses 148 → 50 on the summary step (bug)
 
-#43 does **not** block anything but "should land alongside #42" — now that recovery
-is fast (1-min cron), a batch that dies on a `TooManyWrites` write wall would thrash
-a reap→re-kill loop every ~2–3 min and the campaign never drains. Recovery needs
-something stable to retry into. **Do this next.**
+PRD #39 is complete, so the next highest-priority unblocked issue is **#36**, a
+silent-data-loss bug: a consultant clicks **Select All (148)** on the Leads
+audience, the recipients step shows "148 selected", but the summary step reads "50
+Recipients" and the campaign is sent to only 50. The same loss affects manual
+cross-page lead selection (leads checked on page 2+ are dropped on navigation
+because only the first page of lead records is retained for materialisation).
 
-Two distinct defects to fix in **`convex/lib/channelSend.ts`** (the driver):
-- **Error path strands the batch.** When `updateStatusBatch` throws `TooManyWrites`
-  inside the `try`, the `catch` calls `flush()` *again* on the same still-full
-  buffer → throws the same error → `handleBatchError` never runs, the action exits
-  by throwing, the batch stays `processing`, no successor scheduled. Fix: the catch
-  must not re-run a flush guaranteed to throw before it can mark the batch
-  failed/reschedule. Either back-off-and-retry the flush, or run `handleBatchError`
-  so the batch ends recoverable/failed with a scheduled successor.
-- **Aggregate flush throughput exceeds 4 MiB/s.** `updateStatusBatch` flushes every
-  `FLUSH_INTERVAL` (25) recipients; the WhatsApp ≤1000 path fires ~40 back-to-back,
-  and concurrent campaigns/webhook writes share the deployment-wide ceiling. Bound
-  concurrently-flushing workers and/or pace the high-fan-out WhatsApp flushes.
+Acceptance (see `gh issue view 36` for full text):
+- Select All (148) on Leads → summary reads "148 Recipients" → all 148 are sent.
+- Hand-picking leads across multiple loaded pages survives navigation forward.
 
-Acceptance (see `gh issue view 43` for full text):
-- A send that previously tripped `TooManyWrites` completes within the write limit.
-- A flush hitting `TooManyWrites` never silently strands the batch in `processing`.
-- The catch-path no longer re-throws from a second `flush()` before `handleBatchError`.
-- Regression test: drive the driver with a flush that throws `TooManyWrites`; assert
-  the batch isn't stranded and partial progress is preserved.
+### Pointers
+- This is the **recipients/materialisation** path, not the send driver. Recent
+  related work: `materialiseExplicit` helper (#37) and its navigation wiring (#38) —
+  see `git log` and `convex/lib/recipientSelection.ts` (pure-module + `__tests__/`
+  sibling pattern). Start there to see how the selection is resolved into recipients.
+- The "50" smells like a default page size / first-page-only fetch leaking into the
+  authoritative selection. Trace where Select-All produces a count vs. where the
+  summary/send re-derives the recipient set.
 
-### If picking up new work in this area
+### If picking up Batch Lease (#39) area work again
 - The pure predicate is **`convex/lib/batchLease.ts`** — import `isDead` /
   `lastBeat` / `shouldBeat` and the constants from here; do not re-derive timings.
-  Pure-module + `__tests__/` sibling pattern (as `retry.ts`, `recipientSelection.ts`).
 - **Registered Convex mutations don't expose `.handler`** for unit tests. The
-  established pattern (as `runChannelSend`, now `recoverStuckBatchesImpl`) is to
-  extract a plain exported `fooImpl(ctx, now = Date.now)` that the registered wrapper
-  delegates to, then drive it against a faked `ctx` from `convex/__tests__/`.
-- The lease is fully wired now: `markBatchProcessing` seeds it, the driver in
-  `lib/channelSend.ts` beats via `beatBatch`, and the sweep reaps via `isDead`.
-- The batch row shape lives in `convex/schema.ts` → `campaignBatches` (`status`,
-  `startedAt`, `heartbeatAt`, the `by_status` / `by_campaign_status` indexes).
+  established pattern (`runChannelSend`, `recoverStuckBatchesImpl`) is to extract a
+  plain exported `fooImpl(ctx, now = Date.now)` that the registered wrapper delegates
+  to, then drive it against a faked `ctx`. The driver also now takes `sleep?` for
+  backoff injection.
+- The lease is fully wired: `markBatchProcessing` seeds it, the driver beats via
+  `beatBatch`, the sweep reaps via `isDead`, and the flush path is rate-limit-safe.
 
 ## Workflow reminders (RALPH)
 - One issue per iteration. RGR: failing test first, then implementation.
