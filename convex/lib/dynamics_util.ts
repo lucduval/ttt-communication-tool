@@ -33,6 +33,9 @@ export interface CampaignFilters {
     ageMax?: number;
     ownerId?: string;
     industryId?: string;
+    // Marketing-consent type (typed dimension owned by Contact Query). "all" has
+    // no typed representation — it is simply absent.
+    marketingType?: "tax" | "accounting" | "insurance";
     // Tax return filters (filters on new_invoiceses entity)
     taxReturnMin?: number;  // minimum ttt_sarsreimbursement
     taxReturnYear?: number; // filter invoices by year (createdon), defaults to previous year
@@ -80,6 +83,7 @@ function toContactFilter(filters: CampaignFilters): ContactFilter {
         ageMax: filters.ageMax,
         ownerId: filters.ownerId,
         industryId: filters.industryId,
+        marketingType: filters.marketingType,
         nameRangeStart: filters.nameRangeStart,
         nameRangeEnd: filters.nameRangeEnd,
     };

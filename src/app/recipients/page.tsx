@@ -206,6 +206,7 @@ export default function RecipientsPage() {
                     ageMax: filters.ageMax ?? undefined,
                     ownerId: filters.ownerId || undefined,
                     industryId: filters.industryId || undefined,
+                    marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                     nameRangeStart: filters.nameRangeStart || undefined,
                     nameRangeEnd: filters.nameRangeEnd || undefined,
                 });
@@ -234,6 +235,7 @@ export default function RecipientsPage() {
                     ageMax: filters.ageMax ?? undefined,
                     ownerId: filters.ownerId || undefined,
                     industryId: filters.industryId || undefined,
+                    marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                     nameRangeStart: filters.nameRangeStart || undefined,
                     nameRangeEnd: filters.nameRangeEnd || undefined,
                 });
@@ -269,6 +271,7 @@ export default function RecipientsPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     }),
@@ -285,6 +288,7 @@ export default function RecipientsPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     }),

@@ -1046,14 +1046,9 @@ export function buildODataFilter(filters: FilterState): string | undefined {
 
     // Note: clientType is handled via direct arguments to fetchContacts/getContactCount
 
-    if (filters.marketingType !== "all") {
-        const fieldMap = {
-            tax: "riivo_taxmarketing",
-            accounting: "riivo_accountingmarketing",
-            insurance: "riivo_insurancemarketing",
-        };
-        conditions.push(`${fieldMap[filters.marketingType]} eq true`);
-    }
+    // Marketing type is NOT built here. It is a typed dimension (marketingType)
+    // owned by Contact Query, which emits the riivo_*marketing eq true clause once
+    // on both the count and send paths. The client emits no marketing OData.
 
     if (filters.whatsappOptIn !== null) {
         conditions.push(

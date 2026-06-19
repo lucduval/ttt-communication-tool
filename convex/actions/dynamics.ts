@@ -117,6 +117,7 @@ export const fetchContacts = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()), // New industry filter
+        marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -139,6 +140,7 @@ export const fetchContacts = action({
             ageMin,
             ageMax,
             industryId,
+            marketingType,
             nameRangeStart,
             nameRangeEnd
         } = args;
@@ -162,6 +164,7 @@ export const fetchContacts = action({
                 ageMax,
                 ownerId,
                 industryId,
+                marketingType,
                 nameRangeStart,
                 nameRangeEnd,
             },
@@ -230,6 +233,7 @@ export const getContactCount = action({
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
+        marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -248,6 +252,7 @@ export const getContactCount = action({
             ageMin,
             ageMax,
             industryId,
+            marketingType,
             nameRangeStart,
             nameRangeEnd
         } = args;
@@ -271,6 +276,7 @@ export const getContactCount = action({
             ageMax,
             ownerId,
             industryId,
+            marketingType,
             nameRangeStart,
             nameRangeEnd,
         });
@@ -298,6 +304,7 @@ export const fetchAllContactIds = action({
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
+        marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -316,6 +323,7 @@ export const fetchAllContactIds = action({
             ageMin,
             ageMax,
             industryId,
+            marketingType,
             nameRangeStart,
             nameRangeEnd
         } = args;
@@ -351,6 +359,7 @@ export const fetchAllContactIds = action({
                 ageMax,
                 ownerId,
                 industryId,
+                marketingType,
                 nameRangeStart,
                 nameRangeEnd,
             },
@@ -708,6 +717,7 @@ export const fetchContactsWithITA34 = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -815,6 +825,7 @@ export const fetchContactsByTaxReturn = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -1136,6 +1147,7 @@ export const fetchContactsByBadDebt = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -1226,6 +1238,7 @@ export const fetchReferralParticipants = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },

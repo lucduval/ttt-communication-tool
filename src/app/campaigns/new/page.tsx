@@ -340,6 +340,7 @@ export default function NewCampaignPage() {
                 ageMax: f.ageMax as number | undefined,
                 ownerId: f.ownerId as string | undefined,
                 industryId: f.industryId as string | undefined,
+                marketingType: f.marketingType as "tax" | "accounting" | "insurance" | undefined,
                 nameRangeStart: f.nameRangeStart as string | undefined,
                 nameRangeEnd: f.nameRangeEnd as string | undefined,
             });
@@ -511,6 +512,7 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
@@ -542,6 +544,7 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
@@ -575,6 +578,7 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
@@ -614,6 +618,7 @@ export default function NewCampaignPage() {
                         incomeMax: filters.incomeMax ?? undefined,
                         retirementFundMin: filters.retirementFundMin ?? undefined,
                         retirementFundMax: filters.retirementFundMax ?? undefined,
+                        marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
@@ -651,6 +656,7 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     }),
@@ -668,6 +674,7 @@ export default function NewCampaignPage() {
                         ageMax: filters.ageMax ?? undefined,
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
+                        marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     }) : Promise.resolve(null),
@@ -1118,6 +1125,7 @@ export default function NewCampaignPage() {
                     ageMax: filters.ageMax ?? undefined,
                     ownerId: filters.ownerId || undefined,
                     industryId: filters.industryId || undefined,
+                    marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                     nameRangeStart: filters.nameRangeStart || undefined,
                     nameRangeEnd: filters.nameRangeEnd || undefined,
                 });
@@ -1148,6 +1156,8 @@ export default function NewCampaignPage() {
                     incomeMax: filters.incomeMax ?? undefined,
                     retirementFundMin: filters.retirementFundMin ?? undefined,
                     retirementFundMax: filters.retirementFundMax ?? undefined,
+                    // Marketing-consent type (typed dimension; must match backend toContactFilter)
+                    marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
                     // Alphabetical range for batch sending
                     nameRangeStart: filters.nameRangeStart ?? undefined,
                     nameRangeEnd: filters.nameRangeEnd ?? undefined,

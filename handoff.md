@@ -1,90 +1,106 @@
 # Handoff — RALPH iteration
 
-## Just completed: #43 — Channel Send flush write-rate-limit resilience (PRD #39, final slice)
+## Just completed: #32 — Contact Query: type the marketing-type filter as a dimension
 
-**Issue #43 closed.** Branch: `main`.
+**Issue #32 closed.** Branch: `main`.
 
-Fourth and final slice of PRD #39 (*campaigns must never silently stall mid-send*).
-With #42 dropping the recovery cron to 1 min, a batch that died on a `TooManyWrites`
-write wall would thrash a reap→re-kill loop every ~2–3 min and never drain. This
-gives recovery something stable to retry into. **PRD #39's slices (#40–#43) are now
-all done — #39 itself (the parent epic) is a candidate to close after review.**
+First of the Contact Query sub-chain (#32–#35) that retires the raw-OData escape
+hatch one dimension at a time. Promoted **marketing type** (tax / accounting /
+insurance) from a client-built OData string to a **typed Campaign-filter dimension
+owned by Contact Query**. Previously it lived only as OData emitted by the client's
+`buildODataFilter()` (`riivo_taxmarketing eq true`, etc.) and rode through the raw
+`filter` passthrough on both count and send.
 
-Two defects fixed in **`convex/lib/channelSend.ts`** (the driver):
-- **Error path stranded the batch.** When a flush threw `TooManyWrites`, the buffer
-  wasn't cleared (it's cleared only after the write lands), so the `catch`'s second
-  `flush()` re-threw the same error before `handleBatchError` could run → batch
-  stuck in `processing`, no successor. Fixed two ways:
-  - `flush()` now **retries the same buffer on `TooManyWrites`** with exponential
-    backoff (`FLUSH_MAX_RETRIES = 5`, `FLUSH_BACKOFF_BASE_MS = 250`, doubling). The
-    buffer is cleared only once the write lands. A non-rate-limit error, or an
-    exhausted retry budget, propagates to the catch.
-  - The **catch-path flush is now best-effort** (wrapped in its own try/catch that
-    logs and swallows), so `handleBatchError` *always* runs — the batch ends
-    failed/recoverable with a scheduled successor, never stranded.
-- **Aggregate throughput.** The backoff-retry doubles as *reactive pacing*: when
-  concurrent workers/webhooks saturate the deployment-wide 4 MiB/s ceiling, each
-  flusher backs off and spreads its writes out instead of hammering the wall. Self-
-  tuning — no fixed per-send delay penalising healthy campaigns.
-- New exports for testing/reuse: `isTooManyWrites(err)`, `FLUSH_MAX_RETRIES`,
-  `FLUSH_BACKOFF_BASE_MS`. `runChannelSend` gained an injectable `sleep?` arg
-  (mirrors the `now?` injection) so tests pay no real wall-clock for backoff.
-- **`convex/lib/__tests__/channelSend.writeLimit.test.ts`** (new, +3 tests): flush
-  trips `TooManyWrites` once then lands on retry (batch completes, progress
-  preserved); every flush trips it (batch not stranded — `markBatchFailed` +
-  successor scheduled); adapter throws *and* the catch-path flush keeps tripping
-  (still reaches `handleBatchError`).
+Now a single typed `marketingType` value flows UI → action → Contact Query, and
+Contact Query owns the `riivo_*marketing` field names — the client emits no
+marketing OData. `"all"` has no typed representation (simply absent → no clause).
 
-**Verification:** `npm run typecheck` clean; `npm run test` = 1445 passed (+3).
+Changes by layer:
+- **`convex/lib/contactQuery.ts`** (the deep place): added `marketingType?: "tax" |
+  "accounting" | "insurance"` to `ContactFilter`; `buildContactFilterClauses` emits
+  ` and <field> eq true` via a private `MARKETING_TYPE_FIELD` map (the only place the
+  `riivo_*marketing` names live). Clause is positioned after `industryId`, before the
+  name-range bounds.
+- **`convex/lib/dynamics_util.ts`** (send path): added `marketingType` to
+  `CampaignFilters` and mapped it in `toContactFilter`, so the send-time stream and
+  all specialised-audience sends resolve it from the same typed value as count.
+- **`convex/actions/dynamics.ts`**: added the `marketingType` validator
+  (`v.union(v.literal(...))`) to all 7 filter-taking actions. The 3 facades
+  (`fetchContacts`, `getContactCount`, `fetchAllContactIds`) destructure + pass it
+  into the `ContactFilter`; the 4 specialised actions already spread `resolvedArgs`
+  as the filter, so it threads through automatically.
+- **`src/components/filters/ContactFilters.tsx`**: removed the marketing block from
+  `buildODataFilter()` (left a note mirroring the name-range one). The client no
+  longer hand-builds `riivo_*marketing`.
+- **`src/app/recipients/page.tsx`** + **`src/app/campaigns/new/page.tsx`**: every
+  filter call site now passes `marketingType: filters.marketingType !== "all" ?
+  filters.marketingType : undefined`, including the persisted `campaignFilters`
+  payload (so count and send agree) and the `fetchSampleContacts` re-resolve.
+- **`convex/lib/__tests__/contactQuery.test.ts`** (+4 tests): each marketing type
+  emits its clause; the "all" (absent) case emits none; the extra-filter
+  characterization spread now pins marketing's clause ordering.
 
-## Closed PRDs (parent epics — all slices done)
-- **PRD #39 (Batch Lease)** — slices #40–#43 all closed; closed the parent.
-- **PRD #36 (Leads Select All 148→50)** — slices #37 & #38 closed; closed the
-  parent. (It was briefly mis-listed here as a work item — it was already a finished
-  PRD, implemented by the `materialiseExplicit` helper.)
+**Verification:** `npm run typecheck` clean; `npm run test` = 1449 passed (+4).
 
-## Next up: #32 — Contact Query: type the marketing-type filter as a dimension
+## Next up: #33 — Contact Query: type the opt-in flags (WhatsApp opt-in, email-enabled)
 
-PRDs #39 and #36 are done. The remaining open issues (#32–#35) are a Contact Query
-sub-chain that retires the raw-OData escape hatch one dimension at a time. **#35**
-(delete the raw `filter` passthrough + unify count/send) is explicitly *blocked by*
-the typed-dimension slices; name-range (#31) is already done, leaving #32, #33, #34
-as the blockers. They're independent of each other, so take the simplest first:
-**#32**.
+The exact same move as #32, one rung further. Promote the **opt-in flags** —
+WhatsApp opt-in (`riivo_whatsappoptinout`) and email-enabled
+(`icon_sendemailclientnotifications`) — from client-built OData to **typed,
+tri-state (true / false / unset) Campaign-filter dimensions owned by Contact
+Query**. They still live in `buildODataFilter()` and ride the raw `filter`
+passthrough today.
 
-Promote **marketing type** (tax / accounting / insurance) from a client-built OData
-string (`buildODataFilter()` → `riivo_taxmarketing eq true`, carried through Contact
-Query's raw `filter` passthrough) to a **typed Campaign-filter dimension** owned by
-Contact Query.
+Acceptance (see `gh issue view 33` for full text):
+- Both flags are typed fields on the Campaign filter from the UI through to Contact
+  Query; Contact Query emits both clauses; the field names appear only inside Contact
+  Query.
+- "Unset" emits no clause; true/false emit the matching equality.
+- Count and send agree; unit tests cover true / false / unset for each flag.
 
-Acceptance (see `gh issue view 32` for full text):
-- Marketing type is a typed field on the Campaign filter from the UI through to
-  Contact Query.
-- Contact Query emits the marketing clause; the `riivo_*marketing` field name appears
-  only inside Contact Query (not hand-built by the client).
-- Count and send both resolve it from the same typed value.
+### Pointers (follow the #32 pattern exactly — it's the template)
+- **Tri-state**, not 2-state: the typed field is `boolean | undefined`. `undefined`
+  (= UI "all"/null) emits no clause; `true`/`false` emit `<field> eq true|false`.
+  Mind that `if (filter.x)` would drop `false` — gate on `!== undefined`.
+- `convex/lib/contactQuery.ts`: add `whatsappOptIn?: boolean` and `emailEnabled?:
+  boolean` to `ContactFilter`; emit in `buildContactFilterClauses` (the
+  `icon_sendemailclientnotifications` / `riivo_whatsappoptinout` names live only
+  here). Add the each-state unit tests in `__tests__/contactQuery.test.ts`.
+- `convex/lib/dynamics_util.ts`: add both to `CampaignFilters` + `toContactFilter`.
+- `convex/actions/dynamics.ts`: add `v.optional(v.boolean())` validators to the 7
+  filter-taking actions; destructure + pass on the 3 facades (specialised ones ride
+  `resolvedArgs`).
+- `src/components/filters/ContactFilters.tsx`: drop the `whatsappOptIn` /
+  `emailEnabled` blocks from `buildODataFilter()`. Note the UI already holds these as
+  `filters.whatsappOptIn` / `filters.emailEnabled` (`boolean | null`) — map `null →
+  undefined` at the call sites in both pages and the persisted `campaignFilters`.
+- **Watch the channel clause.** `getChannelFilter()` in `campaigns/new/page.tsx`
+  hard-codes `riivo_whatsappoptinout eq true` into the WhatsApp channel filter string
+  (separate from the user-facing opt-in filter). That's channel eligibility (#34's
+  territory), not the user's opt-in dimension — don't double-emit. #33 should leave
+  the channel clause alone; #34 composes channel-eligibility with #33's flag without
+  emitting it twice. #33 before #34 is the cleaner order.
 
-### Pointers
-- This is the **Contact Query** module, not the send driver. The query core + dialect
-  live under `convex/lib/` (see the closed Contact Query slices #2–#7, #31 for the
-  established typed-dimension pattern, and `recipientSelection.ts` for the pure-module
-  + `__tests__/` sibling style).
-- After #32/#33/#34 land, #35 removes `ContactFilter.filter` / `CampaignFilters.filter`,
-  deletes `buildODataFilter()` and the raw clause in `getChannelFilter()`, and routes
-  count + send through one typed filter so they can't drift. Do #35 last.
-- #34 (channel-eligibility) overlaps #33's WhatsApp opt-in flag — Contact Query should
-  compose them without double-emitting. If doing both, #33 before #34 is cleaner.
+### Then
+- **#34** (channel-eligibility) — overlaps #33's WhatsApp flag; compose without
+  double-emitting.
+- **#35** (do last; blocked by #32/#33/#34) — removes `ContactFilter.filter` /
+  `CampaignFilters.filter`, deletes `buildODataFilter()` and the raw clause in
+  `getChannelFilter()`, and routes count + send through one typed filter so they
+  can't drift. With #32 done, marketing is no longer in the passthrough; #35 can
+  retire it once the remaining dimensions (opt-ins, channel) are typed too.
 
-### If picking up Batch Lease (#39) area work again
-- The pure predicate is **`convex/lib/batchLease.ts`** — import `isDead` /
-  `lastBeat` / `shouldBeat` and the constants from here; do not re-derive timings.
+### Contact Query area notes
+- The pure clause-builder is **`convex/lib/contactQuery.ts`**. Each typed dimension is
+  one `if` in `buildContactFilterClauses` plus an interface field; the active-only
+  base + clause ordering are pinned by the characterization tests.
 - **Registered Convex mutations don't expose `.handler`** for unit tests. The
-  established pattern (`runChannelSend`, `recoverStuckBatchesImpl`) is to extract a
-  plain exported `fooImpl(ctx, now = Date.now)` that the registered wrapper delegates
-  to, then drive it against a faked `ctx`. The driver also now takes `sleep?` for
-  backoff injection.
-- The lease is fully wired: `markBatchProcessing` seeds it, the driver beats via
-  `beatBatch`, the sweep reaps via `isDead`, and the flush path is rate-limit-safe.
+  established pattern (`runChannelSend`, `recoverStuckBatchesImpl`) is a plain
+  exported `fooImpl(ctx, now = Date.now)` the registered wrapper delegates to.
+- The send path: stored campaign filters are `JSON.parse`d into `CampaignFilters` in
+  `convex/campaignQueue.ts::processCampaignFilters`, then `toContactFilter` maps them.
+  Any new typed dimension must be added to both `CampaignFilters` and `toContactFilter`
+  or the send will silently drop it.
 
 ## Workflow reminders (RALPH)
 - One issue per iteration. RGR: failing test first, then implementation.

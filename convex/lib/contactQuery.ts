@@ -47,6 +47,14 @@ export interface ContactFilter {
     ownerId?: string;
     /** Industry scope (_riivo_industryid_value). */
     industryId?: string;
+    /**
+     * Marketing-consent type. Each value maps to a single boolean-marketing flag
+     * (riivo_taxmarketing / riivo_accountingmarketing / riivo_insurancemarketing)
+     * emitted as `… eq true`. Absent means no marketing clause (the "all" case).
+     * The riivo_*marketing field names live only here — callers select the typed
+     * value, never the field name.
+     */
+    marketingType?: "tax" | "accounting" | "insurance";
     /** Alphabetical name-range lower bound (fullname ge). Used for batch sending. */
     nameRangeStart?: string;
     /**
@@ -106,6 +114,17 @@ export function buildContactIdClause(ids: string[]): string {
 export function buildContactFilter(filter: ContactFilter): string {
     return "statecode eq 0" + buildContactFilterClauses(filter);
 }
+
+/**
+ * Map each marketing-consent type to its Dynamics boolean-marketing flag. The
+ * `riivo_*marketing` field names live only here — Contact Query owns them so no
+ * caller hand-builds a marketing clause.
+ */
+const MARKETING_TYPE_FIELD: Record<NonNullable<ContactFilter["marketingType"]>, string> = {
+    tax: "riivo_taxmarketing",
+    accounting: "riivo_accountingmarketing",
+    insurance: "riivo_insurancemarketing",
+};
 
 /**
  * Build only the appended clauses for a typed filter object — the same clauses
@@ -171,6 +190,10 @@ export function buildContactFilterClauses(filter: ContactFilter): string {
 
     if (filter.industryId) {
         clauses += ` and _riivo_industryid_value eq '${filter.industryId}'`;
+    }
+
+    if (filter.marketingType) {
+        clauses += ` and ${MARKETING_TYPE_FIELD[filter.marketingType]} eq true`;
     }
 
     if (filter.nameRangeStart) {

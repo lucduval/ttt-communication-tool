@@ -144,6 +144,28 @@ describe("buildContactFilter", () => {
         );
     });
 
+    test("marketing type 'tax' emits the tax-marketing equality clause", () => {
+        expect(buildContactFilter({ marketingType: "tax" })).toBe(
+            "statecode eq 0 and riivo_taxmarketing eq true"
+        );
+    });
+
+    test("marketing type 'accounting' emits the accounting-marketing equality clause", () => {
+        expect(buildContactFilter({ marketingType: "accounting" })).toBe(
+            "statecode eq 0 and riivo_accountingmarketing eq true"
+        );
+    });
+
+    test("marketing type 'insurance' emits the insurance-marketing equality clause", () => {
+        expect(buildContactFilter({ marketingType: "insurance" })).toBe(
+            "statecode eq 0 and riivo_insurancemarketing eq true"
+        );
+    });
+
+    test("an absent marketing type (the 'all' case) contributes no clause", () => {
+        expect(buildContactFilter({ marketingType: undefined })).toBe("statecode eq 0");
+    });
+
     test("characterizes the full clause ordering for a representative spread", () => {
         const filter: ContactFilter = {
             filter: "riivo_taxmarketing eq true",
@@ -249,6 +271,7 @@ describe("buildContactFilterClauses", () => {
             ageMax: 40,
             ownerId: "owner-1",
             industryId: "industry-1",
+            marketingType: "tax",
             nameRangeStart: "A",
             nameRangeEnd: "F",
         };
@@ -265,6 +288,7 @@ describe("buildContactFilterClauses", () => {
                 " and riivo_age le 40" +
                 " and _ownerid_value eq 'owner-1'" +
                 " and _riivo_industryid_value eq 'industry-1'" +
+                " and riivo_taxmarketing eq true" +
                 " and fullname ge 'A'" +
                 " and fullname lt 'G'"
         );
