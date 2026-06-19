@@ -97,6 +97,9 @@ export default defineSchema({
         successCount: v.number(),
         failedCount: v.number(),
         startedAt: v.optional(v.number()),
+        // Last worker heartbeat; optional so existing in-flight batches stay
+        // valid and remain recoverable via the startedAt fallback in lastBeat.
+        heartbeatAt: v.optional(v.number()),
         completedAt: v.optional(v.number()),
         errorMessage: v.optional(v.string()),
     })
