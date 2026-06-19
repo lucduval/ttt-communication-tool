@@ -3,6 +3,17 @@
 import { action, internalAction } from "../_generated/server";
 import { v } from "convex/values";
 import { dynamicsRequest } from "../lib/dynamics_auth";
+import {
+    countContacts,
+    fetchContactsPage,
+    streamContacts,
+} from "../lib/contactQuery";
+import {
+    countLeads,
+    fetchLeadsPage,
+    streamLeads,
+    type LeadFilter,
+} from "../lib/leadQuery";
 import { api } from "../_generated/api";
 export { dynamicsRequest };
 
@@ -84,13 +95,6 @@ export interface DynamicsContact {
     riivo_geographiclocation: number | null;
 }
 
-interface ContactsResponse {
-    "@odata.context": string;
-    "@odata.nextLink"?: string;
-    "@odata.count"?: number;
-    value: DynamicsContact[];
-}
-
 /**
  * Fetch contacts from Dynamics 365 with filtering and pagination
  */
@@ -103,7 +107,7 @@ export const fetchContacts = action({
         skipToken: v.optional(v.string()), // Pagination token (cursor pagination)
         countOnly: v.optional(v.boolean()), // Only return count
         // New filters
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())), // MultiSelect usually returns array or string, for input we take array
@@ -113,6 +117,8 @@ export const fetchContacts = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()), // New industry filter
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -132,113 +138,43 @@ export const fetchContacts = action({
             geographicLocation,
             ageMin,
             ageMax,
-            industryId
+            industryId,
+            nameRangeStart,
+            nameRangeEnd
         } = args;
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
-        // Build OData query parameters
-        const queryParts: string[] = [];
-
-        // Select specific fields
-        queryParts.push(`$select=${CONTACT_SELECT_FIELDS}`);
-
-        // Always filter for active contacts (statecode = 0)
-        let filterExpression = "statecode eq 0";
-
-        // Add custom filter if provided
-        if (filter) {
-            filterExpression += ` and (${filter})`;
-        }
-
-        // Add search if provided (search in fullname or emailaddress1)
-        if (search) {
-            const searchTerm = search.replace(/'/g, "''"); // Escape single quotes
-            filterExpression += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
-        }
-
-        // --- New Filters ---
-        // OptionSet fields require integer values; avoid Edm.String vs Edm.Int32 mismatch.
-
-        if (clientType) {
-            filterExpression += ` and riivo_clienttypenew eq '${clientType}'`;
-        }
-
-        if (entityType !== undefined) {
-            filterExpression += ` and riivo_clienttypeindbus eq ${entityType}`;
-        }
-
-        if (bank !== undefined) {
-            filterExpression += ` and ttt_bank eq ${bank}`;
-        }
-
-        if (sourceCode && sourceCode.length > 0) {
-            // For MultiSelect, use containment or OR logic. 
-            // Dynamics 365 MultiSelect filtering: Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['1','2'])
-            // Ideally we construct a string of values.
-            // Simplified: "contain-values"
-            const values = sourceCode.map(String).join("','");
-            filterExpression += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-
-        if (province) {
-            const prov = province.replace(/'/g, "''");
-            filterExpression += ` and address1_stateorprovince eq '${prov}'`;
-        }
-
-        if (geographicLocation !== undefined) {
-            filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
-        }
-
-        if (ageMin !== undefined) {
-            filterExpression += ` and riivo_age ge ${ageMin}`;
-        }
-
-        if (ageMax !== undefined) {
-            filterExpression += ` and riivo_age le ${ageMax}`;
-        }
-
-        if (ownerId) {
-            filterExpression += ` and _ownerid_value eq '${ownerId}'`;
-        }
-
-        if (industryId) {
-            filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
-        }
-
-        console.log(`[fetchContacts] Filter Expression: ${filterExpression}`);
-
-        queryParts.push(`$filter=${filterExpression}`);
-
-        // Order by name
-        queryParts.push("$orderby=fullname asc");
-
-        // For count-only queries, use $top=1 to minimise data transfer
-        if (countOnly) {
-            queryParts.push("$count=true");
-            queryParts.push("$top=1");
-        }
-        // Do NOT add $top for normal paged queries — Dynamics ignores @odata.nextLink when
-        // $top is present (it treats $top as a hard limit, not a page size).
-        // Page size is controlled exclusively via the Prefer: odata.maxpagesize header.
-
-        // Build the endpoint
-        let endpoint = `contacts?${queryParts.join("&")}`;
-
-        // If we have a skipToken, use it for pagination
-        if (skipToken) {
-            endpoint = skipToken.replace(/^.*\/api\/data\/v9\.2\//, "");
-        }
-
-        // odata.maxpagesize controls page size and triggers @odata.nextLink in the response
-        const response = await dynamicsRequest<ContactsResponse>(endpoint, {
-            headers: {
-                Prefer: `odata.include-annotations="*",odata.maxpagesize=${top}`,
+        // Fetch a single page via the Contact Query module so the recipient list
+        // shares one canonical filter definition and never assembles page-size
+        // headers or cursor tokens itself.
+        const response = await fetchContactsPage<DynamicsContact>(
+            {
+                filter,
+                search,
+                clientType,
+                entityType,
+                bank,
+                sourceCode,
+                province,
+                geographicLocation,
+                ageMin,
+                ageMax,
+                ownerId,
+                industryId,
+                nameRangeStart,
+                nameRangeEnd,
             },
-        });
+            {
+                select: CONTACT_SELECT_FIELDS,
+                pageSize: top,
+                cursor: skipToken,
+                countOnly,
+            }
+        );
 
         // Transform the response
-        const contacts = response.value.map((contact) => ({
+        const contacts = (response.value ?? []).map((contact) => ({
             id: contact.contactid,
             fullName: contact.fullname,
             firstName: contact.firstname,
@@ -285,7 +221,7 @@ export const getContactCount = action({
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
         // New filters
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -294,6 +230,8 @@ export const getContactCount = action({
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -309,93 +247,35 @@ export const getContactCount = action({
             geographicLocation,
             ageMin,
             ageMax,
-            industryId
+            industryId,
+            nameRangeStart,
+            nameRangeEnd
         } = args;
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
-        // Build filter expression
-        let filterExpression = "statecode eq 0";
+        // Count via the Contact Query module so count, select-all, the recipient
+        // list, and the send-time stream all derive their audience from one place.
+        // The module handles the Dynamics @odata.count 5000 ceiling internally,
+        // paginating contactids to recover the true total when it is hit.
+        const count = await countContacts({
+            filter,
+            search,
+            clientType,
+            entityType,
+            bank,
+            sourceCode,
+            province,
+            geographicLocation,
+            ageMin,
+            ageMax,
+            ownerId,
+            industryId,
+            nameRangeStart,
+            nameRangeEnd,
+        });
 
-        if (filter) {
-            filterExpression += ` and (${filter})`;
-        }
-
-        if (search) {
-            const searchTerm = search.replace(/'/g, "''");
-            filterExpression += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
-        }
-
-        if (clientType) {
-            filterExpression += ` and riivo_clienttypenew eq '${clientType}'`;
-        }
-
-        if (entityType !== undefined) {
-            filterExpression += ` and riivo_clienttypeindbus eq ${entityType}`;
-        }
-
-        if (bank !== undefined) {
-            filterExpression += ` and ttt_bank eq ${bank}`;
-        }
-
-        if (sourceCode && sourceCode.length > 0) {
-            const values = sourceCode.map(String).join("','");
-            filterExpression += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-
-        if (province) {
-            const prov = province.replace(/'/g, "''");
-            filterExpression += ` and address1_stateorprovince eq '${prov}'`;
-        }
-
-        if (geographicLocation !== undefined) {
-            filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
-        }
-
-        if (ageMin !== undefined) {
-            filterExpression += ` and riivo_age ge ${ageMin}`;
-        }
-
-        if (ageMax !== undefined) {
-            filterExpression += ` and riivo_age le ${ageMax}`;
-        }
-
-        if (ownerId) {
-            filterExpression += ` and _ownerid_value eq '${ownerId}'`;
-        }
-
-        if (industryId) {
-            filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
-        }
-
-
-
-        console.log(`[getContactCount] Filter Expression: ${filterExpression}`);
-
-        // Dynamics @odata.count caps at 5000 in many environments.
-        // When the count hits that ceiling, paginate with only contactid
-        // to get the true total.
-        const initialEndpoint = `contacts?$filter=${filterExpression}&$count=true&$top=1&$select=contactid`;
-        const initialResponse = await dynamicsRequest<ContactsResponse>(initialEndpoint);
-        const odataCount = initialResponse["@odata.count"] || 0;
-
-        if (odataCount < 5000) {
-            return { count: odataCount };
-        }
-
-        // Count exceeded 5000 — paginate to get the real number
-        let total = 0;
-        let countUrl = `contacts?$filter=${filterExpression}&$select=contactid&$count=true` as string | null;
-        for (let p = 0; countUrl && p < 200; p++) {
-            const url = countUrl.startsWith("http")
-                ? countUrl.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : countUrl;
-            const page: ContactsResponse = await dynamicsRequest(url);
-            total += (page.value?.length ?? 0);
-            countUrl = page["@odata.nextLink"] ?? null;
-        }
-
-        return { count: total };
+        return { count };
     },
 });
 
@@ -409,7 +289,7 @@ export const fetchAllContactIds = action({
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
         // New filters
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -418,6 +298,8 @@ export const fetchAllContactIds = action({
         ageMin: v.optional(v.number()),
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -433,71 +315,12 @@ export const fetchAllContactIds = action({
             geographicLocation,
             ageMin,
             ageMax,
-            industryId
+            industryId,
+            nameRangeStart,
+            nameRangeEnd
         } = args;
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
-
-        // Build filter expression
-        let filterExpression = "statecode eq 0";
-
-        if (filter) {
-            filterExpression += ` and (${filter})`;
-        }
-
-        if (search) {
-            const searchTerm = search.replace(/'/g, "''");
-            filterExpression += ` and (contains(fullname,'${searchTerm}') or contains(emailaddress1,'${searchTerm}'))`;
-        }
-
-        if (clientType) {
-            filterExpression += ` and riivo_clienttypenew eq '${clientType}'`;
-        }
-
-        if (entityType !== undefined) {
-            filterExpression += ` and riivo_clienttypeindbus eq ${entityType}`;
-        }
-
-        if (bank !== undefined) {
-            filterExpression += ` and ttt_bank eq ${bank}`;
-        }
-
-        if (sourceCode && sourceCode.length > 0) {
-            const values = sourceCode.map(String).join("','");
-            filterExpression += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-
-        if (province) {
-            const prov = province.replace(/'/g, "''");
-            filterExpression += ` and address1_stateorprovince eq '${prov}'`;
-        }
-
-        if (geographicLocation !== undefined) {
-            filterExpression += ` and riivo_geographiclocation eq ${geographicLocation}`;
-        }
-
-        if (ageMin !== undefined) {
-            filterExpression += ` and riivo_age ge ${ageMin}`;
-        }
-
-        if (ageMax !== undefined) {
-            filterExpression += ` and riivo_age le ${ageMax}`;
-        }
-
-        if (ownerId) {
-            filterExpression += ` and _ownerid_value eq '${ownerId}'`;
-        }
-
-        if (industryId) {
-            filterExpression += ` and _riivo_industryid_value eq '${industryId}'`;
-        }
-
-        console.log(`[fetchAllContactIds] Filter Expression: ${filterExpression}`);
-
-        // We only need basic fields for campaign creation
-        const selectFields = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber";
-
-        const initialEndpoint = `contacts?$filter=${filterExpression}&$select=${selectFields}&$orderby=fullname asc`;
 
         interface SimpleContact {
             contactid: string;
@@ -505,46 +328,40 @@ export const fetchAllContactIds = action({
             emailaddress1: string | null;
             mobilephone: string | null;
             icon_formattedmobilenumber: string | null;
-            // Include other fields if they are in the response but we only asked for these
         }
 
-        interface SimpleContactsResponse {
-            "@odata.context": string;
-            "@odata.nextLink"?: string;
-            value: SimpleContact[];
-        }
+        // We only need basic fields for campaign creation
+        const selectFields = "contactid,fullname,emailaddress1,mobilephone,icon_formattedmobilenumber";
 
-        let allContacts: SimpleContact[] = [];
-        let nextLink: string | null = initialEndpoint;
-
-        // Loop through pages
-        // Safety break to prevent infinite loops if something goes wrong
-        let pageCount = 0;
-        const MAX_PAGES = 500; // 500 * 50 = 25000 records, should be enough for now. 
-        // Note: Dynamics usually returns 5000 records per page if not specified, but we didn't specify page size so it might default to 50 or 5000.
-        // Let's rely on nextLink.
-
-        while (nextLink && pageCount < MAX_PAGES) {
-            pageCount++;
-
-            // If nextLink is a full URL (from OData response), extract relative part
-            // Dynamics nextLink is usually full URL
-            if (nextLink.startsWith("http")) {
-                // We need to keep the query part but remove the base URL
-                // Ideally dynamicsRequest handles full URLs if we pass them? 
-                // Looking at dynamicsRequest implementation would be good but let's assume it takes relative path based on existing code 
-                // "endpoint = skipToken.replace(/^.*\/api\/data\/v9\.2\//, "");" in fetchContacts suggests we need to strip base.
-                nextLink = nextLink.replace(/^.*\/api\/data\/v9\.2\//, "");
+        // Stream every matching contact through the Contact Query module so the
+        // select-all audience matches the recipient list, count, and send, and so
+        // pagination is handled in one place. 500 pages is the safety cap.
+        const allContacts: SimpleContact[] = [];
+        await streamContacts<SimpleContact>(
+            {
+                filter,
+                search,
+                clientType,
+                entityType,
+                bank,
+                sourceCode,
+                province,
+                geographicLocation,
+                ageMin,
+                ageMax,
+                ownerId,
+                industryId,
+                nameRangeStart,
+                nameRangeEnd,
+            },
+            {
+                select: selectFields,
+                maxPages: 500,
+                onPage: (rows) => {
+                    allContacts.push(...rows);
+                },
             }
-
-            const response: SimpleContactsResponse = await dynamicsRequest<SimpleContactsResponse>(nextLink);
-
-            if (response.value && response.value.length > 0) {
-                allContacts.push(...response.value);
-            }
-
-            nextLink = response["@odata.nextLink"] || null;
-        }
+        );
 
         return allContacts.map((contact) => ({
             id: contact.contactid,
@@ -801,36 +618,17 @@ const IRP5_SELECT_FIELDS = [
     "_riivo_client_value",
 ].join(",");
 
-export interface TaxProfileData {
-    contactId: string;
-    ita34: {
-        yearOfAssessment: number;
-        income: number;
-        taxableIncome: number;
-        raContributions: number;
-        retirementFundContributions: number;
-        providentFundContributions: number;
-        medicalSchemeTaxCredit: number;
-        medicalRebate: number;
-        dateOfAssessment: string | null;
-        referenceNumber: string | null;
-    } | null;
-    irp5: {
-        assessmentYear: number;
-        incomePaye: number;
-        grossTaxableIncome: number;
-        totalDeductions: number;
-        raContributions: number | null;
-        providentFundContribution: number;
-        totalProvidentFund: number;
-        medicalAidContributions: number;
-        medicalSchemeTaxCredit: number;
-        taxableTravel: number;
-        employerName: string | null;
-        taxPeriodStart: string | null;
-        taxPeriodEnd: string | null;
-    } | null;
-}
+// The canonical tax-figure shape (and the readers that produce it) are owned by
+// the Tax Profile module.
+import type { TaxProfileData } from "../lib/taxProfile";
+import {
+    resolveSpecialisedAudience,
+    ita34IncomeScanAdapter,
+    taxReturnScanAdapter,
+    badDebtScanAdapter,
+    referralScanAdapter,
+} from "../lib/specialisedAudience";
+export type { TaxProfileData };
 
 export const fetchContactTaxData = action({
     args: {
@@ -900,7 +698,7 @@ export const fetchContactsWithITA34 = action({
         taxYear: v.optional(v.number()),
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -910,6 +708,8 @@ export const fetchContactsWithITA34 = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -918,104 +718,12 @@ export const fetchContactsWithITA34 = action({
         // Replace args.ownerId with the enforced value for the rest of the handler
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
 
-        let ita34Filter = "statecode eq 0 and _riivo_taxpayercontact_value ne null";
-
-        if (args.taxYear) {
-            ita34Filter += ` and riivo_yearofassessment eq ${args.taxYear}`;
-        }
-        if (args.incomeMin !== undefined) {
-            ita34Filter += ` and riivo_income ge ${args.incomeMin}`;
-        }
-        if (args.incomeMax !== undefined) {
-            ita34Filter += ` and riivo_income le ${args.incomeMax}`;
-        }
-        if (args.retirementFundMin !== undefined) {
-            ita34Filter += ` and riivo_retirementfundcontributions ge ${args.retirementFundMin}`;
-        }
-        if (args.retirementFundMax !== undefined) {
-            ita34Filter += ` and riivo_retirementfundcontributions le ${args.retirementFundMax}`;
-        }
-
-        const ita34Endpoint = `riivo_ita34s?$select=_riivo_taxpayercontact_value,riivo_income,riivo_retirementfundcontributions,riivo_yearofassessment&$filter=${ita34Filter}&$orderby=riivo_yearofassessment desc`;
-
-        interface ITA34Row {
-            _riivo_taxpayercontact_value: string;
-            riivo_income: number | null;
-            riivo_retirementfundcontributions: number | null;
-            riivo_yearofassessment: number | null;
-        }
-
-        let allIta34s: ITA34Row[] = [];
-        let nextLink: string | null = ita34Endpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 100) {
-            pageCount++;
-            const endpoint: string = nextLink.startsWith("http")
-                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : nextLink;
-            const response = await dynamicsRequest<{ value: ITA34Row[]; "@odata.nextLink"?: string }>(endpoint);
-            if (response.value?.length) {
-                allIta34s.push(...response.value);
-            }
-            nextLink = response["@odata.nextLink"] ?? null;
-        }
-
-        const contactMap = new Map<string, ITA34Row>();
-        for (const row of allIta34s) {
-            const cid = row._riivo_taxpayercontact_value;
-            if (!cid) continue;
-            const existing = contactMap.get(cid);
-            if (!existing || (row.riivo_yearofassessment ?? 0) > (existing.riivo_yearofassessment ?? 0)) {
-                contactMap.set(cid, row);
-            }
-        }
-
-        const contactIds = Array.from(contactMap.keys());
-        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
-
-        // Build additional contact-level filter conditions
-        let extraFilter = "";
-        if (resolvedArgs.filter) {
-            extraFilter += ` and (${resolvedArgs.filter})`;
-        }
-        if (resolvedArgs.search) {
-            const s = resolvedArgs.search.replace(/'/g, "''");
-            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
-        }
-        if (resolvedArgs.clientType) {
-            extraFilter += ` and riivo_clienttypenew eq '${resolvedArgs.clientType}'`;
-        }
-        if (resolvedArgs.entityType !== undefined) {
-            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
-        }
-        if (resolvedArgs.bank !== undefined) {
-            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
-        }
-        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
-            const values = resolvedArgs.sourceCode.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.province) {
-            const prov = resolvedArgs.province.replace(/'/g, "''");
-            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
-        }
-        if (resolvedArgs.geographicLocation !== undefined) {
-            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
-        }
-        if (resolvedArgs.ageMin !== undefined) {
-            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
-        }
-        if (resolvedArgs.ageMax !== undefined) {
-            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
-        }
-        if (resolvedArgs.ownerId) {
-            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
-        }
-        if (resolvedArgs.industryId) {
-            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
-        }
-
+        // Membership (who has latest-year income in range), latest-year selection,
+        // and the id-chunked contact re-query all live in the Specialised Audience
+        // module / Contact Query. This handler is now the rich-list-shape mapper:
+        // the resolver hands back each contact joined with its Tax Profile display
+        // figures so the list shows the same latest-year taxable income as the
+        // preview and the sent email.
         const contacts: Array<{
             id: string;
             fullName: string;
@@ -1037,40 +745,48 @@ export const fetchContactsWithITA34 = action({
             ita34Year: number | null;
         }> = [];
 
-        for (let i = 0; i < contactIds.length; i += 50) {
-            const batch = contactIds.slice(i, i + 50);
-            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
-            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
-            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
-
-            for (const c of contactResponse.value) {
-                const ita34Row = contactMap.get(c.contactid);
-                contacts.push({
-                    id: c.contactid,
-                    fullName: c.fullname,
-                    firstName: c.firstname,
-                    lastName: c.lastname,
-                    email: c.emailaddress1,
-                    phone: c.mobilephone,
-                    internationalPhone: c.icon_formattedmobilenumber,
-                    isActive: c.statecode === 0,
-                    clientType: c.riivo_clienttypenew,
-                    marketingPreferences: {
-                        tax: c.riivo_taxmarketing,
-                        accounting: c.riivo_accountingmarketing,
-                        insurance: c.riivo_insurancemarketing,
-                    },
-                    whatsappOptIn: c.riivo_whatsappoptinout,
-                    emailNotifications: c.icon_sendemailclientnotifications,
-                    smsNotifications: c.icon_sendclientssmsnotifications,
-                    createdOn: c.createdon,
-                    modifiedOn: c.modifiedon,
-                    ita34Income: ita34Row?.riivo_income ?? null,
-                    ita34RetirementFund: ita34Row?.riivo_retirementfundcontributions ?? null,
-                    ita34Year: ita34Row?.riivo_yearofassessment ?? null,
-                });
-            }
-        }
+        await resolveSpecialisedAudience<DynamicsContact>({
+            adapter: ita34IncomeScanAdapter({
+                incomeMin: args.incomeMin,
+                incomeMax: args.incomeMax,
+                retirementFundMin: args.retirementFundMin,
+                retirementFundMax: args.retirementFundMax,
+                taxYear: args.taxYear,
+            }),
+            filter: resolvedArgs,
+            select: CONTACT_SELECT_FIELDS,
+            withTaxProfile: true,
+            onChunk: (resolved) => {
+                for (const { contact: c, extra } of resolved) {
+                    const ita34 = extra.taxProfile?.ita34 ?? null;
+                    contacts.push({
+                        id: c.contactid,
+                        fullName: c.fullname,
+                        firstName: c.firstname,
+                        lastName: c.lastname,
+                        email: c.emailaddress1,
+                        phone: c.mobilephone,
+                        internationalPhone: c.icon_formattedmobilenumber,
+                        isActive: c.statecode === 0,
+                        clientType: c.riivo_clienttypenew,
+                        marketingPreferences: {
+                            tax: c.riivo_taxmarketing,
+                            accounting: c.riivo_accountingmarketing,
+                            insurance: c.riivo_insurancemarketing,
+                        },
+                        whatsappOptIn: c.riivo_whatsappoptinout,
+                        emailNotifications: c.icon_sendemailclientnotifications,
+                        smsNotifications: c.icon_sendclientssmsnotifications,
+                        createdOn: c.createdon,
+                        modifiedOn: c.modifiedon,
+                        // ita34Income carries the displayed figure: taxable income.
+                        ita34Income: ita34?.taxableIncome ?? null,
+                        ita34RetirementFund: ita34?.retirementFundContributions ?? null,
+                        ita34Year: ita34?.yearOfAssessment ?? null,
+                    });
+                }
+            },
+        });
 
         return { contacts, totalCount: contacts.length };
     },
@@ -1089,7 +805,7 @@ export const fetchContactsByTaxReturn = action({
         taxReturnYear: v.optional(v.number()),
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -1099,6 +815,8 @@ export const fetchContactsByTaxReturn = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -1107,95 +825,12 @@ export const fetchContactsByTaxReturn = action({
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
 
         const targetYear = args.taxReturnYear ?? (new Date().getFullYear() - 1);
-        const yearStart = `${targetYear}-01-01T00:00:00Z`;
-        const yearEnd = `${targetYear + 1}-01-01T00:00:00Z`;
 
-        // Build invoice filter: reimbursement above threshold within the target year
-        let invoiceFilter = `ttt_sarsreimbursement ge ${args.taxReturnMin}`;
-        invoiceFilter += ` and createdon ge ${yearStart} and createdon lt ${yearEnd}`;
-        invoiceFilter += ` and _ttt_customer_value ne null`;
-        invoiceFilter += ` and statecode eq 1`; // Inactive/completed invoices
-
-        const invoiceEndpoint = `new_invoiceses?$select=_ttt_customer_value,ttt_sarsreimbursement,createdon&$filter=${invoiceFilter}&$orderby=ttt_sarsreimbursement desc`;
-
-        interface InvoiceRow {
-            _ttt_customer_value: string;
-            ttt_sarsreimbursement: number | null;
-            createdon: string;
-        }
-
-        let allInvoices: InvoiceRow[] = [];
-        let nextLink: string | null = invoiceEndpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 100) {
-            pageCount++;
-            const endpoint: string = nextLink.startsWith("http")
-                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : nextLink;
-            const response = await dynamicsRequest<{ value: InvoiceRow[]; "@odata.nextLink"?: string }>(endpoint);
-            if (response.value?.length) {
-                allInvoices.push(...response.value);
-            }
-            nextLink = response["@odata.nextLink"] ?? null;
-        }
-
-        // De-duplicate: keep the highest reimbursement per contact
-        const contactMap = new Map<string, InvoiceRow>();
-        for (const row of allInvoices) {
-            const cid = row._ttt_customer_value;
-            if (!cid) continue;
-            const existing = contactMap.get(cid);
-            if (!existing || (row.ttt_sarsreimbursement ?? 0) > (existing.ttt_sarsreimbursement ?? 0)) {
-                contactMap.set(cid, row);
-            }
-        }
-
-        const contactIds = Array.from(contactMap.keys());
-        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
-
-        // Build additional contact-level filter conditions
-        let extraFilter = "";
-        if (resolvedArgs.filter) {
-            extraFilter += ` and (${resolvedArgs.filter})`;
-        }
-        if (resolvedArgs.search) {
-            const s = resolvedArgs.search.replace(/'/g, "''");
-            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
-        }
-        if (resolvedArgs.clientType) {
-            extraFilter += ` and riivo_clienttypenew eq '${resolvedArgs.clientType}'`;
-        }
-        if (resolvedArgs.entityType !== undefined) {
-            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
-        }
-        if (resolvedArgs.bank !== undefined) {
-            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
-        }
-        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
-            const values = resolvedArgs.sourceCode.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.province) {
-            const prov = resolvedArgs.province.replace(/'/g, "''");
-            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
-        }
-        if (resolvedArgs.geographicLocation !== undefined) {
-            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
-        }
-        if (resolvedArgs.ageMin !== undefined) {
-            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
-        }
-        if (resolvedArgs.ageMax !== undefined) {
-            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
-        }
-        if (resolvedArgs.ownerId) {
-            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
-        }
-        if (resolvedArgs.industryId) {
-            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
-        }
-
+        // The scan (highest reimbursement per contact in the year window) and the
+        // id-chunked contact re-query live in the Specialised Audience module /
+        // Contact Query. This handler is the rich-list-shape mapper. This audience
+        // displays the reimbursement amount directly — it is the scan figure — so
+        // no Tax Profile join is requested and `extra.scanFigure` carries it.
         const contacts: Array<{
             id: string;
             fullName: string;
@@ -1215,38 +850,40 @@ export const fetchContactsByTaxReturn = action({
             sarsReimbursement: number | null;
         }> = [];
 
-        for (let i = 0; i < contactIds.length; i += 50) {
-            const batch = contactIds.slice(i, i + 50);
-            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
-            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
-            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
-
-            for (const c of contactResponse.value) {
-                const invoiceRow = contactMap.get(c.contactid);
-                contacts.push({
-                    id: c.contactid,
-                    fullName: c.fullname,
-                    firstName: c.firstname,
-                    lastName: c.lastname,
-                    email: c.emailaddress1,
-                    phone: c.mobilephone,
-                    internationalPhone: c.icon_formattedmobilenumber,
-                    isActive: c.statecode === 0,
-                    clientType: c.riivo_clienttypenew,
-                    marketingPreferences: {
-                        tax: c.riivo_taxmarketing,
-                        accounting: c.riivo_accountingmarketing,
-                        insurance: c.riivo_insurancemarketing,
-                    },
-                    whatsappOptIn: c.riivo_whatsappoptinout,
-                    emailNotifications: c.icon_sendemailclientnotifications,
-                    smsNotifications: c.icon_sendclientssmsnotifications,
-                    createdOn: c.createdon,
-                    modifiedOn: c.modifiedon,
-                    sarsReimbursement: invoiceRow?.ttt_sarsreimbursement ?? null,
-                });
-            }
-        }
+        await resolveSpecialisedAudience<DynamicsContact>({
+            adapter: taxReturnScanAdapter({
+                taxReturnMin: args.taxReturnMin,
+                targetYear,
+            }),
+            filter: resolvedArgs,
+            select: CONTACT_SELECT_FIELDS,
+            onChunk: (resolved) => {
+                for (const { contact: c, extra } of resolved) {
+                    contacts.push({
+                        id: c.contactid,
+                        fullName: c.fullname,
+                        firstName: c.firstname,
+                        lastName: c.lastname,
+                        email: c.emailaddress1,
+                        phone: c.mobilephone,
+                        internationalPhone: c.icon_formattedmobilenumber,
+                        isActive: c.statecode === 0,
+                        clientType: c.riivo_clienttypenew,
+                        marketingPreferences: {
+                            tax: c.riivo_taxmarketing,
+                            accounting: c.riivo_accountingmarketing,
+                            insurance: c.riivo_insurancemarketing,
+                        },
+                        whatsappOptIn: c.riivo_whatsappoptinout,
+                        emailNotifications: c.icon_sendemailclientnotifications,
+                        smsNotifications: c.icon_sendclientssmsnotifications,
+                        createdOn: c.createdon,
+                        modifiedOn: c.modifiedon,
+                        sarsReimbursement: extra.scanFigure,
+                    });
+                }
+            },
+        });
 
         return { contacts, totalCount: contacts.length };
     },
@@ -1296,13 +933,6 @@ interface DynamicsLead {
     _ownerid_value: string | null;
 }
 
-interface LeadsResponse {
-    "@odata.context": string;
-    "@odata.nextLink"?: string;
-    "@odata.count"?: number;
-    value: DynamicsLead[];
-}
-
 function mapLeadToContact(lead: DynamicsLead) {
     return {
         id: lead.new_leadid,
@@ -1325,68 +955,35 @@ function mapLeadToContact(lead: DynamicsLead) {
     };
 }
 
-function buildLeadFilter(args: {
+/**
+ * Build a typed {@link LeadFilter} from action args. Owner scope is resolved at
+ * the action seam and passed in; every other clause comes straight from the
+ * typed args. The Lead Query module turns this into the OData expression — the
+ * dialect never appears here.
+ */
+function toLeadFilter(args: {
     search?: string;
     province?: string;
     emailOptIn?: boolean;
     whatsappOptIn?: boolean;
-    ownerId?: string;
     status?: string;
     industryId?: string;
     channel?: string;
-}): string {
-    let filterExpression: string;
-
-    if (args.status === "active") {
-        filterExpression = "statecode eq 0";
-    } else if (args.status === "inactive") {
-        filterExpression = "statecode eq 1";
-    } else {
-        // "all" or undefined — no statecode filter
-        filterExpression = "statecode ne -1"; // always-true placeholder for OData AND chaining
-    }
-
-    if (args.search) {
-        const s = args.search.replace(/'/g, "''");
-        filterExpression += ` and (contains(new_name,'${s}') or contains(ttt_email,'${s}'))`;
-    }
-
-    if (args.province) {
-        const prov = args.province.replace(/'/g, "''");
-        filterExpression += ` and riivo_province eq '${prov}'`;
-    }
-
-    if (args.emailOptIn === true) {
-        filterExpression += ` and riivo_emailoptin eq true`;
-    } else if (args.emailOptIn === false) {
-        filterExpression += ` and riivo_emailoptin eq false`;
-    }
-
-    if (args.whatsappOptIn === true) {
-        filterExpression += ` and riivo_whatsappoptin eq true`;
-    } else if (args.whatsappOptIn === false) {
-        filterExpression += ` and riivo_whatsappoptin eq false`;
-    }
-
-    if (args.ownerId) {
-        filterExpression += ` and _ownerid_value eq '${args.ownerId}'`;
-    }
-
-    if (args.industryId) {
-        filterExpression += ` and _riivo_industry_lookup_value eq '${args.industryId}'`;
-    }
-
-    // Contactability filter: only count/return leads that can actually be reached
-    // on the chosen channel. This keeps the displayed count, the paginated list,
-    // and Select All in sync with the send path, which drops leads without an
-    // email (email/personalised) or phone (whatsapp) at send time.
-    if (args.channel === "email" || args.channel === "personalised") {
-        filterExpression += ` and ttt_email ne null`;
-    } else if (args.channel === "whatsapp") {
-        filterExpression += ` and ttt_mobilephone ne null`;
-    }
-
-    return filterExpression;
+}, ownerId?: string): LeadFilter {
+    return {
+        status: args.status,
+        search: args.search,
+        province: args.province,
+        emailOptIn: args.emailOptIn,
+        whatsappOptIn: args.whatsappOptIn,
+        ownerId,
+        industryId: args.industryId,
+        // Channel contactability rides as a typed dimension; the Lead Query module
+        // emits the ttt_email / ttt_mobilephone ne null clause so count, list, and
+        // Select All stay in sync with the send path (which drops leads that have
+        // no email on email/personalised, or no phone on whatsapp).
+        channel: args.channel,
+    };
 }
 
 /**
@@ -1413,28 +1010,20 @@ export const fetchLeads = action({
         const { top = 50 } = args;
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
 
-        const filterExpression = buildLeadFilter({ ...args, ownerId });
-
-        const queryParts: string[] = [
-            `$select=${LEAD_SELECT_FIELDS}`,
-            `$filter=${filterExpression}`,
-            `$orderby=new_name asc`,
-        ];
-
-        let endpoint = `new_leads?${queryParts.join("&")}`;
-
-        if (args.skipToken) {
-            endpoint = args.skipToken.replace(/^.*\/api\/data\/v9\.2\//, "");
-        }
-
-        const response = await dynamicsRequest<LeadsResponse>(endpoint, {
-            headers: {
-                Prefer: `odata.include-annotations="*",odata.maxpagesize=${top}`,
-            },
-        });
+        // Fetch a single page via the Lead Query module so the recipient list
+        // shares one canonical filter definition and never assembles page-size
+        // headers or cursor tokens itself.
+        const response = await fetchLeadsPage<DynamicsLead>(
+            toLeadFilter(args, ownerId),
+            {
+                select: LEAD_SELECT_FIELDS,
+                pageSize: top,
+                cursor: args.skipToken,
+            }
+        );
 
         return {
-            contacts: response.value.map(mapLeadToContact),
+            contacts: (response.value ?? []).map(mapLeadToContact),
             nextPage: response["@odata.nextLink"] || null,
             totalCount: response["@odata.count"] || null,
         };
@@ -1460,12 +1049,14 @@ export const getLeadCount = action({
         if (!access.hasAccess) throw new Error("Unauthorized");
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
-        const filterExpression = buildLeadFilter({ ...args, ownerId });
 
-        const endpoint = `new_leads?$filter=${filterExpression}&$count=true&$top=1`;
-        const response = await dynamicsRequest<LeadsResponse>(endpoint);
+        // Count via the Lead Query module so count, select-all, and the recipient
+        // list all derive their audience from one place. The module handles the
+        // Dynamics @odata.count ceiling internally, paginating lead ids to recover
+        // the true total when it is hit.
+        const count = await countLeads(toLeadFilter(args, ownerId));
 
-        return { count: response["@odata.count"] || 0 };
+        return { count };
     },
 });
 
@@ -1488,10 +1079,6 @@ export const fetchAllLeadIds = action({
         if (!access.hasAccess) throw new Error("Unauthorized");
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
-        const filterExpression = buildLeadFilter({ ...args, ownerId });
-
-        const selectFields = "new_leadid,new_name,ttt_email,ttt_mobilephone";
-        const initialEndpoint = `new_leads?$filter=${filterExpression}&$select=${selectFields}&$orderby=new_name asc`;
 
         interface SimpleLead {
             new_leadid: string;
@@ -1500,26 +1087,19 @@ export const fetchAllLeadIds = action({
             ttt_mobilephone: string | null;
         }
 
-        interface SimpleLeadsResponse {
-            value: SimpleLead[];
-            "@odata.nextLink"?: string;
-        }
+        const selectFields = "new_leadid,new_name,ttt_email,ttt_mobilephone";
 
-        let allLeads: SimpleLead[] = [];
-        let nextLink: string | null = initialEndpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 500) {
-            pageCount++;
-            if (nextLink.startsWith("http")) {
-                nextLink = nextLink.replace(/^.*\/api\/data\/v9\.2\//, "");
-            }
-            const response: SimpleLeadsResponse = await dynamicsRequest<SimpleLeadsResponse>(nextLink);
-            if (response.value?.length) {
-                allLeads.push(...response.value);
-            }
-            nextLink = response["@odata.nextLink"] || null;
-        }
+        // Stream every matching lead through the Lead Query module so the
+        // select-all audience matches the recipient list and count, and so
+        // pagination is handled in one place. 500 pages is the safety cap.
+        const allLeads: SimpleLead[] = [];
+        await streamLeads<SimpleLead>(toLeadFilter(args, ownerId), {
+            select: selectFields,
+            maxPages: 500,
+            onPage: (rows) => {
+                allLeads.push(...rows);
+            },
+        });
 
         return allLeads.map((lead) => ({
             id: lead.new_leadid,
@@ -1535,15 +1115,18 @@ export const fetchAllLeadIds = action({
 
 /**
  * Fetch contacts that have at least one open invoice (bad debt).
- * Two-step: query open invoices first, collect contact IDs, then resolve
- * linked contact records with all standard contact-level filters.
- * Same pattern as fetchContactsWithITA34 / fetchContactsByTaxReturn.
+ *
+ * The scan (open invoices with a positive outstanding balance, collapsed to the
+ * highest outstanding per contact) and the id-chunked contact re-query live in the
+ * Specialised Audience module / Contact Query; this handler is the rich-list-shape
+ * mapper. The audience displays the outstanding amount directly — it is the scan
+ * figure — so no Tax Profile join is requested and `extra.scanFigure` carries it.
  */
 export const fetchContactsByBadDebt = action({
     args: {
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -1553,6 +1136,8 @@ export const fetchContactsByBadDebt = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -1560,101 +1145,6 @@ export const fetchContactsByBadDebt = action({
         const effectiveOwnerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
 
-        // Step 1: Fetch all open invoices with outstanding > 0
-        const invoiceFilter = `statecode eq 0 and statuscode eq 958140000 and ttt_outstanding gt 0 and _ttt_customer_value ne null`;
-        const invoiceEndpoint = `new_invoiceses?$select=_ttt_customer_value,ttt_outstanding,new_name,ttt_invoiceid&$filter=${invoiceFilter}`;
-        console.log(`[fetchContactsByBadDebt] Invoice filter: ${invoiceFilter}`);
-        console.log(`[fetchContactsByBadDebt] Invoice endpoint: ${invoiceEndpoint}`);
-
-        interface InvoiceRow {
-            _ttt_customer_value: string;
-            ttt_outstanding: number | null;
-            new_name: string | null;
-            ttt_invoiceid: string | null;
-        }
-
-        let allInvoices: InvoiceRow[] = [];
-        let nextLink: string | null = invoiceEndpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 100) {
-            pageCount++;
-            const endpoint: string = nextLink.startsWith("http")
-                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : nextLink;
-            const response = await dynamicsRequest<{ value: InvoiceRow[]; "@odata.nextLink"?: string }>(endpoint);
-            if (response.value?.length) {
-                allInvoices.push(...response.value);
-            }
-            nextLink = response["@odata.nextLink"] ?? null;
-        }
-
-        console.log(`[fetchContactsByBadDebt] Total invoices fetched: ${allInvoices.length}`);
-        if (allInvoices.length > 0) {
-            console.log(`[fetchContactsByBadDebt] Sample invoice:`, JSON.stringify(allInvoices[0]));
-        }
-
-        // Group by contact — keep highest outstanding per contact
-        const contactMap = new Map<string, InvoiceRow>();
-        for (const row of allInvoices) {
-            const cid = row._ttt_customer_value;
-            if (!cid) continue;
-            const existing = contactMap.get(cid);
-            if (!existing || (row.ttt_outstanding ?? 0) > (existing.ttt_outstanding ?? 0)) {
-                contactMap.set(cid, row);
-            }
-        }
-
-        const contactIds = Array.from(contactMap.keys());
-        console.log(`[fetchContactsByBadDebt] Unique contacts with debt: ${contactIds.length}`);
-        if (contactIds.length > 0) {
-            console.log(`[fetchContactsByBadDebt] Sample contact IDs:`, contactIds.slice(0, 5));
-        }
-        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
-
-        // Step 2: Build additional contact-level filter conditions
-        let extraFilter = "";
-        if (resolvedArgs.filter) {
-            extraFilter += ` and (${resolvedArgs.filter})`;
-        }
-        if (resolvedArgs.search) {
-            const s = resolvedArgs.search.replace(/'/g, "''");
-            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
-        }
-        if (resolvedArgs.clientType) {
-            extraFilter += ` and riivo_clienttypenew eq '${resolvedArgs.clientType}'`;
-        }
-        if (resolvedArgs.entityType !== undefined) {
-            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
-        }
-        if (resolvedArgs.bank !== undefined) {
-            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
-        }
-        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
-            const values = resolvedArgs.sourceCode.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.province) {
-            const prov = resolvedArgs.province.replace(/'/g, "''");
-            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
-        }
-        if (resolvedArgs.geographicLocation !== undefined) {
-            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
-        }
-        if (resolvedArgs.ageMin !== undefined) {
-            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
-        }
-        if (resolvedArgs.ageMax !== undefined) {
-            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
-        }
-        if (resolvedArgs.ownerId) {
-            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
-        }
-        if (resolvedArgs.industryId) {
-            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
-        }
-
-        // Step 3: Fetch contacts in batches of 50 (OData OR filter limit)
         const contacts: Array<{
             id: string;
             fullName: string;
@@ -1674,40 +1164,38 @@ export const fetchContactsByBadDebt = action({
             outstandingAmount: number | null;
         }> = [];
 
-        for (let i = 0; i < contactIds.length; i += 50) {
-            const batch = contactIds.slice(i, i + 50);
-            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
-            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
-            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
+        await resolveSpecialisedAudience<DynamicsContact>({
+            adapter: badDebtScanAdapter(),
+            filter: resolvedArgs,
+            select: CONTACT_SELECT_FIELDS,
+            onChunk: (resolved) => {
+                for (const { contact: c, extra } of resolved) {
+                    contacts.push({
+                        id: c.contactid,
+                        fullName: c.fullname,
+                        firstName: c.firstname,
+                        lastName: c.lastname,
+                        email: c.emailaddress1,
+                        phone: c.mobilephone,
+                        internationalPhone: c.icon_formattedmobilenumber,
+                        isActive: c.statecode === 0,
+                        clientType: c.riivo_clienttypenew,
+                        marketingPreferences: {
+                            tax: c.riivo_taxmarketing,
+                            accounting: c.riivo_accountingmarketing,
+                            insurance: c.riivo_insurancemarketing,
+                        },
+                        whatsappOptIn: c.riivo_whatsappoptinout,
+                        emailNotifications: c.icon_sendemailclientnotifications,
+                        smsNotifications: c.icon_sendclientssmsnotifications,
+                        createdOn: c.createdon,
+                        modifiedOn: c.modifiedon,
+                        outstandingAmount: extra.scanFigure,
+                    });
+                }
+            },
+        });
 
-            for (const c of contactResponse.value) {
-                const invoiceRow = contactMap.get(c.contactid);
-                contacts.push({
-                    id: c.contactid,
-                    fullName: c.fullname,
-                    firstName: c.firstname,
-                    lastName: c.lastname,
-                    email: c.emailaddress1,
-                    phone: c.mobilephone,
-                    internationalPhone: c.icon_formattedmobilenumber,
-                    isActive: c.statecode === 0,
-                    clientType: c.riivo_clienttypenew,
-                    marketingPreferences: {
-                        tax: c.riivo_taxmarketing,
-                        accounting: c.riivo_accountingmarketing,
-                        insurance: c.riivo_insurancemarketing,
-                    },
-                    whatsappOptIn: c.riivo_whatsappoptinout,
-                    emailNotifications: c.icon_sendemailclientnotifications,
-                    smsNotifications: c.icon_sendclientssmsnotifications,
-                    createdOn: c.createdon,
-                    modifiedOn: c.modifiedon,
-                    outstandingAmount: invoiceRow?.ttt_outstanding ?? null,
-                });
-            }
-        }
-
-        console.log(`[fetchContactsByBadDebt] Final contacts returned: ${contacts.length}`);
         return { contacts, totalCount: contacts.length };
     },
 });
@@ -1728,7 +1216,7 @@ export const fetchReferralParticipants = action({
     args: {
         filter: v.optional(v.string()),
         search: v.optional(v.string()),
-        clientType: v.optional(v.string()),
+        clientType: v.optional(v.array(v.number())),
         entityType: v.optional(v.number()),
         bank: v.optional(v.number()),
         sourceCode: v.optional(v.array(v.number())),
@@ -1738,6 +1226,8 @@ export const fetchReferralParticipants = action({
         ageMax: v.optional(v.number()),
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
+        nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
+        nameRangeEnd: v.optional(v.string()),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -1745,83 +1235,11 @@ export const fetchReferralParticipants = action({
         const effectiveOwnerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
         const resolvedArgs = { ...args, ownerId: effectiveOwnerId };
 
-        // Step 1: Collect the distinct referrer IDs from _riivo_referredby_value
-        // across every contact that has the field set.
-        const referrerFilter = `_riivo_referredby_value ne null`;
-        const referrerEndpoint = `contacts?$select=_riivo_referredby_value&$filter=${referrerFilter}`;
-        console.log(`[fetchReferralParticipants] Referrer scan endpoint: ${referrerEndpoint}`);
-
-        interface ReferrerRow {
-            _riivo_referredby_value: string | null;
-        }
-
-        const referrerIds = new Set<string>();
-        let nextLink: string | null = referrerEndpoint;
-        let pageCount = 0;
-
-        while (nextLink && pageCount < 200) {
-            pageCount++;
-            const endpoint: string = nextLink.startsWith("http")
-                ? nextLink.replace(/^.*\/api\/data\/v9\.2\//, "")
-                : nextLink;
-            const response = await dynamicsRequest<{ value: ReferrerRow[]; "@odata.nextLink"?: string }>(endpoint);
-            if (response.value?.length) {
-                for (const row of response.value) {
-                    if (row._riivo_referredby_value) referrerIds.add(row._riivo_referredby_value);
-                }
-            }
-            nextLink = response["@odata.nextLink"] ?? null;
-        }
-
-        const contactIds = Array.from(referrerIds);
-        console.log(`[fetchReferralParticipants] Distinct referrers found: ${contactIds.length}`);
-        if (contactIds.length === 0) return { contacts: [], totalCount: 0 };
-
-        // Step 2: Build additional contact-level filter conditions (mirrors fetchContactsByBadDebt)
-        let extraFilter = "";
-        if (resolvedArgs.filter) {
-            extraFilter += ` and (${resolvedArgs.filter})`;
-        }
-        if (resolvedArgs.search) {
-            const s = resolvedArgs.search.replace(/'/g, "''");
-            extraFilter += ` and (contains(fullname,'${s}') or contains(emailaddress1,'${s}'))`;
-        }
-        if (resolvedArgs.clientType) {
-            extraFilter += ` and riivo_clienttypenew eq '${resolvedArgs.clientType}'`;
-        }
-        if (resolvedArgs.entityType !== undefined) {
-            extraFilter += ` and riivo_clienttypeindbus eq ${resolvedArgs.entityType}`;
-        }
-        if (resolvedArgs.bank !== undefined) {
-            extraFilter += ` and ttt_bank eq ${resolvedArgs.bank}`;
-        }
-        if (resolvedArgs.sourceCode && resolvedArgs.sourceCode.length > 0) {
-            const values = resolvedArgs.sourceCode.map(String).join("','");
-            extraFilter += ` and Microsoft.Dynamics.CRM.ContainValues(PropertyName='riivo_sourcecode',PropertyValues=['${values}'])`;
-        }
-        if (resolvedArgs.province) {
-            const prov = resolvedArgs.province.replace(/'/g, "''");
-            extraFilter += ` and address1_stateorprovince eq '${prov}'`;
-        }
-        if (resolvedArgs.geographicLocation !== undefined) {
-            extraFilter += ` and riivo_geographiclocation eq ${resolvedArgs.geographicLocation}`;
-        }
-        if (resolvedArgs.ageMin !== undefined) {
-            extraFilter += ` and riivo_age ge ${resolvedArgs.ageMin}`;
-        }
-        if (resolvedArgs.ageMax !== undefined) {
-            extraFilter += ` and riivo_age le ${resolvedArgs.ageMax}`;
-        }
-        if (resolvedArgs.ownerId) {
-            extraFilter += ` and _ownerid_value eq '${resolvedArgs.ownerId}'`;
-        }
-        if (resolvedArgs.industryId) {
-            extraFilter += ` and _riivo_industryid_value eq '${resolvedArgs.industryId}'`;
-        }
-
-        // Step 3: Fetch the referrer contacts in batches of 50 (OData OR filter limit).
-        // statecode eq 0 + the channel filter (passed in via `filter`) mean inactive /
-        // non-contactable referrers are skipped silently.
+        // The referrer scan (distinct _riivo_referredby_value set) and the id-chunked
+        // contact re-query live in the Specialised Audience module / Contact Query;
+        // this handler is the rich-list-shape mapper. The re-query re-applies
+        // statecode eq 0 + the channel filter, so inactive / non-contactable referrers
+        // fall away silently. This audience has no per-contact figure to display.
         const contacts: Array<{
             id: string;
             fullName: string;
@@ -1840,38 +1258,37 @@ export const fetchReferralParticipants = action({
             modifiedOn: string;
         }> = [];
 
-        for (let i = 0; i < contactIds.length; i += 50) {
-            const batch = contactIds.slice(i, i + 50);
-            const idFilter = batch.map((id) => `contactid eq '${id}'`).join(" or ");
-            const contactEndpoint = `contacts?$select=${CONTACT_SELECT_FIELDS}&$filter=statecode eq 0 and (${idFilter})${extraFilter}&$orderby=fullname asc`;
-            const contactResponse = await dynamicsRequest<{ value: DynamicsContact[] }>(contactEndpoint);
+        await resolveSpecialisedAudience<DynamicsContact>({
+            adapter: referralScanAdapter(),
+            filter: resolvedArgs,
+            select: CONTACT_SELECT_FIELDS,
+            onChunk: (resolved) => {
+                for (const { contact: c } of resolved) {
+                    contacts.push({
+                        id: c.contactid,
+                        fullName: c.fullname,
+                        firstName: c.firstname,
+                        lastName: c.lastname,
+                        email: c.emailaddress1,
+                        phone: c.mobilephone,
+                        internationalPhone: c.icon_formattedmobilenumber,
+                        isActive: c.statecode === 0,
+                        clientType: c.riivo_clienttypenew,
+                        marketingPreferences: {
+                            tax: c.riivo_taxmarketing,
+                            accounting: c.riivo_accountingmarketing,
+                            insurance: c.riivo_insurancemarketing,
+                        },
+                        whatsappOptIn: c.riivo_whatsappoptinout,
+                        emailNotifications: c.icon_sendemailclientnotifications,
+                        smsNotifications: c.icon_sendclientssmsnotifications,
+                        createdOn: c.createdon,
+                        modifiedOn: c.modifiedon,
+                    });
+                }
+            },
+        });
 
-            for (const c of contactResponse.value) {
-                contacts.push({
-                    id: c.contactid,
-                    fullName: c.fullname,
-                    firstName: c.firstname,
-                    lastName: c.lastname,
-                    email: c.emailaddress1,
-                    phone: c.mobilephone,
-                    internationalPhone: c.icon_formattedmobilenumber,
-                    isActive: c.statecode === 0,
-                    clientType: c.riivo_clienttypenew,
-                    marketingPreferences: {
-                        tax: c.riivo_taxmarketing,
-                        accounting: c.riivo_accountingmarketing,
-                        insurance: c.riivo_insurancemarketing,
-                    },
-                    whatsappOptIn: c.riivo_whatsappoptinout,
-                    emailNotifications: c.icon_sendemailclientnotifications,
-                    smsNotifications: c.icon_sendclientssmsnotifications,
-                    createdOn: c.createdon,
-                    modifiedOn: c.modifiedon,
-                });
-            }
-        }
-
-        console.log(`[fetchReferralParticipants] Final referrer contacts returned: ${contacts.length}`);
         return { contacts, totalCount: contacts.length };
     },
 });

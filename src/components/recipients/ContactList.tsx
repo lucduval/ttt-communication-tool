@@ -154,7 +154,7 @@ export function ContactList({
                         <th className="px-4 py-4">Type</th>
                         {showITA34Columns && (
                             <>
-                                <th className="px-4 py-4">Income</th>
+                                <th className="px-4 py-4">Taxable Income</th>
                                 <th className="px-4 py-4">Ret. Fund</th>
                             </>
                         )}

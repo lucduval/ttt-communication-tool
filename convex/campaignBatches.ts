@@ -3,6 +3,7 @@ import { internal, api } from "./_generated/api";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { checkAccessHelper } from "./users";
+import { batchProcessorFor } from "./lib/channelDispatch";
 
 // Constants for batch sizing.
 // EMAIL_BATCH_SIZE is the # of recipients per campaign batch. With Graph $batch
@@ -559,19 +560,9 @@ export const recoverStuckBatches = internalMutation({
                 continue;
             }
 
-            if (campaign.channel === "personalised") {
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
-                    campaignId,
-                });
-            } else if (campaign.channel === "email") {
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
-                    campaignId,
-                });
-            } else {
-                await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
-                    campaignId,
-                });
-            }
+            await ctx.scheduler.runAfter(0, batchProcessorFor(campaign.channel), {
+                campaignId,
+            });
         }
 
         if (recoveredCampaignIds.size > 0) {

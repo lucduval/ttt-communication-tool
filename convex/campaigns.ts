@@ -2,6 +2,7 @@ import { query, mutation, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { checkAccessHelper } from "./users";
+import { batchProcessorFor } from "./lib/channelDispatch";
 
 export const list = query({
     args: {},
@@ -277,19 +278,9 @@ export const resumeCampaign = mutation({
         // then re-kick the channel-appropriate processor chain.
         await ctx.db.patch(args.campaignId, { status: "processing" });
 
-        if (campaign.channel === "email") {
-            await ctx.scheduler.runAfter(0, internal.campaignQueue.processEmailBatch, {
-                campaignId: args.campaignId,
-            });
-        } else if (campaign.channel === "personalised") {
-            await ctx.scheduler.runAfter(0, internal.campaignQueue.processPersonalisedBatch, {
-                campaignId: args.campaignId,
-            });
-        } else {
-            await ctx.scheduler.runAfter(0, internal.campaignQueue.processWhatsAppBatch, {
-                campaignId: args.campaignId,
-            });
-        }
+        await ctx.scheduler.runAfter(0, batchProcessorFor(campaign.channel), {
+            campaignId: args.campaignId,
+        });
 
         await ctx.runMutation(internal.notifications.create, {
             userId: campaign.createdBy,
