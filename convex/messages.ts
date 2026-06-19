@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { internalMutation, internalQuery, query } from "./_generated/server";
+import { tallyCampaign } from "./lib/campaignTally";
 
 // Statuses that can be filtered server-side via the by_campaign_status index.
 // "opened" and "clicked" are engagement states, not message statuses, so they
@@ -49,30 +50,17 @@ export const getCampaignStats = query({
         const campaign = await ctx.db.get(args.campaignId);
         if (!campaign) return null;
 
-        // Count each status using the by_campaign_status compound index
-        const countStatus = async (status: string) => {
-            const rows = await ctx.db
-                .query("messages")
-                .withIndex("by_campaign_status", (q) =>
-                    q.eq("campaignId", args.campaignId).eq("status", status)
-                )
-                .collect();
-            return rows.length;
-        };
-
-        const [sent, delivered, failed, pending] = await Promise.all([
-            countStatus("sent"),
-            countStatus("delivered"),
-            countStatus("failed"),
-            countStatus("pending"),
-        ]);
+        // Recount from the messages table (source of truth) and apply the
+        // Campaign Tally — the single seam that owns the count definitions, so
+        // detail and (later) the list projection cannot diverge.
+        const messages = await ctx.db
+            .query("messages")
+            .withIndex("by_campaign", (q) => q.eq("campaignId", args.campaignId))
+            .collect();
 
         return {
             total: campaign.totalRecipients,
-            sent: sent + delivered, // "Sent" = successfully sent (includes delivered)
-            delivered,
-            failed,
-            pending,
+            ...tallyCampaign(messages.map((m) => m.status)),
         };
     },
 });

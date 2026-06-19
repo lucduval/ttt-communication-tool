@@ -27,6 +27,8 @@ import type * as debug_email from "../debug_email.js";
 import type * as emailTemplates from "../emailTemplates.js";
 import type * as files from "../files.js";
 import type * as http from "../http.js";
+import type * as lib_batchLease from "../lib/batchLease.js";
+import type * as lib_campaignTally from "../lib/campaignTally.js";
 import type * as lib_channelDispatch from "../lib/channelDispatch.js";
 import type * as lib_channelSend from "../lib/channelSend.js";
 import type * as lib_claude from "../lib/claude.js";
@@ -84,6 +86,8 @@ declare const fullApi: ApiFromModules<{
   emailTemplates: typeof emailTemplates;
   files: typeof files;
   http: typeof http;
+  "lib/batchLease": typeof lib_batchLease;
+  "lib/campaignTally": typeof lib_campaignTally;
   "lib/channelDispatch": typeof lib_channelDispatch;
   "lib/channelSend": typeof lib_channelSend;
   "lib/claude": typeof lib_claude;
