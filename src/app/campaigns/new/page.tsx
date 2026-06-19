@@ -23,7 +23,7 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, type Contact } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, type Contact } from "@/components/recipients";
 import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
 import {
     getConvexSiteUrl,
@@ -728,15 +728,22 @@ export default function NewCampaignPage() {
     }, [currentStep, audience]);
 
     // Update selected contacts when moving forward from recipients.
-    // In client-side filter modes (bad debt, ITA34, tax return) the full matching set
-    // lives in allFilteredContactsRef while `contacts` only holds the current page
-    // (LOAD_MORE_SIZE). Use the full ref when available so Select All sends to everyone.
+    // A single record source can be short of the full selection: in Leads
+    // pagination mode `allFilteredContactsRef` only holds the first page, while
+    // ids may have been hand-picked on later pages (kept in the selection value)
+    // or be on the current `contacts` page. Materialise the explicit selection
+    // from the prioritised union of every available source so no selected id is
+    // dropped just because one source was short.
     useEffect(() => {
         if ((currentStep === "compose" || currentStep === "preview") && !isSelectAllActive) {
-            const source = allFilteredContactsRef.current.length > 0
-                ? allFilteredContactsRef.current
-                : contacts;
-            recipientSelection.setExplicit(source.filter((c) => selectedIds.has(c.id)));
+            recipientSelection.setExplicit(
+                materialiseExplicit(
+                    selectedIds,
+                    recipientSelection.contacts,
+                    contacts,
+                    allFilteredContactsRef.current,
+                ),
+            );
         }
     }, [currentStep, contacts, selectedIds, isSelectAllActive, allFilteredContactsRef]);
 

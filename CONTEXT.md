@@ -37,7 +37,7 @@ The medium a campaign sends through: `email`, `whatsapp`, or `personalised`. Sto
 _Avoid_: medium, type, mode.
 
 **Channel Send**:
-The deep module that drives sending a queued campaign batch. A single driver owns the batch lifecycle (claim, flush, complete, reschedule, fail) and selects a Channel Sender by channel.
+The deep module that drives sending a queued campaign batch. A single driver owns the batch lifecycle (claim, flush, complete, reschedule, fail), holds the Batch Lease for the claimed batch (beating `heartbeatAt` from its `emit` path), and selects a Channel Sender by channel.
 _Avoid_: send service, dispatcher.
 
 **Channel Sender**:
@@ -47,3 +47,7 @@ _Avoid_: sender service, handler, provider.
 **Batch**:
 A fixed-size slice of a campaign's recipients processed by one worker run (email 100, whatsapp 1000, personalised 50). The unit of the Channel Send lifecycle.
 _Avoid_: chunk, page (page belongs to Contact Query pagination).
+
+**Batch Lease**:
+The deep module that owns campaign *liveness* — the invariant "exactly one live worker per active campaign, and the chain never silently dies." A worker holds a lease on the batch it claims by bumping the batch's `heartbeatAt` as it streams results (the Channel Send driver writes the beat from its `emit` path, throttled to at most once per 30s, so the cadence is bounded across channels). A batch is *dead* when it is still `processing` but its heartbeat is older than the lease (~3 min); a heartbeat-aware sweep (the recover-stuck-batches cron, ~1 min) resets dead batches to `pending` and re-kicks one worker. Death detection keys off last-progress (`heartbeatAt`), not claim time (`startedAt`), so a slow-but-alive worker is never falsely revived — which is what keeps a revived worker from sending in parallel and breaching the Graph IncomingBytes (150 MB / 5 min per mailbox) or WhatsApp rate limits. The lease predicate and revive step are the test surface; an injected clock replaces "wait for a production stall."
+_Avoid_: stuck-batch recovery, watchdog, timeout guard.
