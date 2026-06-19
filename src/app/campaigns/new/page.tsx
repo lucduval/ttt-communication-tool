@@ -341,6 +341,8 @@ export default function NewCampaignPage() {
                 ownerId: f.ownerId as string | undefined,
                 industryId: f.industryId as string | undefined,
                 marketingType: f.marketingType as "tax" | "accounting" | "insurance" | undefined,
+                whatsappOptIn: f.whatsappOptIn as boolean | undefined,
+                emailEnabled: f.emailEnabled as boolean | undefined,
                 nameRangeStart: f.nameRangeStart as string | undefined,
                 nameRangeEnd: f.nameRangeEnd as string | undefined,
             });
@@ -513,6 +515,8 @@ export default function NewCampaignPage() {
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
                         marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
+                        whatsappOptIn: filters.whatsappOptIn ?? undefined,
+                        emailEnabled: filters.emailEnabled ?? undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
@@ -545,6 +549,8 @@ export default function NewCampaignPage() {
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
                         marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
+                        whatsappOptIn: filters.whatsappOptIn ?? undefined,
+                        emailEnabled: filters.emailEnabled ?? undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
@@ -579,6 +585,8 @@ export default function NewCampaignPage() {
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
                         marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
+                        whatsappOptIn: filters.whatsappOptIn ?? undefined,
+                        emailEnabled: filters.emailEnabled ?? undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
@@ -619,6 +627,8 @@ export default function NewCampaignPage() {
                         retirementFundMin: filters.retirementFundMin ?? undefined,
                         retirementFundMax: filters.retirementFundMax ?? undefined,
                         marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
+                        whatsappOptIn: filters.whatsappOptIn ?? undefined,
+                        emailEnabled: filters.emailEnabled ?? undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     });
@@ -657,6 +667,8 @@ export default function NewCampaignPage() {
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
                         marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
+                        whatsappOptIn: filters.whatsappOptIn ?? undefined,
+                        emailEnabled: filters.emailEnabled ?? undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     }),
@@ -675,6 +687,8 @@ export default function NewCampaignPage() {
                         ownerId: filters.ownerId || undefined,
                         industryId: filters.industryId || undefined,
                         marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
+                        whatsappOptIn: filters.whatsappOptIn ?? undefined,
+                        emailEnabled: filters.emailEnabled ?? undefined,
                         nameRangeStart: filters.nameRangeStart || undefined,
                         nameRangeEnd: filters.nameRangeEnd || undefined,
                     }) : Promise.resolve(null),
@@ -1126,6 +1140,8 @@ export default function NewCampaignPage() {
                     ownerId: filters.ownerId || undefined,
                     industryId: filters.industryId || undefined,
                     marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
+                    whatsappOptIn: filters.whatsappOptIn ?? undefined,
+                    emailEnabled: filters.emailEnabled ?? undefined,
                     nameRangeStart: filters.nameRangeStart || undefined,
                     nameRangeEnd: filters.nameRangeEnd || undefined,
                 });
@@ -1158,6 +1174,9 @@ export default function NewCampaignPage() {
                     retirementFundMax: filters.retirementFundMax ?? undefined,
                     // Marketing-consent type (typed dimension; must match backend toContactFilter)
                     marketingType: filters.marketingType !== "all" ? filters.marketingType : undefined,
+                    // Opt-in flags (typed tri-state dimensions; must match backend toContactFilter)
+                    whatsappOptIn: filters.whatsappOptIn ?? undefined,
+                    emailEnabled: filters.emailEnabled ?? undefined,
                     // Alphabetical range for batch sending
                     nameRangeStart: filters.nameRangeStart ?? undefined,
                     nameRangeEnd: filters.nameRangeEnd ?? undefined,

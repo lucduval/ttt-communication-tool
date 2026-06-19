@@ -166,6 +166,38 @@ describe("buildContactFilter", () => {
         expect(buildContactFilter({ marketingType: undefined })).toBe("statecode eq 0");
     });
 
+    test("WhatsApp opt-in true emits the whatsapp-optin true equality clause", () => {
+        expect(buildContactFilter({ whatsappOptIn: true })).toBe(
+            "statecode eq 0 and riivo_whatsappoptinout eq true"
+        );
+    });
+
+    test("WhatsApp opt-in false emits the whatsapp-optin false equality clause", () => {
+        expect(buildContactFilter({ whatsappOptIn: false })).toBe(
+            "statecode eq 0 and riivo_whatsappoptinout eq false"
+        );
+    });
+
+    test("an unset WhatsApp opt-in contributes no clause", () => {
+        expect(buildContactFilter({ whatsappOptIn: undefined })).toBe("statecode eq 0");
+    });
+
+    test("email-enabled true emits the send-email-notifications true equality clause", () => {
+        expect(buildContactFilter({ emailEnabled: true })).toBe(
+            "statecode eq 0 and icon_sendemailclientnotifications eq true"
+        );
+    });
+
+    test("email-enabled false emits the send-email-notifications false equality clause", () => {
+        expect(buildContactFilter({ emailEnabled: false })).toBe(
+            "statecode eq 0 and icon_sendemailclientnotifications eq false"
+        );
+    });
+
+    test("an unset email-enabled contributes no clause", () => {
+        expect(buildContactFilter({ emailEnabled: undefined })).toBe("statecode eq 0");
+    });
+
     test("characterizes the full clause ordering for a representative spread", () => {
         const filter: ContactFilter = {
             filter: "riivo_taxmarketing eq true",
@@ -272,6 +304,8 @@ describe("buildContactFilterClauses", () => {
             ownerId: "owner-1",
             industryId: "industry-1",
             marketingType: "tax",
+            whatsappOptIn: true,
+            emailEnabled: false,
             nameRangeStart: "A",
             nameRangeEnd: "F",
         };
@@ -289,6 +323,8 @@ describe("buildContactFilterClauses", () => {
                 " and _ownerid_value eq 'owner-1'" +
                 " and _riivo_industryid_value eq 'industry-1'" +
                 " and riivo_taxmarketing eq true" +
+                " and riivo_whatsappoptinout eq true" +
+                " and icon_sendemailclientnotifications eq false" +
                 " and fullname ge 'A'" +
                 " and fullname lt 'G'"
         );

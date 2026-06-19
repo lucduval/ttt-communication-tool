@@ -1050,17 +1050,12 @@ export function buildODataFilter(filters: FilterState): string | undefined {
     // owned by Contact Query, which emits the riivo_*marketing eq true clause once
     // on both the count and send paths. The client emits no marketing OData.
 
-    if (filters.whatsappOptIn !== null) {
-        conditions.push(
-            `riivo_whatsappoptinout eq ${filters.whatsappOptIn ? "true" : "false"}`
-        );
-    }
-
-    if (filters.emailEnabled !== null) {
-        conditions.push(
-            `icon_sendemailclientnotifications eq ${filters.emailEnabled ? "true" : "false"}`
-        );
-    }
+    // The opt-in flags are NOT built here. They are typed tri-state dimensions
+    // (whatsappOptIn / emailEnabled) owned by Contact Query, which emits the
+    // riivo_whatsappoptinout / icon_sendemailclientnotifications eq true|false
+    // clause once on both the count and send paths. The client emits no opt-in
+    // OData. (Channel eligibility for WhatsApp is a separate concern — see
+    // getChannelFilter in campaigns/new — not the user-facing opt-in dimension.)
 
     // The alphabetical name range is NOT built here. It is a typed dimension
     // (nameRangeStart / nameRangeEnd) owned by Contact Query, which builds the

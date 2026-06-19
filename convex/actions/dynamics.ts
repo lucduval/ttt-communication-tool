@@ -118,6 +118,8 @@ export const fetchContacts = action({
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()), // New industry filter
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
+        whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
+        emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -141,6 +143,8 @@ export const fetchContacts = action({
             ageMax,
             industryId,
             marketingType,
+            whatsappOptIn,
+            emailEnabled,
             nameRangeStart,
             nameRangeEnd
         } = args;
@@ -165,6 +169,8 @@ export const fetchContacts = action({
                 ownerId,
                 industryId,
                 marketingType,
+                whatsappOptIn,
+                emailEnabled,
                 nameRangeStart,
                 nameRangeEnd,
             },
@@ -234,6 +240,8 @@ export const getContactCount = action({
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
+        whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
+        emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -253,6 +261,8 @@ export const getContactCount = action({
             ageMax,
             industryId,
             marketingType,
+            whatsappOptIn,
+            emailEnabled,
             nameRangeStart,
             nameRangeEnd
         } = args;
@@ -277,6 +287,8 @@ export const getContactCount = action({
             ownerId,
             industryId,
             marketingType,
+            whatsappOptIn,
+            emailEnabled,
             nameRangeStart,
             nameRangeEnd,
         });
@@ -305,6 +317,8 @@ export const fetchAllContactIds = action({
         ageMax: v.optional(v.number()),
         industryId: v.optional(v.string()),
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
+        whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
+        emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -324,6 +338,8 @@ export const fetchAllContactIds = action({
             ageMax,
             industryId,
             marketingType,
+            whatsappOptIn,
+            emailEnabled,
             nameRangeStart,
             nameRangeEnd
         } = args;
@@ -360,6 +376,8 @@ export const fetchAllContactIds = action({
                 ownerId,
                 industryId,
                 marketingType,
+                whatsappOptIn,
+                emailEnabled,
                 nameRangeStart,
                 nameRangeEnd,
             },
@@ -718,6 +736,8 @@ export const fetchContactsWithITA34 = action({
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
+        whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
+        emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -826,6 +846,8 @@ export const fetchContactsByTaxReturn = action({
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
+        whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
+        emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -1148,6 +1170,8 @@ export const fetchContactsByBadDebt = action({
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
+        whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
+        emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },
@@ -1239,6 +1263,8 @@ export const fetchReferralParticipants = action({
         ownerId: v.optional(v.string()),
         industryId: v.optional(v.string()),
         marketingType: v.optional(v.union(v.literal("tax"), v.literal("accounting"), v.literal("insurance"))), // Marketing-consent type (typed dimension)
+        whatsappOptIn: v.optional(v.boolean()), // WhatsApp opt-in (typed tri-state dimension)
+        emailEnabled: v.optional(v.boolean()), // Email-enabled (typed tri-state dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
     },

@@ -55,6 +55,19 @@ export interface ContactFilter {
      * value, never the field name.
      */
     marketingType?: "tax" | "accounting" | "insurance";
+    /**
+     * WhatsApp opt-in flag (riivo_whatsappoptinout), tri-state: `true` / `false`
+     * emit the matching equality; `undefined` (the UI "all" case) emits no clause.
+     * The field name lives only inside Contact Query — callers select the typed
+     * boolean, never the field name.
+     */
+    whatsappOptIn?: boolean;
+    /**
+     * Email-enabled flag (icon_sendemailclientnotifications), tri-state: `true` /
+     * `false` emit the matching equality; `undefined` (the UI "all" case) emits no
+     * clause. The field name lives only inside Contact Query.
+     */
+    emailEnabled?: boolean;
     /** Alphabetical name-range lower bound (fullname ge). Used for batch sending. */
     nameRangeStart?: string;
     /**
@@ -194,6 +207,16 @@ export function buildContactFilterClauses(filter: ContactFilter): string {
 
     if (filter.marketingType) {
         clauses += ` and ${MARKETING_TYPE_FIELD[filter.marketingType]} eq true`;
+    }
+
+    // Opt-in flags are tri-state: gate on `!== undefined` so an explicit `false`
+    // still emits its clause (a plain truthiness check would drop it).
+    if (filter.whatsappOptIn !== undefined) {
+        clauses += ` and riivo_whatsappoptinout eq ${filter.whatsappOptIn}`;
+    }
+
+    if (filter.emailEnabled !== undefined) {
+        clauses += ` and icon_sendemailclientnotifications eq ${filter.emailEnabled}`;
     }
 
     if (filter.nameRangeStart) {

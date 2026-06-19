@@ -36,6 +36,10 @@ export interface CampaignFilters {
     // Marketing-consent type (typed dimension owned by Contact Query). "all" has
     // no typed representation — it is simply absent.
     marketingType?: "tax" | "accounting" | "insurance";
+    // Opt-in flags (typed tri-state dimensions owned by Contact Query). "unset"
+    // (UI "all") has no typed representation — it is simply absent.
+    whatsappOptIn?: boolean;
+    emailEnabled?: boolean;
     // Tax return filters (filters on new_invoiceses entity)
     taxReturnMin?: number;  // minimum ttt_sarsreimbursement
     taxReturnYear?: number; // filter invoices by year (createdon), defaults to previous year
@@ -84,6 +88,8 @@ function toContactFilter(filters: CampaignFilters): ContactFilter {
         ownerId: filters.ownerId,
         industryId: filters.industryId,
         marketingType: filters.marketingType,
+        whatsappOptIn: filters.whatsappOptIn,
+        emailEnabled: filters.emailEnabled,
         nameRangeStart: filters.nameRangeStart,
         nameRangeEnd: filters.nameRangeEnd,
     };
