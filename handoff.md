@@ -1,93 +1,92 @@
 # Handoff — RALPH iteration
 
-## Just completed: #46 — Recompute funnel + rewired counter writers
+## Just completed: #50 — "Upload list" audience mode (happy-path CSV)
 
-**Issue #46 closed.** Branch: `main`. Commit `0be0c34`.
+**Issue #50 closed.** Branch: `main`.
 
-Second slice of PRD #44 (Campaign Tally; chain #45 → #46 → #47). Made the
-denormalised list projection (`sentCount` / `deliveredCount` / `failedCount` on
-the campaign document) a **recomputed cache** of the Campaign Tally — never an
-additively-accumulated counter. Kills the drift class where crash →
-`markBatchFailed` → recover → re-run → `markBatchComplete` inflated the counters.
+Second slice of PRD #48. Adds **Upload list** as a fourth audience mode on the
+campaign Recipients step. The user drops a CSV with a `contactid` column; the
+app parses it, validates + dedupes the GUIDs client-side, and activates the same
+**filtered** Recipient Selection carrying `{ contactIds }` that #49 wired through
+the send path — so an uploaded-list campaign is indistinguishable from any other
+filtered campaign downstream.
 
-Changes by layer:
-- **`convex/campaignBatches.ts`** (new helper, the seam): plain async
-  `recomputeCampaignStats(ctx, campaignId)` — mirrors `recoverStuckBatchesImpl`
-  (faked-`ctx`-testable). Reads the campaign's messages via the `by_campaign_status`
-  index (iterating the 4 statuses), folds with `tallyCampaign`, and **sets** the
-  three counters. Patches by id only — deliberately does **not** re-read the
-  multi-MB campaign doc (preserves the bounce read-budget guarantee).
-- **`markBatchComplete` / `markBatchFailed`** (`campaignBatches.ts`): the additive
-  `+=` patches are gone, replaced by `recomputeCampaignStats`. `markBatchFailed` no
-  longer charges the whole batch as failed — recipients already flushed `"sent"`
-  stay sent; the rest are restored by the recovery re-run.
-- **`convex/bounces.ts::recordBounces`**: extracted a testable
-  `recordBouncesImpl(ctx, bounces)`. Per-message `"failed"` patches land first, then
-  **one recompute per affected campaign**. The `failedDelta` / `deliveredDelta`
-  arithmetic is gone — a `delivered`→`failed` flip lowers `delivered` / raises
-  `failed` for free via the tally.
-- **`convex/campaigns.ts`**: removed the dead additive `updateStats` mutation (no
-  callers, existed only to add).
-- **Recovery sweep** (`recoverStuckBatchesImpl`): already wrote no counts (only
-  flips dead batches to `pending`) — left as-is, now the only correct behaviour.
-- **`convex/__tests__/recomputeCampaignStats.test.ts`** (new, 6 tests): counts ==
-  tally of seeded statuses; recompute overwrites (not increments); replay & recover
-  + re-run leave counts unchanged; a bounce lowers `delivered` / raises `failed`;
-  bouncing an already-failed recipient is idempotent.
+Changes (all scoped to `src/components/recipients/` + the new-campaign page):
+- **`extractContactIds.ts`** (new, pure): rows → `{ status, idColumn, contactIds,
+  skippedRows, candidates }`. **Tier-1 detection only** (explicit `contactid`
+  header, case-insensitive/trimmed). GUID-validated, brace/case-normalised,
+  deduped in first-seen order; blank/malformed rows counted as `skippedRows`;
+  duplicates collapsed (not skipped). Statuses: `ok` / `empty` / `no-column` /
+  `ambiguous` (two `contactid` cols → deferred to #54).
+- **`readContactIds.ts`** (new): pure `parseCsv` (quotes, CRLF, BOM, blank-line
+  drop) + thin impure `readContactIdsFromFile(file)` wrapper.
+- **`UploadListPanel.tsx`** (new): dropzone + parse + success/error status. Shows
+  valid-id count, skipped-row count, and the "final total confirmed at send"
+  message; clear error when no ids are detectable.
+- **`extractContactIds.test.ts`** (17) + **`readContactIds.test.ts`** (7): new,
+  table-driven.
+- **`index.ts`**: re-exports the above.
+- **`src/app/campaigns/new/page.tsx`**: 4th audience button; renders the panel in
+  place of the filter panel; `loadContacts` early-returns for upload (no CRM
+  fetch); a successful parse calls `activateFiltered({ contactIds }, count)`;
+  audience-change effect clears the uploaded selection; ContactList/footer hidden
+  in upload mode. **Guard added in `fetchSampleContacts`**: a `{ contactIds }`
+  filter returns an empty sample (don't fetch arbitrary unfiltered contacts) —
+  the real resolved preview is #53.
 
-**Verification:** `npm run typecheck` clean; `npm run test` = 1474 passed (6 new;
-worktree-duplicated copies inflate the count). `npx convex codegen` produced no
-generated-file diff (removed mutation only).
+**Verification:** `npm run typecheck` clean; `npm run test` = 326 passed (24 new).
 
-## Next up: #47 — One-time backfill migration to correct drifted campaigns
+## Next up: #51 — XLSX upload support
 
-**#47 is unblocked** (#46 done). Last slice of PRD #44. A one-time migration that
-recomputes **every existing** campaign's counters from the Campaign Tally, so
-historically drifted campaigns (e.g. list showing `968 Delivered / 3301 Failed`
-against a true `4667 sent / 0 delivered / 2 failed`) are corrected on deploy —
-not just campaigns sent after #46.
+**#51 is now unblocked** (blocked only by #50). Smallest remaining slice and a
+direct extension of the reader seam just built.
 
-Acceptance (see `gh issue view 47` for full text):
-- Migration lives in **`convex/migrations/`** and follows the
-  **`migrateCampaignContent`** pattern (`convex/migrations/migrateCampaignContent.ts`).
-- Iterates **all** campaigns and **sets** each one's counters to the tally values
-  by calling the same `recomputeCampaignStats`.
-- Test: a drifted campaign (counters disagreeing with its messages) is corrected to
-  the tally values after the migration runs.
+What to build:
+- Add **SheetJS (`xlsx`)** as a dependency.
+- Extend the **impure** reader (`readContactIds.ts`) so an `.xlsx` file is parsed
+  into the same `string[][]` rows that feed `extractContactIds`. Branch on file
+  type inside `readContactIdsFromFile` (or add a sibling) — CSV path stays as is.
+- Make the dropzone accept `.xlsx` (update the `accept` attr in
+  `UploadListPanel.tsx`).
+- **Reuse everything else unchanged**: `extractContactIds`, dedup/skip handling,
+  and the `activateFiltered({ contactIds })` wiring. This slice only teaches the
+  reader to ingest XLSX bytes.
+
+See `gh issue view 51` for the full acceptance list.
 
 ### Pointers (reuse, don't reinvent)
-- **`convex/campaignBatches.ts::recomputeCampaignStats(ctx, campaignId)`** is the
-  funnel #46 built — the migration just calls it per campaign. Already a plain
-  exported async fn, so it works straight from a migration `internalMutation`.
-- **`convex/migrations/migrateCampaignContent.ts::migrateBatch`** is the pattern to
-  mirror: an `internalMutation` with `{ batchSize?, skip? }` args that processes a
-  bounded slice per invocation (`.query("campaigns").order("desc").take(skip + batchSize)`)
-  and returns `{ migrated, done }` so it can be called repeatedly until `done: true`.
-  Stay within Convex mutation limits — keep `batchSize` small. Idempotent by
-  construction (recompute SETS), so re-running is safe.
+- The pure extraction core (`extractContactIds`) is format-agnostic — it takes
+  rows, not a file. XLSX just needs `worksheet → string[][]` (e.g.
+  `XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: "" })`), then
+  feed that to `extractContactIds`.
+- Impurity stays confined to `readContactIdsFromFile`; keep any new parsing
+  helpers pure + testable where practical (note: `xlsx` reads from an ArrayBuffer,
+  so the binary read is the only impure bit).
+- Dropzone lives in `src/components/recipients/UploadListPanel.tsx`.
 
-### Tests / prior art
-- Fake-`ctx` harness: **`convex/__tests__/recomputeCampaignStats.test.ts`**
-  (this slice) and **`convex/__tests__/recoverStuckBatches.test.ts`** both model a
-  Convex `ctx` over in-memory arrays — mirror for the migration test. Seed a campaign
-  whose stored counters disagree with its messages, run the migration, assert the
-  counters now equal `tallyCampaign(messages.map(m => m.status))`.
+## Remaining PRD #48 slices (dependency order)
+- #51 — XLSX upload  ← **next, unblocked**
+- #52 — Smart id-column detection, tiers 2–3 (unblocked by #50)
+- #53 — Resolved-contact preview sample (unblocked by #49 ✓, #50 ✓ — see the
+  `fetchSampleContacts` guard left as the seam)
+- #54 — Manual column choice for ambiguous files (blocked by #52; the
+  `ambiguous` status + `candidates[]` are already emitted by `extractContactIds`)
 
-### Campaign Tally area notes
-- The `messages` table is the source of truth; per-recipient status is written
-  idempotently. The campaign-document counters are a recomputed cache only.
-- The `by_campaign_status` compound index is the read path for a campaign's messages.
-- `CONTEXT.md`'s "Campaign Tally" section already describes the full funnel (it was
-  written ahead of #46); no doc change was needed this slice.
+## Environment / gotchas
+- `node_modules` **was** installed this session. `vitest` is not on PATH; use
+  **`npm test -- run <path>`** (or `npm test -- run` for all).
+- Pre-existing lint error in `page.tsx` (`react/no-unescaped-entities` on the
+  existing `"Select All"` validation copy) is **not mine** — lint is not in the
+  RALPH gate (typecheck + test only). Leave it.
+- Working tree carries **pre-existing unrelated** uncommitted changes
+  (`convex/engagementAudit.ts`, `convex/lib/engagementTrust.ts` + test,
+  `CONTEXT.md`, `convex/_generated/api.d.ts`, `.sandcastle/prompt.md`,
+  `package-lock.json`). I committed **only my files**. Leave the others alone.
 
 ## Workflow reminders (RALPH)
 - One issue per iteration. RGR: failing test first, then implementation.
 - `npm run typecheck` + `npm run test` must pass before committing.
 - Single commit, `RALPH:` prefix, list decisions/files/blockers. Keep the commit
-  scoped to the issue's files (don't sweep in unrelated working-tree changes).
+  scoped to the issue's files.
 - Close with `gh issue close <ID> --comment "Completed by Sandcastle…"`.
-- **Update this `handoff.md` when the next issue is done, in the same fashion** —
-  rewrite "Just completed" for the issue you finished, move "Next up" to the
-  highest-priority unblocked issue with the same concrete pointers.
-- Note: vitest also picks up copies under `.sandcastle/worktrees/**` — harmless
-  duplication in the test counts, ignore it.
+- **Rewrite this `handoff.md` when the next issue is done.**

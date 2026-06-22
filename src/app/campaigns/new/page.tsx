@@ -22,7 +22,7 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, type Contact } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, type Contact, type ContactIdExtraction } from "@/components/recipients";
 import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
 import {
     getConvexSiteUrl,
@@ -171,7 +171,13 @@ export default function NewCampaignPage() {
         reset: resetPagination,
     } = useRecipientPagination(LOAD_MORE_SIZE);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
-    const [audience, setAudience] = useState<"clients" | "employees" | "leads">("clients");
+    const [audience, setAudience] = useState<"clients" | "employees" | "leads" | "upload">("clients");
+    // Upload-list audience (#50): the latest CSV extraction and its file name, so
+    // the dropzone can render its status. A successful parse is turned into a
+    // `filtered` selection carrying `{ contactIds }`; this state is reset whenever
+    // the audience changes (see the audience-change effect).
+    const [uploadResult, setUploadResult] = useState<ContactIdExtraction | null>(null);
+    const [uploadFileName, setUploadFileName] = useState<string | null>(null);
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
         status: "all",
@@ -325,6 +331,11 @@ export default function NewCampaignPage() {
     const fetchSampleContacts = useCallback(
         async (capturedFilters: FilterPayload, n: number): Promise<SelectableContact[]> => {
             const f = capturedFilters as Record<string, unknown>;
+            // Uploaded-list filters carry only `{ contactIds }` (issue #50) — the
+            // standard contact query can't resolve them, so resolving that sample
+            // by id is its own slice (#53). Until then show nothing rather than an
+            // arbitrary unfiltered sample; the count and send path are unaffected.
+            if (Array.isArray(f.contactIds)) return [];
             const result = await fetchContacts({
                 search: f.search as string | undefined,
                 top: n,
@@ -368,6 +379,17 @@ export default function NewCampaignPage() {
     const hasReferralFilter = filters.referralFilter === "referrers_only";
 
     const loadContacts = useCallback(async (append: boolean = false) => {
+        // Upload-list mode never queries the CRM — its recipients come from the
+        // dropped file's ids, re-resolved at send time. Clear any leftover list
+        // so the empty contact grid doesn't flash, and bail.
+        if (audience === "upload") {
+            setContacts([]);
+            setTotalCount(null);
+            setNextPageToken(null);
+            setIsLoadingContacts(false);
+            setIsLoadingMore(false);
+            return;
+        }
         try {
             if (append) {
                 setIsLoadingMore(true);
@@ -735,6 +757,9 @@ export default function NewCampaignPage() {
             setSelectedIds(new Set());
             // Resets to the empty explicit shape — clears any filtered select-all too.
             recipientSelection.clear();
+            // Switching audience (incl. away from Upload list) drops the uploaded set.
+            setUploadResult(null);
+            setUploadFileName(null);
         }
     }, [currentStep, audience]);
 
@@ -1193,6 +1218,28 @@ export default function NewCampaignPage() {
         recipientSelection.clear();
     };
 
+    // Upload-list (#50): a parsed CSV becomes the same `filtered` selection the
+    // step already understands, carrying `{ contactIds }` for the send path (#49)
+    // to re-resolve. The captured `total` is the parsed id count; the real
+    // recipient total (after access/reachability/CRM checks) is confirmed at send.
+    // A file with no valid ids surfaces an error and leaves nothing selected.
+    const handleUploadResult = useCallback(
+        (result: ContactIdExtraction, fileName: string) => {
+            setUploadResult(result);
+            setUploadFileName(fileName);
+            setSelectedIds(new Set());
+            if (result.contactIds.length > 0) {
+                recipientSelection.activateFiltered(
+                    { contactIds: result.contactIds },
+                    result.contactIds.length,
+                );
+            } else {
+                recipientSelection.clear();
+            }
+        },
+        [recipientSelection],
+    );
+
     const handleLoadMore = () => {
         loadContacts(true);
     };
@@ -1395,9 +1442,11 @@ export default function NewCampaignPage() {
                                                 Select Recipients <span className="text-red-500">*</span>
                                             </h2>
                                             <p className="text-sm text-gray-500">
-                                                {campaignChannel === "whatsapp"
-                                                    ? `Showing ${audience === "leads" ? "leads" : "contacts"} with phone numbers and WhatsApp opt-in`
-                                                    : `Showing ${audience === "leads" ? "leads" : "contacts"} with valid email addresses`}
+                                                {audience === "upload"
+                                                    ? "Upload a CSV of Dynamics contact ids to target"
+                                                    : campaignChannel === "whatsapp"
+                                                        ? `Showing ${audience === "leads" ? "leads" : "contacts"} with phone numbers and WhatsApp opt-in`
+                                                        : `Showing ${audience === "leads" ? "leads" : "contacts"} with valid email addresses`}
                                             </p>
                                         </div>
                                         <div className="flex items-center gap-3">
@@ -1502,6 +1551,18 @@ export default function NewCampaignPage() {
                                         >
                                             Leads
                                         </button>
+                                        <button
+                                            onClick={() => {
+                                                setAudience("upload");
+                                                handleClearSelection();
+                                            }}
+                                            className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${audience === "upload"
+                                                ? "bg-white text-[#1E3A5F] shadow-sm"
+                                                : "text-gray-500 hover:text-gray-700"
+                                                }`}
+                                        >
+                                            Upload list
+                                        </button>
                                     </div>
 
                                     {audience === "clients" && (
@@ -1541,12 +1602,20 @@ export default function NewCampaignPage() {
                                             totalCount={totalCount}
                                         />
                                     )}
+
+                                    {audience === "upload" && (
+                                        <UploadListPanel
+                                            result={uploadResult}
+                                            fileName={uploadFileName}
+                                            onResult={handleUploadResult}
+                                        />
+                                    )}
                                 </div>
                             </Card>
 
-                            {isLoadingContacts && <LoadingScreen />}
+                            {audience !== "upload" && isLoadingContacts && <LoadingScreen />}
 
-                            {!isLoadingContacts && (
+                            {audience !== "upload" && !isLoadingContacts && (
                                 <ContactList
                                     contacts={displayedContacts}
                                     isLoading={false}
@@ -1570,7 +1639,7 @@ export default function NewCampaignPage() {
                             )}
 
                             {/* Load More footer — mb-24 clears the fixed Back/Next buttons */}
-                            {!isLoadingContacts && (
+                            {audience !== "upload" && !isLoadingContacts && (
                                 <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 mb-24">
                                     <span className="text-sm text-gray-500">
                                         {filters.personalisedCampaignFilter !== "all"
