@@ -6,4 +6,4 @@ export { filterSignature } from "./filterSignature";
 export { materialiseExplicit } from "./materialiseExplicit";
 export { UploadListPanel } from "./UploadListPanel";
 export { extractContactIds, type ContactIdExtraction } from "./extractContactIds";
-export { readContactIdsFromFile, parseCsv } from "./readContactIds";
+export { readContactIdsFromFile, parseCsv, parseXlsx } from "./readContactIds";

@@ -80,7 +80,7 @@ export function UploadListPanel({
                 <input
                     ref={inputRef}
                     type="file"
-                    accept=".csv,text/csv"
+                    accept=".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     className="hidden"
                     onChange={(e) => {
                         const file = e.target.files?.[0];
@@ -94,7 +94,7 @@ export function UploadListPanel({
                     <Upload className="h-8 w-8 text-gray-400" />
                 )}
                 <p className="text-sm font-medium text-gray-700">
-                    {isParsing ? "Reading file…" : "Drop a CSV here, or click to choose a file"}
+                    {isParsing ? "Reading file…" : "Drop a CSV or Excel file here, or click to choose a file"}
                 </p>
                 <p className="text-xs text-gray-500">
                     The file needs a <span className="font-mono">contactid</span> column of Dynamics
