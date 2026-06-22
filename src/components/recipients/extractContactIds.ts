@@ -112,6 +112,25 @@ export function extractContactIds(rows: string[][]): ContactIdExtraction {
     return ambiguous(guidColumns.length > 0 ? guidColumns : columns);
 }
 
+/**
+ * Extract contact ids from an explicitly-chosen id column — the manual fallback
+ * (#54) for `ambiguous` files. Bypasses the tier 1 → 2 → 3 detection and runs
+ * the chosen column straight through the same {@link collect} loop, so a
+ * hand-picked column validates, dedupes and skip-counts identically to a
+ * detected one. An empty file still yields `empty`.
+ */
+export function extractContactIdsForColumn(
+    rows: string[][],
+    columnIndex: number,
+): ContactIdExtraction {
+    if (rows.length === 0) {
+        return { status: "empty", idColumn: null, contactIds: [], skippedRows: 0, candidates: [] };
+    }
+    const [header, ...dataRows] = rows;
+    const idColumn: DetectedColumn = { index: columnIndex, header: (header[columnIndex] ?? "").trim() };
+    return collect(idColumn, dataRows);
+}
+
 function ambiguous(candidates: DetectedColumn[]): ContactIdExtraction {
     return { status: "ambiguous", idColumn: null, contactIds: [], skippedRows: 0, candidates };
 }

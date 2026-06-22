@@ -1,6 +1,19 @@
 import { describe, it, expect } from "vitest";
 import * as XLSX from "xlsx";
-import { parseCsv, parseXlsx } from "./readContactIds";
+import {
+    parseCsv,
+    parseXlsx,
+    readContactIdsFromFile,
+    extractContactIdsForColumnFromFile,
+} from "./readContactIds";
+
+const A = "11111111-1111-1111-1111-111111111111";
+const B = "22222222-2222-2222-2222-222222222222";
+
+/** A minimal File stub backed by a string, enough for `.text()`. */
+function csvFile(text: string, name = "list.csv"): File {
+    return new File([text], name, { type: "text/csv" });
+}
 
 /** Build a real .xlsx byte stream from a 2-D array, for parseXlsx tests. */
 function xlsxBytes(rows: (string | number)[][], sheets?: Record<string, (string | number)[][]>): Uint8Array {
@@ -121,5 +134,27 @@ describe("parseXlsx", () => {
 
     it("returns no rows for a blank sheet", () => {
         expect(parseXlsx(xlsxBytes([[""]]))).toEqual([]);
+    });
+});
+
+describe("extractContactIdsForColumnFromFile (manual column choice, #54)", () => {
+    it("re-reads the file and collects ids from the chosen column", async () => {
+        // Two GUID columns: auto-detect is ambiguous, the manual choice resolves it.
+        const file = csvFile(`primary,secondary,name\n${A},${B},Alice\n${B},${A},Bob`);
+        const auto = await readContactIdsFromFile(file);
+        expect(auto.status).toBe("ambiguous");
+        expect(auto.candidates.map((c) => c.index)).toEqual([0, 1]);
+
+        const chosen = await extractContactIdsForColumnFromFile(file, 1);
+        expect(chosen.status).toBe("ok");
+        expect(chosen.idColumn).toEqual({ index: 1, header: "secondary" });
+        expect(chosen.contactIds).toEqual([B, A]);
+    });
+
+    it("produces the same dedupe / skip summary as auto-detection on the chosen column", async () => {
+        const file = csvFile(`ref,name\n${A},Alice\n${A},dup\n,blank\n${B},Bob`);
+        const chosen = await extractContactIdsForColumnFromFile(file, 0);
+        expect(chosen.contactIds).toEqual([A, B]);
+        expect(chosen.skippedRows).toBe(1);
     });
 });

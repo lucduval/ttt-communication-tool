@@ -1,5 +1,9 @@
 import * as XLSX from "xlsx";
-import { extractContactIds, type ContactIdExtraction } from "./extractContactIds";
+import {
+    extractContactIds,
+    extractContactIdsForColumn,
+    type ContactIdExtraction,
+} from "./extractContactIds";
 
 /**
  * File readers (PRD #48, issues #50 + #51) — the thin impure seam between a
@@ -93,14 +97,33 @@ function isXlsx(file: File): boolean {
     return /\.xlsx$/i.test(file.name) || file.type === XLSX_MIME;
 }
 
+/** Read a dropped file's bytes into the shared `string[][]` grid. The only
+ * impurity — both reader entry points below delegate to it, so CSV/XLSX format
+ * detection lives in one place and the chosen-column re-read (#54) parses the
+ * file exactly as the auto-detect pass did (same indices). */
+async function readRows(file: File): Promise<string[][]> {
+    return isXlsx(file) ? parseXlsx(await file.arrayBuffer()) : parseCsv(await file.text());
+}
+
 /**
  * Read a dropped CSV or XLSX file and extract its contact ids. Impure (reads
  * the File); all decisions live in the pure core it delegates to. The format is
  * chosen by extension/MIME, then both paths converge on {@link extractContactIds}.
  */
 export async function readContactIdsFromFile(file: File): Promise<ContactIdExtraction> {
-    const rows = isXlsx(file)
-        ? parseXlsx(await file.arrayBuffer())
-        : parseCsv(await file.text());
-    return extractContactIds(rows);
+    return extractContactIds(await readRows(file));
+}
+
+/**
+ * Re-read a file and extract its ids from an explicitly-chosen column — the
+ * manual fallback (#54) when auto-detection was `ambiguous`. Re-parses the same
+ * bytes (deterministic, so the chosen index still lines up) and runs the column
+ * through {@link extractContactIdsForColumn}, yielding the same `ok` result
+ * shape an auto-detected file produces.
+ */
+export async function extractContactIdsForColumnFromFile(
+    file: File,
+    columnIndex: number,
+): Promise<ContactIdExtraction> {
+    return extractContactIdsForColumn(await readRows(file), columnIndex);
 }

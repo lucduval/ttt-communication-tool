@@ -2,8 +2,8 @@
 
 import { useCallback, useRef, useState } from "react";
 import { Upload, FileText, AlertTriangle, CheckCircle, Loader2 } from "lucide-react";
-import { readContactIdsFromFile } from "./readContactIds";
-import type { ContactIdExtraction } from "./extractContactIds";
+import { readContactIdsFromFile, extractContactIdsForColumnFromFile } from "./readContactIds";
+import type { ContactIdExtraction, DetectedColumn } from "./extractContactIds";
 
 /**
  * "Upload list" audience panel (PRD #48, issue #50).
@@ -15,6 +15,13 @@ import type { ContactIdExtraction } from "./extractContactIds";
  * `filtered` selection carrying `{ contactIds }` that the send path (#49)
  * already understands. The file is purely a source of contact ids — never
  * per-recipient template data.
+ *
+ * When detection is `ambiguous` (#54) the panel keeps the dropped file and the
+ * extraction's `candidates`, and shows a column-chooser dropdown. Picking a
+ * column re-reads that file through {@link extractContactIdsForColumnFromFile}
+ * — the same validate / dedupe / skip pipeline — and feeds the result back
+ * through the very same `onResult` seam, so a hand-picked column activates the
+ * `{ contactIds }` selection exactly like an auto-detected one.
  *
  * This panel only renders and parses; the count badge and the recipient total
  * live with the selection value on the page, so the displayed status is read
@@ -32,18 +39,43 @@ export function UploadListPanel({
     const [isDragging, setIsDragging] = useState(false);
     const [isParsing, setIsParsing] = useState(false);
     const inputRef = useRef<HTMLInputElement>(null);
+    // The ambiguous file awaiting a manual column choice (#54), and the columns
+    // to offer. Held here (not on the page) because re-extraction re-reads the
+    // same file. Cleared the moment a different file is dropped or detection
+    // resolves cleanly; kept after a pick so a wrong choice can be re-picked.
+    const [chooser, setChooser] = useState<{ file: File; candidates: DetectedColumn[] } | null>(null);
 
     const handleFile = useCallback(
         async (file: File) => {
             setIsParsing(true);
             try {
                 const extraction = await readContactIdsFromFile(file);
+                setChooser(
+                    extraction.status === "ambiguous"
+                        ? { file, candidates: extraction.candidates }
+                        : null,
+                );
                 onResult(extraction, file.name);
             } finally {
                 setIsParsing(false);
             }
         },
         [onResult],
+    );
+
+    const handleChooseColumn = useCallback(
+        async (columnIndex: number) => {
+            if (!chooser) return;
+            const { file } = chooser;
+            setIsParsing(true);
+            try {
+                const extraction = await extractContactIdsForColumnFromFile(file, columnIndex);
+                onResult(extraction, file.name);
+            } finally {
+                setIsParsing(false);
+            }
+        },
+        [chooser, onResult],
     );
 
     const onDrop = useCallback(
@@ -102,7 +134,52 @@ export function UploadListPanel({
                 </p>
             </div>
 
-            {result && !isParsing && <UploadStatus result={result} fileName={fileName} />}
+            {!isParsing && result && result.status !== "ambiguous" && (
+                <UploadStatus result={result} fileName={fileName} />
+            )}
+            {!isParsing && chooser && (
+                <ColumnChooser candidates={chooser.candidates} onChoose={handleChooseColumn} />
+            )}
+        </div>
+    );
+}
+
+/**
+ * Manual column choice for an ambiguous file (#54). Lists the extraction's
+ * `candidates` so the user names the contact-id column; the selection runs the
+ * same pipeline as auto-detection. Shown only while `chooser` is set — i.e.
+ * never for auto-detected (tier 1–3) files.
+ */
+function ColumnChooser({
+    candidates,
+    onChoose,
+}: {
+    candidates: DetectedColumn[];
+    onChoose: (columnIndex: number) => void;
+}) {
+    return (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600" />
+            <div className="space-y-2 text-sm text-amber-800">
+                <p className="font-medium">We couldn’t identify the contact-id column automatically.</p>
+                <p>Choose which column holds the Dynamics contact ids:</p>
+                <select
+                    defaultValue=""
+                    onChange={(e) => {
+                        if (e.target.value !== "") onChoose(Number(e.target.value));
+                    }}
+                    className="w-full rounded-md border border-amber-300 bg-white px-2 py-1.5 text-sm text-gray-800 focus:border-[#1E3A5F] focus:outline-none"
+                >
+                    <option value="" disabled>
+                        Select a column…
+                    </option>
+                    {candidates.map((c) => (
+                        <option key={c.index} value={c.index}>
+                            {c.header || `Column ${c.index + 1}`}
+                        </option>
+                    ))}
+                </select>
+            </div>
         </div>
     );
 }
@@ -154,12 +231,10 @@ function UploadStatus({
 }
 
 function errorMessage(result: ContactIdExtraction): string {
-    switch (result.status) {
-        case "empty":
-            return "The file is empty.";
-        case "ambiguous":
-            return "Couldn’t identify a single column of contact ids — please use a file with one clearly-labelled id column.";
-        default:
-            return "No valid contact ids were found in the id column.";
-    }
+    // `ambiguous` never reaches here — that status renders the ColumnChooser
+    // instead of UploadStatus. The remaining no-ids cases are an empty file and
+    // a resolved column (auto-detected or hand-picked) that held no valid ids.
+    return result.status === "empty"
+        ? "The file is empty."
+        : "No valid contact ids were found in the id column.";
 }

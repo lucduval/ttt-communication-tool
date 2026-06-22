@@ -5,5 +5,15 @@ export { useRecipientPagination } from "./useRecipientPagination";
 export { filterSignature } from "./filterSignature";
 export { materialiseExplicit } from "./materialiseExplicit";
 export { UploadListPanel } from "./UploadListPanel";
-export { extractContactIds, type ContactIdExtraction } from "./extractContactIds";
-export { readContactIdsFromFile, parseCsv, parseXlsx } from "./readContactIds";
+export {
+    extractContactIds,
+    extractContactIdsForColumn,
+    type ContactIdExtraction,
+    type DetectedColumn,
+} from "./extractContactIds";
+export {
+    readContactIdsFromFile,
+    extractContactIdsForColumnFromFile,
+    parseCsv,
+    parseXlsx,
+} from "./readContactIds";
