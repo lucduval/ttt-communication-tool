@@ -56,6 +56,12 @@ export interface CampaignFilters {
     nameRangeEnd?: string;   // e.g. "F"
     // Contact IDs explicitly excluded by the user (individual unchecks during select-all)
     excludeContactIds?: string[];
+    // Uploaded audience: restrict the send to exactly this set of contact ids. A
+    // filtered selection carrying these re-resolves through Contact Query's
+    // `contactIds` streaming dimension at send time, so the campaign behaves like
+    // any other filtered campaign (fresh CRM data, owner scoping, channel
+    // reachability all enforced server-side).
+    contactIds?: string[];
 }
 
 /**
@@ -64,7 +70,7 @@ export interface CampaignFilters {
  * stringy after a JSON round-trip) are normalised to numeric option-code arrays
  * so the module owns the OData multi-select containment encoding.
  */
-function toContactFilter(filters: CampaignFilters): ContactFilter {
+export function toContactFilter(filters: CampaignFilters): ContactFilter {
     const { sourceCode, clientType } = filters;
 
     let sourceCodeArr: number[] | undefined;
@@ -95,6 +101,7 @@ function toContactFilter(filters: CampaignFilters): ContactFilter {
         reachableChannel: filters.reachableChannel,
         nameRangeStart: filters.nameRangeStart,
         nameRangeEnd: filters.nameRangeEnd,
+        contactIds: filters.contactIds,
     };
 }
 
