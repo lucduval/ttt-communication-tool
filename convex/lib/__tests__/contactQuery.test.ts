@@ -616,6 +616,44 @@ describe("countContacts", () => {
     });
 });
 
+describe("countContacts with contactIds", () => {
+    test("a single chunk restricts the count filter to the id set alongside the base", async () => {
+        const { request, endpoints } = fakeRequest([{ "@odata.count": 2, value: [] }]);
+        expect(await countContacts({ contactIds: ["a", "b"] }, { request })).toBe(2);
+        expect(endpoints).toHaveLength(1);
+        expect(endpoints[0]).toContain(
+            "$filter=statecode eq 0 and (contactid eq 'a' or contactid eq 'b')"
+        );
+    });
+
+    test("fans out over the OR-ceiling, summing the per-chunk counts", async () => {
+        const { request, endpoints } = fakeRequest([
+            { "@odata.count": 2, value: [] },
+            { "@odata.count": 1, value: [] },
+        ]);
+        expect(
+            await countContacts({ contactIds: ["1", "2", "3"] }, { request, contactIdChunkSize: 2 })
+        ).toBe(3);
+        expect(endpoints).toHaveLength(2);
+        expect(endpoints[0]).toContain("contactid eq '1' or contactid eq '2'");
+        expect(endpoints[0]).not.toContain("contactid eq '3'");
+        expect(endpoints[1]).toContain("contactid eq '3'");
+    });
+
+    test("composes with all other filter clauses on every chunk", async () => {
+        const { request, endpoints } = fakeRequest([{ "@odata.count": 0, value: [] }]);
+        await countContacts({ contactIds: ["x"], ownerId: "owner-1" }, { request });
+        expect(endpoints[0]).toContain("_ownerid_value eq 'owner-1'");
+        expect(endpoints[0]).toContain("contactid eq 'x'");
+    });
+
+    test("an empty id set counts zero and issues no requests", async () => {
+        const { request, endpoints } = fakeRequest([{ "@odata.count": 99, value: [] }]);
+        expect(await countContacts({ contactIds: [] }, { request })).toBe(0);
+        expect(endpoints).toHaveLength(0);
+    });
+});
+
 describe("fetchContactsPage", () => {
     test("builds a single page request with a page-size header and returns the raw page", async () => {
         const { request, endpoints } = fakeRequest([
@@ -647,6 +685,86 @@ describe("fetchContactsPage", () => {
             }
         );
         expect(endpoints[0]).toBe("contacts?$skiptoken=p2");
+    });
+});
+
+describe("fetchContactsPage with contactIds", () => {
+    test("a single chunk restricts the page filter to the id set alongside the base", async () => {
+        const { request, endpoints } = fakeRequest([
+            { value: [{ contactid: "a" }, { contactid: "b" }] },
+        ]);
+        const page = await fetchContactsPage<{ contactid: string }>(
+            { contactIds: ["a", "b"] },
+            { select: "contactid", pageSize: 50, request }
+        );
+        expect(page.value).toEqual([{ contactid: "a" }, { contactid: "b" }]);
+        expect(endpoints).toHaveLength(1);
+        expect(endpoints[0]).toContain(
+            "$filter=statecode eq 0 and (contactid eq 'a' or contactid eq 'b')"
+        );
+        expect(endpoints[0]).toContain("$select=contactid");
+    });
+
+    test("accumulates resolved rows across chunks until the page is full", async () => {
+        const { request, endpoints } = fakeRequest([
+            { value: [{ contactid: "1" }] },
+            { value: [{ contactid: "2" }] },
+            { value: [{ contactid: "3" }] },
+        ]);
+        const page = await fetchContactsPage<{ contactid: string }>(
+            { contactIds: ["1", "2", "3"] },
+            { select: "contactid", pageSize: 5, request, contactIdChunkSize: 1 }
+        );
+        expect(page.value?.map((c) => c.contactid)).toEqual(["1", "2", "3"]);
+        expect(endpoints).toHaveLength(3);
+    });
+
+    test("stops querying further chunks once the page size is reached", async () => {
+        const { request, endpoints } = fakeRequest([
+            { value: [{ contactid: "1" }, { contactid: "2" }] },
+            { value: [{ contactid: "3" }] },
+        ]);
+        const page = await fetchContactsPage<{ contactid: string }>(
+            { contactIds: ["a", "b", "c", "d"] },
+            { select: "contactid", pageSize: 2, request, contactIdChunkSize: 2 }
+        );
+        expect(page.value?.map((c) => c.contactid)).toEqual(["1", "2"]);
+        // The second chunk is never queried — the first already filled the page.
+        expect(endpoints).toHaveLength(1);
+    });
+
+    test("composes with all other filter clauses on every chunk", async () => {
+        const { request, endpoints } = fakeRequest([{ value: [] }]);
+        await fetchContactsPage(
+            { contactIds: ["x"], ownerId: "owner-1" },
+            { select: "contactid", pageSize: 50, request }
+        );
+        expect(endpoints[0]).toContain("_ownerid_value eq 'owner-1'");
+        expect(endpoints[0]).toContain("contactid eq 'x'");
+    });
+
+    test("an empty id set yields an empty page and issues no requests", async () => {
+        const { request, endpoints } = fakeRequest([
+            { value: [{ contactid: "should-not-appear" }] },
+        ]);
+        const page = await fetchContactsPage<{ contactid: string }>(
+            { contactIds: [] },
+            { select: "contactid", pageSize: 50, request }
+        );
+        expect(page.value).toEqual([]);
+        expect(endpoints).toHaveLength(0);
+    });
+
+    test("countOnly sums the per-chunk counts across the id set", async () => {
+        const { request } = fakeRequest([
+            { "@odata.count": 2, value: [] },
+            { "@odata.count": 1, value: [] },
+        ]);
+        const page = await fetchContactsPage(
+            { contactIds: ["1", "2", "3"] },
+            { select: "contactid", pageSize: 50, countOnly: true, request, contactIdChunkSize: 2 }
+        );
+        expect(page["@odata.count"]).toBe(3);
     });
 });
 

@@ -122,6 +122,10 @@ export const fetchContacts = action({
         reachableChannel: v.optional(v.union(v.literal("email"), v.literal("whatsapp"))), // Channel reachability (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
+        // Uploaded audience (#53): restrict the page to this id set. Contact Query
+        // chunks it under the OR-ceiling and re-applies every other clause (owner
+        // scope, reachability) so only contacts the user may see resolve.
+        contactIds: v.optional(v.array(v.string())),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -146,7 +150,8 @@ export const fetchContacts = action({
             emailEnabled,
             reachableChannel,
             nameRangeStart,
-            nameRangeEnd
+            nameRangeEnd,
+            contactIds
         } = args;
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
@@ -173,6 +178,7 @@ export const fetchContacts = action({
                 reachableChannel,
                 nameRangeStart,
                 nameRangeEnd,
+                contactIds,
             },
             {
                 select: CONTACT_SELECT_FIELDS,
@@ -244,6 +250,9 @@ export const getContactCount = action({
         reachableChannel: v.optional(v.union(v.literal("email"), v.literal("whatsapp"))), // Channel reachability (typed dimension)
         nameRangeStart: v.optional(v.string()), // Alphabetical name range (typed dimension)
         nameRangeEnd: v.optional(v.string()),
+        // Uploaded audience (#53): count is restricted to this id set, chunked under
+        // the OR-ceiling with every other clause re-applied per chunk.
+        contactIds: v.optional(v.array(v.string())),
     },
     handler: async (ctx, args) => {
         const access = await ctx.runQuery(api.users.checkAccess);
@@ -264,7 +273,8 @@ export const getContactCount = action({
             emailEnabled,
             reachableChannel,
             nameRangeStart,
-            nameRangeEnd
+            nameRangeEnd,
+            contactIds
         } = args;
 
         const ownerId = await resolveEffectiveOwnerId(ctx, args.ownerId);
@@ -291,6 +301,7 @@ export const getContactCount = action({
             reachableChannel,
             nameRangeStart,
             nameRangeEnd,
+            contactIds,
         });
 
         return { count };

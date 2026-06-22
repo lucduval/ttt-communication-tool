@@ -1,75 +1,86 @@
 # Handoff — RALPH iteration
 
-## Just completed: #52 — Smart id-column detection (tiers 2–3)
+## Just completed: #53 — Resolved-contact preview sample
 
-**Issue #52 closed.** Branch: `main`.
+**Issue #53 closed.** Branch: `main`. Commit `aff5982`.
 
-Fourth slice of PRD #48. Teaches the pure extraction core to find the id column
-in real-world exports with zero clicks, trying detection tiers **in order**:
+Fifth slice of PRD #48. The `contactIds` dimension was wired only into the
+*streaming* path (#49). This slice teaches the Contact Query **page-fetch** and
+**count** paths to honour it too, reusing the OR-ceiling chunking, and surfaces a
+server-resolved preview sample after an uploaded-list selection.
 
-- **Tier 1 (pre-existing)** — explicit `contactid` header (case-insensitive, trimmed).
-- **Tier 2 — Dynamics export.** The hidden `(Do Not Modify) <Entity>` GUID column
-  standard Dynamics exports carry. Match is narrowed to the `(Do Not Modify)`-prefixed
-  column whose **data is GUID-shaped**, so it lands on the GUID column and never the
-  sibling `(Do Not Modify) Row Checksum` / `Modified On` columns.
-- **Tier 3 — GUID-shape auto-detect.** When exactly one column's data is GUID-shaped
-  (under any header), use it.
+Changes:
+- **`convex/lib/contactQuery.ts`**
+  - **`countContacts`** with `contactIds`: chunk the ids under
+    `CONTACT_ID_OR_CEILING`, re-apply every other clause per chunk, **sum** the
+    per-chunk `countEntity` results. Chunks are disjoint id sets so the sum is
+    exact. Added `contactIdChunkSize?` to `CountContactsOptions`. Empty set → `0`,
+    no request.
+  - **`fetchContactsPage`** with `contactIds`: new private
+    **`fetchContactsPageByIds`** accumulates resolved rows across chunks until the
+    page (`pageSize`) is full, then **stops** — a small preview touches only the
+    first chunk(s). Builds a fresh per-chunk filter, so the `cursor` option is
+    **ignored** on this path (the id-sample is a bounded fetch, not a cursor
+    walk). `countOnly` sums per-chunk `@odata.count` (each chunk ≤ ceiling, so
+    never capped). Added `contactIdChunkSize?` to `FetchContactsPageOptions`.
+    Empty set → empty page, no request.
+- **`convex/actions/dynamics.ts`**: `fetchContacts` and `getContactCount` accept
+  `contactIds: v.optional(v.array(v.string()))` and pass it through. Owner scope
+  still applied via `resolveEffectiveOwnerId`, so only contacts the user may see
+  resolve (server-side resolution).
+- **`src/app/campaigns/new/page.tsx`**: `fetchSampleContacts` now resolves the
+  uploaded ids by calling `fetchContacts({ top: n, contactIds })` instead of the
+  #50 placeholder that returned `[]`. The `useRecipientSample` hook already feeds
+  this for the filtered shape, so the preview fills automatically.
+- **`convex/lib/__tests__/contactQuery.test.ts`**: 10 new tests — `countContacts
+  with contactIds` (single chunk / fan-out sum / composes with owner / empty) and
+  `fetchContactsPage with contactIds` (single chunk / accumulate across chunks /
+  stop at pageSize / composes / empty / countOnly sum).
 
-When no tier resolves to a single column we emit the existing `ambiguous` signal with
-`candidates` populated (the #54 manual-choice seam) — **never guess**: two `contactid`
-columns (tier 1), >1 GUID-shaped columns (candidates = the GUID columns), or zero
-GUID-shaped columns (candidates = every column).
+**Verification:** `npm run typecheck` clean; `npm test -- run` = 352 passed (10 new).
 
-Changes (all in `src/components/recipients/`):
-- **`extractContactIds.ts`**: refactored the body into tier 1 → 2 → 3 with two new
-  pure helpers — `isGuidColumn(dataRows, index)` (true iff ≥1 non-blank cell and every
-  non-blank cell normalises to a GUID; blanks ignored so they still skip-count at
-  extraction) and `DO_NOT_MODIFY` prefix regex. Extracted the dedup/skip loop into
-  `collect()` and the ambiguous result into `ambiguous()`. **Removed the `no-column`
-  status** — it became unreachable (zero GUID columns now → `ambiguous`).
-- **`extractContactIds.test.ts`**: 9 new tests across four describe blocks (tier 2
-  Dynamics export + case-insensitive prefix + checksum-sibling avoidance; tier 3
-  single-column + blanks + mixed-GUID rejection; precedence tier1>tier3 & tier2>tier3;
-  ambiguous multi-GUID + zero-GUID). Rewrote the old `no-column` test into the
-  zero-GUID `ambiguous` case.
-- **`UploadListPanel.tsx`**: dropped the `no-column` branch from `errorMessage` and
-  generalised the `ambiguous` copy to "Couldn't identify a single column of contact
-  ids…" (covers both zero and multiple).
+### Gotchas / decisions
+- Both new paths build their filter from the **typed object** (`buildContactFilter`),
+  so owner scope and channel reachability are re-applied to every chunk — the
+  preview can never leak a contact the user isn't scoped to.
+- `fetchContactsPageByIds` ignores `cursor` on purpose. The id-restricted fetch is
+  a bounded sample (accumulate-until-full), not a paged walk; cross-chunk cursor
+  continuation isn't defined. Fine for the preview (small `top`). The non-`contactIds`
+  branch is untouched and still cursor-paginates the standard recipient list.
+- `countOnly` per-chunk counts are exact because each chunk holds ≤ ceiling (50)
+  ids — far below the Dynamics 5000 `@odata.count` cap — so no pagination fallback
+  is needed there.
+- `convex/_generated/api.d.ts` was **not** committed by me: codegen left it carrying
+  only the pre-existing `engagementAudit`/`engagementTrust` entries (the added
+  optional action arg doesn't change the `typeof`-based decls). Left it with the
+  other pre-existing changes.
 
-**Verification:** `npm run typecheck` clean; `npm test -- run` = 342 passed (9 new).
+## Next up: #54 — Manual column choice for ambiguous files (unblocked)
 
-### Gotchas / decisions (read before #54)
-- **Zero GUID-shaped columns → `ambiguous`** (not a dead-end "no column"). Per the
-  issue + prior handoff: zero *or* multiple → manual choice. Candidates rule:
-  GUID-shaped columns when any exist, else **all** columns (so #54's chooser is never
-  empty). This is the contract #54 consumes.
-- `isGuidColumn` is **strict** (every non-blank cell must be a GUID) so auto-detect
-  never picks a column it can't trust. Tiers 1 & 2 (explicit/Dynamics header) still
-  tolerate malformed rows via the `collect()` skip loop — only tier-3 sniffing is strict.
-- Tier 2 only fires when **exactly one** `(Do Not Modify)` column is GUID-shaped;
-  otherwise it falls through to tier 3 (which then sees multiple GUID columns →
-  ambiguous, as expected).
+**#54 is unblocked** (#52 ✓). The `ambiguous` status + `candidates[]` contract is
+fully in place from #52: candidates are the GUID-shaped columns when any exist,
+else **every** column (so the chooser is never empty).
 
-## Next up: #53 — Resolved-contact preview sample (unblocked)
+What to build (`gh issue view 54` for the full acceptance list):
+1. When `extractContactIds` returns the **`ambiguous`** status, the Recipients UI
+   (`src/components/recipients/UploadListPanel.tsx`) shows a **dropdown of the
+   file's columns** (use `candidates`).
+2. Picking a column runs that column through the **same validate / dedupe / skip
+   pipeline** as auto-detection — i.e. re-extract using the chosen column index as
+   the id column, reusing the existing `collect()` path in `extractContactIds.ts`
+   rather than hand-rolling a second dedupe.
+3. The chosen column **activates the `{ contactIds }` filtered selection** with the
+   same count / skip summary as auto-detected files (same `handleUploadResult` /
+   `activateFiltered` seam in `page.tsx`).
+4. Auto-detected (tier 1–3) files **do not** show the dropdown.
 
-**#53 is unblocked** (#49 ✓, #50 ✓). Two parts:
-1. **Honour `contactIds` in the Contact Query page-fetch / count path.** Today
-   `contactIds` is wired only into the *streaming* path; the page-fetch/count path used
-   for previews ignores it. Restrict that path to the `contactIds` set, **reusing the
-   existing OR-ceiling chunking** (find it in the streaming path / `toContactFilter`).
-   Prior-art test: `contactQuery.test.ts`.
-2. **Surface a sample in the Recipients UI** after a successful upload. The seam is the
-   `fetchSampleContacts` guard in `src/app/campaigns/new/page.tsx`, which currently
-   returns an empty sample for a `{ contactIds }` filter. The preview must reflect
-   **server-side** resolution (only contacts the user may see appear).
-
-See `gh issue view 53` for the full acceptance list.
+Likely seam: `extractContactIds` needs an entry point that takes an explicit
+column index (the manual choice) and runs tiers' shared `collect()` over it. Check
+whether one already exists before adding; keep the pure core pure and the UI thin.
 
 ## Remaining PRD #48 slices (dependency order)
-- #53 — Resolved-contact preview sample  ← **next, unblocked**
-- #54 — Manual column choice for ambiguous files (blocked by #52 ✓ — the `ambiguous`
-  status + `candidates[]` contract above is now fully in place: candidates are the
-  GUID columns, or every column when none are GUID-shaped)
+- #54 — Manual column choice for ambiguous files  ← **next, unblocked**
+- (Check `gh issue list` for anything after #54 under PRD #48.)
 
 ## Environment / gotchas
 - `node_modules` is installed. `vitest` is not on PATH; use **`npm test -- run <path>`**
@@ -78,8 +89,8 @@ See `gh issue view 53` for the full acceptance list.
   lint is not in the RALPH gate (typecheck + test only). Leave it.
 - Working tree carries **pre-existing unrelated** uncommitted changes
   (`convex/engagementAudit.ts`, `convex/lib/engagementTrust.ts` + test, `CONTEXT.md`,
-  `convex/_generated/api.d.ts`, `.sandcastle/prompt.md`). I committed **only my files**.
-  Leave the others alone.
+  `convex/_generated/api.d.ts`, `.sandcastle/prompt.md`). I committed **only my
+  files**. Leave the others alone.
 
 ## Workflow reminders (RALPH)
 - One issue per iteration. RGR: failing test first, then implementation.

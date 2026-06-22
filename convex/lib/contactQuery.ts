@@ -542,6 +542,8 @@ interface CountContactsOptions extends RequestExecutionOptions {
     ceiling?: number;
     /** Safety cap on pages followed during the pagination pass. Defaults to 200. */
     maxPages?: number;
+    /** Per-chunk id ceiling for the contactIds dimension; defaults to {@link CONTACT_ID_OR_CEILING}. */
+    contactIdChunkSize?: number;
 }
 
 /**
@@ -549,12 +551,35 @@ interface CountContactsOptions extends RequestExecutionOptions {
  * ceiling; otherwise paginates contactids to recover the true total. Owner scope
  * is always applied because the filter is built from the typed object here. A thin
  * facade over {@link countEntity}.
+ *
+ * When the filter carries a `contactIds` set the count is restricted to those ids:
+ * the ids are chunked under {@link CONTACT_ID_OR_CEILING} (every other clause
+ * re-applied to each chunk) and the per-chunk counts are summed. Chunks are
+ * disjoint id sets, so the sum is the exact total. An empty `contactIds` set
+ * counts zero and issues no request.
  */
 export async function countContacts(
     filter: ContactFilter,
     opts: CountContactsOptions = {}
 ): Promise<number> {
-    return countEntity(buildContactFilter(filter), {
+    const base = buildContactFilter(filter);
+
+    if (filter.contactIds !== undefined) {
+        const chunkSize = opts.contactIdChunkSize ?? CONTACT_ID_OR_CEILING;
+        let total = 0;
+        for (let i = 0; i < filter.contactIds.length; i += chunkSize) {
+            const idChunk = filter.contactIds.slice(i, i + chunkSize);
+            const expression = `${base} and (${buildContactIdClause(idChunk)})`;
+            total += await countEntity(expression, {
+                ...opts,
+                entity: "contacts",
+                idField: "contactid",
+            });
+        }
+        return total;
+    }
+
+    return countEntity(base, {
         ...opts,
         entity: "contacts",
         idField: "contactid",
@@ -573,6 +598,8 @@ interface FetchContactsPageOptions extends RequestExecutionOptions {
     cursor?: string;
     /** Request `@odata.count` for the (capped) total. */
     countOnly?: boolean;
+    /** Per-chunk id ceiling for the contactIds dimension; defaults to {@link CONTACT_ID_OR_CEILING}. */
+    contactIdChunkSize?: number;
 }
 
 /**
@@ -580,11 +607,21 @@ interface FetchContactsPageOptions extends RequestExecutionOptions {
  * request (or follows a normalized cursor) and applies the page-size header so the
  * caller never assembles paging details itself. Returns the raw Dynamics page. A
  * thin facade over {@link fetchEntityPage}.
+ *
+ * When the filter carries a `contactIds` set the page is restricted to those ids
+ * (see {@link fetchContactsPageByIds}): the ids are chunked under
+ * {@link CONTACT_ID_OR_CEILING} and resolved rows are accumulated across chunks
+ * until the page is full. This is the bounded "resolve a sample by id" path used
+ * by the uploaded-list preview — it builds a fresh filter per chunk, so the
+ * `cursor` option is ignored. An empty `contactIds` set yields an empty page.
  */
 export async function fetchContactsPage<T>(
     filter: ContactFilter,
     opts: FetchContactsPageOptions
 ): Promise<DynamicsPage<T>> {
+    if (filter.contactIds !== undefined) {
+        return fetchContactsPageByIds<T>(filter, opts);
+    }
     return fetchEntityPage<T>(buildContactFilter(filter), {
         ...opts,
         entity: "contacts",
@@ -592,4 +629,54 @@ export async function fetchContactsPage<T>(
         orderby: opts.orderby ?? "fullname asc",
         pageSize: opts.pageSize,
     });
+}
+
+/**
+ * Restrict a single contacts page to a `contactIds` set, reusing the OR-ceiling
+ * chunking. Rows (or counts, for `countOnly`) are accumulated across chunks — each
+ * chunk re-applies every other clause via {@link buildContactFilter} — so owner
+ * scope and reachability are enforced server-side. Row collection stops as soon as
+ * the page is full, so a small sample touches only the first chunk(s). The `cursor`
+ * option is deliberately not consulted: each chunk builds its own filter.
+ */
+async function fetchContactsPageByIds<T>(
+    filter: ContactFilter,
+    opts: FetchContactsPageOptions
+): Promise<DynamicsPage<T>> {
+    const base = buildContactFilter(filter);
+    const ids = filter.contactIds ?? [];
+    const chunkSize = opts.contactIdChunkSize ?? CONTACT_ID_OR_CEILING;
+    const orderby = opts.orderby ?? "fullname asc";
+    const pageOpts = {
+        request: opts.request,
+        sleep: opts.sleep,
+        maxRetries: opts.maxRetries,
+        entity: "contacts",
+        select: opts.select,
+        orderby,
+        pageSize: opts.pageSize,
+    };
+
+    if (opts.countOnly) {
+        // Each chunk holds at most chunkSize (<= the OR-ceiling) ids, so its count
+        // can never hit the Dynamics 5000 cap — the per-chunk @odata.count is exact
+        // and the disjoint chunks sum to the true total.
+        let count = 0;
+        for (let i = 0; i < ids.length; i += chunkSize) {
+            const idChunk = ids.slice(i, i + chunkSize);
+            const expression = `${base} and (${buildContactIdClause(idChunk)})`;
+            const page = await fetchEntityPage<T>(expression, { ...pageOpts, countOnly: true });
+            count += page["@odata.count"] ?? 0;
+        }
+        return { "@odata.count": count, value: [] };
+    }
+
+    const collected: T[] = [];
+    for (let i = 0; i < ids.length && collected.length < opts.pageSize; i += chunkSize) {
+        const idChunk = ids.slice(i, i + chunkSize);
+        const expression = `${base} and (${buildContactIdClause(idChunk)})`;
+        const page = await fetchEntityPage<T>(expression, pageOpts);
+        collected.push(...(page.value ?? []));
+    }
+    return { value: collected.slice(0, opts.pageSize) };
 }

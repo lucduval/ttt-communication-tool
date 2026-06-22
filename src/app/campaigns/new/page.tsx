@@ -331,11 +331,16 @@ export default function NewCampaignPage() {
     const fetchSampleContacts = useCallback(
         async (capturedFilters: FilterPayload, n: number): Promise<SelectableContact[]> => {
             const f = capturedFilters as Record<string, unknown>;
-            // Uploaded-list filters carry only `{ contactIds }` (issue #50) — the
-            // standard contact query can't resolve them, so resolving that sample
-            // by id is its own slice (#53). Until then show nothing rather than an
-            // arbitrary unfiltered sample; the count and send path are unaffected.
-            if (Array.isArray(f.contactIds)) return [];
+            // Uploaded-list filters carry only `{ contactIds }` (issue #50). Resolve
+            // the preview sample by id through the same server-side path (#53), so
+            // only contacts the user may see (owner scope, active state) appear.
+            if (Array.isArray(f.contactIds)) {
+                const result = await fetchContacts({
+                    top: n,
+                    contactIds: f.contactIds as string[],
+                });
+                return result.contacts as SelectableContact[];
+            }
             const result = await fetchContacts({
                 search: f.search as string | undefined,
                 top: n,
