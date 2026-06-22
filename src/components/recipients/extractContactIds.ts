@@ -1,14 +1,24 @@
 /**
- * Contact-id extraction — pure core (PRD #48, issue #50).
+ * Contact-id extraction — pure core (PRD #48, issues #50, #52).
  *
  * Turns already-parsed spreadsheet rows into the set of Dynamics contact ids a
- * campaign should target. The first row is the header; this slice implements
- * **tier-1 detection only** — an explicit `contactid` column header
- * (case-insensitive, trimmed). Smarter detection (Dynamics export headers,
- * GUID-shape sniffing, manual column choice) lands in later slices (#52, #54),
- * which is why the result carries an `ambiguous` signal that this slice only
- * ever raises for the one genuinely undecidable tier-1 case: two `contactid`
- * columns.
+ * campaign should target. The first row is the header; the id column is chosen
+ * by the first matching tier, in order:
+ *
+ *   - **Tier 1** — an explicit `contactid` header (case-insensitive, trimmed).
+ *   - **Tier 2** — the hidden `(Do Not Modify) <Entity>` GUID column standard
+ *     Dynamics exports carry. A Dynamics export also ships sibling
+ *     `(Do Not Modify) Row Checksum` / `Modified On` columns, so the match is
+ *     narrowed to the `(Do Not Modify)`-prefixed column whose data is
+ *     GUID-shaped — never the checksum or timestamp.
+ *   - **Tier 3** — GUID-shape auto-detect: when exactly one column's data is
+ *     GUID-shaped (under any header), use it.
+ *
+ * When no tier resolves to a single column the result carries the `ambiguous`
+ * signal with `candidates` populated, for the manual column choice in #54 — we
+ * never guess. That covers two `contactid` columns (tier 1), zero GUID-shaped
+ * columns (candidates = every column), and more than one GUID-shaped column
+ * (candidates = the GUID-shaped columns).
  *
  * Everything here is pure — no File, no FileReader — so the decision logic is
  * the test surface. A thin impure reader (`readContactIdsFromFile`) feeds rows
@@ -19,10 +29,9 @@
  */
 
 export type ContactIdExtractionStatus =
-    | "ok" // a single contactid column was found (contactIds may still be empty)
+    | "ok" // a single id column was resolved (contactIds may still be empty)
     | "empty" // the file had no rows at all
-    | "no-column" // no contactid column in the header (tier 1)
-    | "ambiguous"; // more than one contactid column — needs a manual choice (#54)
+    | "ambiguous"; // no single id column could be resolved — needs a manual choice (#54)
 
 export interface DetectedColumn {
     index: number;
@@ -43,6 +52,9 @@ export interface ContactIdExtraction {
 
 const GUID = /^\{?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}?$/i;
 
+/** A `(Do Not Modify) …` Dynamics export header (case-insensitive, trimmed). */
+const DO_NOT_MODIFY = /^\(do not modify\)/i;
+
 /** Normalise a candidate id cell to a canonical GUID, or null if it isn't one. */
 export function normaliseContactId(cell: string): string | null {
     const trimmed = cell.trim();
@@ -51,8 +63,25 @@ export function normaliseContactId(cell: string): string | null {
 }
 
 /**
- * Extract contact ids from parsed rows (first row = header). See module doc for
- * the tier-1 detection contract and the meaning of each status.
+ * Is this column's data GUID-shaped? True when it has at least one non-blank
+ * data cell and every non-blank cell normalises to a GUID. Blank cells are
+ * ignored (they are skipped at extraction time); a single non-GUID cell
+ * disqualifies the column so auto-detect never picks a column it can't trust.
+ */
+function isGuidColumn(dataRows: string[][], index: number): boolean {
+    let sawValue = false;
+    for (const row of dataRows) {
+        const cell = (row[index] ?? "").trim();
+        if (cell === "") continue;
+        if (normaliseContactId(cell) === null) return false;
+        sawValue = true;
+    }
+    return sawValue;
+}
+
+/**
+ * Extract contact ids from parsed rows (first row = header). See the module doc
+ * for the tier 1 → 2 → 3 detection contract and the meaning of each status.
  */
 export function extractContactIds(rows: string[][]): ContactIdExtraction {
     if (rows.length === 0) {
@@ -60,18 +89,35 @@ export function extractContactIds(rows: string[][]): ContactIdExtraction {
     }
 
     const [header, ...dataRows] = rows;
-    const candidates = header
-        .map((cell, index): DetectedColumn => ({ index, header: cell.trim() }))
-        .filter((c) => c.header.toLowerCase() === "contactid");
+    const columns = header.map((cell, index): DetectedColumn => ({ index, header: cell.trim() }));
 
-    if (candidates.length === 0) {
-        return { status: "no-column", idColumn: null, contactIds: [], skippedRows: 0, candidates: [] };
-    }
-    if (candidates.length > 1) {
-        return { status: "ambiguous", idColumn: null, contactIds: [], skippedRows: 0, candidates };
-    }
+    // Tier 1 — explicit contactid header.
+    const tier1 = columns.filter((c) => c.header.toLowerCase() === "contactid");
+    if (tier1.length === 1) return collect(tier1[0], dataRows);
+    if (tier1.length > 1) return ambiguous(tier1);
 
-    const idColumn = candidates[0];
+    // Tier 2 — the Dynamics (Do Not Modify) <Entity> GUID column (not the
+    // sibling Row Checksum / Modified On columns: narrow to the GUID-shaped one).
+    const dynamicsGuid = columns.filter(
+        (c) => DO_NOT_MODIFY.test(c.header) && isGuidColumn(dataRows, c.index),
+    );
+    if (dynamicsGuid.length === 1) return collect(dynamicsGuid[0], dataRows);
+
+    // Tier 3 — GUID-shape auto-detect across all columns.
+    const guidColumns = columns.filter((c) => isGuidColumn(dataRows, c.index));
+    if (guidColumns.length === 1) return collect(guidColumns[0], dataRows);
+
+    // Zero or more than one GUID-shaped column — offer a manual choice (#54).
+    // Candidates are the GUID-shaped columns when any exist, else every column.
+    return ambiguous(guidColumns.length > 0 ? guidColumns : columns);
+}
+
+function ambiguous(candidates: DetectedColumn[]): ContactIdExtraction {
+    return { status: "ambiguous", idColumn: null, contactIds: [], skippedRows: 0, candidates };
+}
+
+/** Run the dedup/skip loop over a chosen id column. */
+function collect(idColumn: DetectedColumn, dataRows: string[][]): ContactIdExtraction {
     const seen = new Set<string>();
     const contactIds: string[] = [];
     let skippedRows = 0;
@@ -87,5 +133,5 @@ export function extractContactIds(rows: string[][]): ContactIdExtraction {
         contactIds.push(id);
     }
 
-    return { status: "ok", idColumn, contactIds, skippedRows, candidates };
+    return { status: "ok", idColumn, contactIds, skippedRows, candidates: [idColumn] };
 }

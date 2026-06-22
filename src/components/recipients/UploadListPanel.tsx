@@ -157,11 +157,9 @@ function errorMessage(result: ContactIdExtraction): string {
     switch (result.status) {
         case "empty":
             return "The file is empty.";
-        case "no-column":
-            return "No column headed “contactid” was found in the file.";
         case "ambiguous":
-            return "More than one “contactid” column was found — please use a file with a single id column.";
+            return "Couldn’t identify a single column of contact ids — please use a file with one clearly-labelled id column.";
         default:
-            return "No valid contact ids were found in the contactid column.";
+            return "No valid contact ids were found in the id column.";
     }
 }
