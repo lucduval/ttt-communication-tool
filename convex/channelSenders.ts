@@ -68,11 +68,13 @@ async function sendEmailBatch_(
     });
 
     // `eligible` is the driver-provided set of recipients with no existing
-    // `messages` row for this campaign (the send-path idempotency seam core,
-    // PRD #55 / #56). Iterating it — rather than re-querying a sent/delivered-only
-    // guard — is what makes batch processing at-most-once across a crash/timeout
-    // recovery: an already-handled recipient (including a terminal `failed`) is
-    // never here, so it is never re-sent.
+    // `messages` row for this campaign, or a row still `pending` — the seed
+    // createBatches writes up front (the send-path idempotency seam core, PRD
+    // #55 / #56 / #63). Iterating it — rather than re-querying a
+    // sent/delivered-only guard — is what makes batch processing at-most-once
+    // across a crash/timeout recovery: an already-handled recipient
+    // (`attempted`/`sent`/`delivered`/`failed`) is never here, so it is never
+    // re-sent, while a fresh campaign's all-`pending` recipients all send.
 
     const crmQueue: Array<{ recipientId: string; subject: string; body: string }> = [];
 

@@ -170,11 +170,13 @@ export const createBatch = internalMutation({
 /**
  * Return the existing `messages` rows (recipientId + status) for the given
  * campaign recipients. This is the query behind the send-path eligibility rule
- * (PRD #55, slice #56): a recipient is eligible to send iff it has NO row here,
- * in ANY status. The Channel Send driver runs this once at batch start and
- * hands the pure `eligibleRecipients` rule (convex/lib/sendEligibility.ts) the
- * result, so a recipient recorded in any state — including `attempted` and a
- * terminal `failed` — is never auto-resent. This replaces the old
+ * (PRD #55, slices #56 + #63): a recipient is eligible to send iff it has NO
+ * row here, or a row still `pending` (the seed createBatches writes up front).
+ * The Channel Send driver runs this once at batch start and hands the pure
+ * `eligibleRecipients` rule (convex/lib/sendEligibility.ts) the result, so a
+ * recipient recorded in a settled state — `attempted`, `sent`, `delivered`, or
+ * a terminal `failed` — is never auto-resent, while a fresh campaign whose rows
+ * are all `pending` still sends to everyone. This replaces the old
  * sent/delivered-only guard, which re-sent `failed` recipients on recovery.
  *
  * Scoped to the current batch's `recipientIds` and served O(1) per recipient

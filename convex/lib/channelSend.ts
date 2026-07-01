@@ -56,10 +56,12 @@ export interface ChannelSender {
         emit: EmitFn,
         /**
          * The subset of `batch.recipients` eligible to send — those with no
-         * existing `messages` row for the campaign, in any status. The driver
+         * existing `messages` row for the campaign, or a row still `pending`
+         * (the seed createBatches writes up front, PRD #55 / #63). The driver
          * computes this once at batch start via the send-path eligibility rule
          * (the idempotency seam core, PRD #55 / #56), so a recipient already
-         * handled — including a terminal `failed` — is never auto-resent. Email
+         * handled — `attempted`/`sent`/`delivered`/`failed` — is never
+         * auto-resent, while a fresh campaign still sends to everyone. Email
          * consumes this instead of re-querying; WhatsApp/personalised adopt it
          * in a later slice (#61) and for now still iterate `batch.recipients`.
          */
@@ -156,11 +158,13 @@ export async function runChannelSend(
         return;
     }
 
-    // Send-path idempotency seam core (PRD #55 / #56): run the eligibility query
-    // once at batch start and apply the pure rule. A recipient is eligible iff it
-    // has no `messages` row for the campaign in any status, so a recovery re-run
-    // never re-sends an already-handled recipient (including a terminal `failed`).
-    // The adapter consumes this eligible set instead of guarding for itself.
+    // Send-path idempotency seam core (PRD #55 / #56 / #63): run the eligibility
+    // query once at batch start and apply the pure rule. A recipient is eligible
+    // iff it has no `messages` row for the campaign OR its row is still `pending`
+    // (the seed createBatches writes up front), so a fresh campaign sends to all
+    // its recipients while a recovery re-run never re-sends an already-handled
+    // recipient (`attempted`/`sent`/`delivered`/`failed`). The adapter consumes
+    // this eligible set instead of guarding for itself.
     const existingRows = await ctx.runQuery(internal.messages.getExistingMessageStatuses, {
         campaignId,
         recipientIds: batch.recipients.map((r) => r.id),

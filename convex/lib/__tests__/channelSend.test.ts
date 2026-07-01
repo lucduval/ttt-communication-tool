@@ -154,6 +154,41 @@ describe("runChannelSend driver", () => {
         });
     });
 
+    it("sends to ALL recipients of a fresh campaign whose rows are the createBatches-seeded `pending` (not zero) (#63)", async () => {
+        // Integration guard for the #63 collision: createBatches pre-creates a
+        // `pending` row for every recipient before the driver runs. If `pending`
+        // blocked, the eligibility query would filter EVERYONE out and the batch
+        // would send zero. The driver must hand the adapter all three recipients.
+        const batchWithRecipients = {
+            _id: "batch-1",
+            recipients: [
+                { id: "r1", name: "Alice" },
+                { id: "r2", name: "Bob" },
+                { id: "r3", name: "Carol" },
+            ],
+        };
+
+        let received: Array<{ id: string }> | undefined;
+        const sender = fakeSender(async (_ctx, _campaign, _batch, _emit, eligible) => {
+            received = eligible;
+            return {};
+        });
+
+        const { ctx } = createCtx({
+            campaign,
+            batch: batchWithRecipients,
+            existingRows: [
+                { recipientId: "r1", status: "pending" },
+                { recipientId: "r2", status: "pending" },
+                { recipientId: "r3", status: "pending" },
+            ],
+        });
+
+        await runChannelSend(ctx as any, { campaignId: "c1" as any, sender });
+
+        expect(received?.map((r) => r.id)).toEqual(["r1", "r2", "r3"]);
+    });
+
     it("hands the adapter a markAttempted that enriches ids into the driver-owned idempotent upsert", async () => {
         // The driver owns the `attempted` write shape (PRD #55 / #58): the adapter
         // calls markAttempted with bare ids; the driver enriches them from
