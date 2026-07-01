@@ -1,8 +1,9 @@
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
-import { internalMutation, internalQuery, query } from "./_generated/server";
+import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { tallyCampaign } from "./lib/campaignTally";
+import { checkAccessHelper } from "./users";
 
 // Statuses that can be filtered server-side via the by_campaign_status index.
 // "opened" and "clicked" are engagement states, not message statuses, so they
@@ -278,6 +279,90 @@ export const markAttemptedBatch = internalMutation({
         ),
     },
     handler: async (ctx, args) => markAttemptedBatchImpl(ctx, args),
+});
+
+/**
+ * Operator-initiated recovery of genuinely-`failed` recipients (PRD #55, slice
+ * #60).
+ *
+ * Automatic sending is at-most-once: the eligibility rule (convex/lib/
+ * sendEligibility.ts, #56) declines to re-send any recipient with a *settled*
+ * row, `failed` included — deliberately, because a `failed` can be a
+ * delivered-but-429 that we must never silently resend. This is the explicit,
+ * operator-triggered escape hatch that recovers a genuine failure: for each
+ * targeted recipient whose row is `failed`, it clears the row back to the seed
+ * `pending` state, which is exactly what the eligibility rule treats as
+ * eligible again — so the next automatic run resends it, without re-sending the
+ * whole campaign.
+ *
+ * It touches ONLY `failed` rows. An `attempted` row (handed to a provider,
+ * outcome unknown) is left alone — resetting it could resend an
+ * ambiguous-but-delivered recipient, the one case at-most-once must never
+ * allow. `sent`/`delivered` are untouched, and a missing or already-`pending`
+ * row is already eligible so there is nothing to do. Resetting to `pending`
+ * (rather than deleting) preserves the per-recipient row that click/open
+ * tracking and `setOpportunityId` reconciliation depend on, and keeps the
+ * campaign's recipient total stable. Returns the number of rows actually reset.
+ */
+export async function resendFailedRecipientsImpl(
+    ctx: { db: any },
+    args: {
+        campaignId: Id<"campaigns">;
+        recipientIds: string[];
+    }
+): Promise<{ reset: number }> {
+    let reset = 0;
+    for (const recipientId of args.recipientIds) {
+        const existing = await ctx.db
+            .query("messages")
+            .withIndex("by_campaign_recipient", (q: any) =>
+                q.eq("campaignId", args.campaignId).eq("recipientId", recipientId)
+            )
+            .first();
+
+        if (existing && existing.status === "failed") {
+            await ctx.db.patch(existing._id, {
+                status: "pending",
+                errorMessage: undefined,
+            });
+            reset++;
+        }
+        // else: no row / `pending` (already eligible), or `attempted`/`sent`/
+        // `delivered` (must never be auto-resent) — leave untouched.
+    }
+    return { reset };
+}
+
+/**
+ * Public, operator-initiated action to make targeted `failed` recipients
+ * eligible to send again — the only path that resends a failure, and never an
+ * automatic one (see `resendFailedRecipientsImpl`). List a campaign's genuine
+ * failures via `getFailedMessages`, then hand the recipient ids here. Guarded to
+ * the campaign creator or an admin, matching the other operator campaign
+ * mutations (campaigns.pauseCampaign / resumeCampaign).
+ */
+export const resendFailedRecipients = mutation({
+    args: {
+        campaignId: v.id("campaigns"),
+        recipientIds: v.array(v.string()),
+    },
+    handler: async (ctx, args) => {
+        const access = await checkAccessHelper(ctx);
+        if (!access.hasAccess || !access.user) throw new Error("Unauthorized");
+
+        const campaign = await ctx.db.get(args.campaignId);
+        if (!campaign) throw new Error("Campaign not found");
+
+        const isAdmin = access.user.role === "admin";
+        const isCreator = campaign.createdBy === access.user.clerkId;
+        if (!isAdmin && !isCreator) {
+            throw new Error(
+                "Only the campaign creator or an admin can resend failed recipients"
+            );
+        }
+
+        return await resendFailedRecipientsImpl(ctx, args);
+    },
 });
 
 // Batch update message statuses - much more efficient than per-message updates
