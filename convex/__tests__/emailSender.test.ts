@@ -80,10 +80,21 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
         const emit = async (results: SendResult[]) => {
             emitted.push(...results);
         };
+        const markedIds: string[] = [];
+        const markAttempted = async (ids: string[]) => {
+            markedIds.push(...ids);
+        };
 
         const { ctx } = createCtx({ campaignContent });
         // The driver hands the adapter the eligible set; here all recipients are eligible.
-        const ret = await emailSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients);
+        const ret = await emailSender.sendBatch(
+            ctx as any,
+            campaign,
+            batch,
+            emit,
+            batch.recipients,
+            markAttempted
+        );
 
         const byId = Object.fromEntries(emitted.map((r) => [r.recipientId, r]));
         expect(byId.r1).toMatchObject({ success: true });
@@ -96,6 +107,10 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
         // Only the two valid recipients reach the $batch send.
         expect(boundary.sendEmailBatch).toHaveBeenCalledTimes(1);
         expect(boundary.sendEmailBatch.mock.calls[0][0]).toHaveLength(2);
+
+        // Only the validated recipients that reach Graph are marked `attempted`;
+        // the pre-flight-invalid r2 (recorded `failed` directly) is never marked.
+        expect(markedIds).toEqual(["r1", "r3"]);
 
         // The adapter reports a successor delay; it never schedules a successor itself.
         expect(ret.nextDelayMs).toBeGreaterThan(0);
@@ -123,7 +138,7 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
         };
 
         const { ctx } = createCtx({ campaignContent });
-        await emailSender.sendBatch(ctx as any, campaign, batch, emit, eligible);
+        await emailSender.sendBatch(ctx as any, campaign, batch, emit, eligible, async () => {});
 
         // Only r2 reaches the send boundary; r1 is never sent nor emitted.
         expect(boundary.sendEmailBatch.mock.calls[0][0]).toHaveLength(1);
@@ -131,5 +146,45 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
             "bob@example.com"
         );
         expect(emitted.map((r) => r.recipientId)).toEqual(["r2"]);
+    });
+
+    it("marks each ≤20 chunk `attempted` immediately before its Graph $batch call", async () => {
+        // The crash-blast-radius guarantee (PRD #55 / #58): every chunk is durably
+        // marked `attempted` BEFORE it is handed to Graph, and chunking is ≤20 even
+        // when a batch carries more, so a mid-batch crash strands at most one chunk.
+        const recipients = Array.from({ length: 25 }, (_, i) => ({
+            id: `r${i}`,
+            email: `r${i}@example.com`,
+            name: `R${i}`,
+        }));
+        const batch = { _id: "batch-1" as any, recipients };
+        boundary.sendEmailBatch.mockImplementation(async (msgs: any[]) =>
+            msgs.map(() => ({ success: true }))
+        );
+
+        // Interleave the two side-effects onto one ordered log so we can assert the
+        // marker for a chunk always lands before that chunk's send.
+        const events: string[] = [];
+        boundary.sendEmailBatch.mockImplementation(async (msgs: any[]) => {
+            events.push(`send:${msgs.length}`);
+            return msgs.map(() => ({ success: true }));
+        });
+        const markAttempted = async (ids: string[]) => {
+            events.push(`mark:${ids.length}`);
+        };
+
+        const emit = async () => {};
+        const { ctx } = createCtx({ campaignContent });
+        await emailSender.sendBatch(
+            ctx as any,
+            campaign,
+            batch,
+            emit,
+            batch.recipients,
+            markAttempted
+        );
+
+        // 25 recipients → two chunks (20 + 5), each marked right before its send.
+        expect(events).toEqual(["mark:20", "send:20", "mark:5", "send:5"]);
     });
 });

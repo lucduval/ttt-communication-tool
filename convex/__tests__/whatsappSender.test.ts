@@ -116,7 +116,7 @@ describe("whatsappSender.sendBatch (faked Meta send boundary)", () => {
 
         const { emitted, emit } = collector();
         const { ctx } = createCtx();
-        const ret = await whatsappSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients);
+        const ret = await whatsappSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients, async () => {});
 
         const byId = Object.fromEntries(emitted.map((r) => [r.recipientId, r]));
         expect(byId.r1).toMatchObject({ success: true, externalMessageId: "wamid.ABC" });
@@ -151,7 +151,7 @@ describe("whatsappSender.sendBatch (faked Meta send boundary)", () => {
 
         const { emitted, emit } = collector();
         const { ctx } = createCtx();
-        const ret = await whatsappSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients);
+        const ret = await whatsappSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients, async () => {});
 
         // The three-strike abort surfaces as a halt so the driver schedules no successor.
         expect(ret.halt).toBeTruthy();

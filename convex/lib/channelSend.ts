@@ -21,6 +21,17 @@ export type SendResult = {
 /** Push-based sink the adapter calls with results as it produces them. */
 export type EmitFn = (results: SendResult[]) => Promise<void>;
 
+/**
+ * Driver-owned "handed to Graph" marker (PRD #55 / #58). The adapter calls it
+ * with the recipient ids of a chunk *immediately before* the provider call; the
+ * driver turns them into one idempotent `attempted` upsert (see
+ * `messages.markAttemptedBatch`). The write shape lives in the driver so it is
+ * identical across channels — the adapter owns only *when* it fires. Re-marking
+ * an already-marked or settled recipient is a no-op, so a recovery re-run never
+ * duplicates a row or regresses a status.
+ */
+export type MarkAttemptedFn = (recipientIds: string[]) => Promise<void>;
+
 /** The minimal campaign shape the driver hands to a Channel Sender. */
 export type DriverBatch = {
     _id: Id<"campaignBatches">;
@@ -52,7 +63,15 @@ export interface ChannelSender {
          * consumes this instead of re-querying; WhatsApp/personalised adopt it
          * in a later slice (#61) and for now still iterate `batch.recipients`.
          */
-        eligible: DriverBatch["recipients"]
+        eligible: DriverBatch["recipients"],
+        /**
+         * Driver-owned durable "handed to Graph" marker (PRD #55 / #58). The
+         * adapter calls it with a chunk's recipient ids immediately BEFORE the
+         * provider call; the driver writes the idempotent `attempted` rows. Email
+         * calls it per ≤20 `$batch` chunk; WhatsApp/personalised adopt it in #61
+         * and ignore it for now.
+         */
+        markAttempted: MarkAttemptedFn
     ): Promise<{ halt?: string; nextDelayMs?: number }>;
 }
 
@@ -148,6 +167,29 @@ export async function runChannelSend(
     });
     const eligible = eligibleRecipients(existingRows, batch.recipients);
 
+    // Driver-owned "handed to Graph" marker (PRD #55 / #58). The adapter calls
+    // this with a chunk's ids just before the provider call; the driver enriches
+    // them from `batch.recipients` (so a freshly-inserted `attempted` row carries
+    // the recipient's email/phone/name) and delegates to the one idempotent
+    // upsert. The write shape stays here so it is identical across channels.
+    const recipientById = new Map(batch.recipients.map((r) => [r.id, r]));
+    const markAttempted: MarkAttemptedFn = async (recipientIds) => {
+        if (recipientIds.length === 0) return;
+        await ctx.runMutation(internal.messages.markAttemptedBatch, {
+            campaignId,
+            channel: sender.channel,
+            recipients: recipientIds.map((id) => {
+                const r = recipientById.get(id);
+                return {
+                    recipientId: id,
+                    recipientEmail: r?.email,
+                    recipientPhone: r?.phone,
+                    recipientName: r?.name ?? "",
+                };
+            }),
+        });
+    };
+
     let successCount = 0;
     let failedCount = 0;
     const buffer: SendResult[] = [];
@@ -214,7 +256,14 @@ export async function runChannelSend(
     };
 
     try {
-        const { halt, nextDelayMs } = await sender.sendBatch(ctx, campaign, batch, emit, eligible);
+        const { halt, nextDelayMs } = await sender.sendBatch(
+            ctx,
+            campaign,
+            batch,
+            emit,
+            eligible,
+            markAttempted
+        );
 
         // Final flush of whatever is left in the buffer.
         await flush();

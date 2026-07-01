@@ -3,7 +3,7 @@
 import { internal } from "./_generated/api";
 import type { ActionCtx } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
-import type { ChannelSender, DriverBatch, EmitFn } from "./lib/channelSend";
+import type { ChannelSender, DriverBatch, EmitFn, MarkAttemptedFn } from "./lib/channelSend";
 import {
     getMetaWhatsAppConfig,
     normalizeToE164Digits,
@@ -58,7 +58,8 @@ async function sendEmailBatch_(
     campaign: any,
     _batch: DriverBatch,
     emit: EmitFn,
-    eligible: DriverBatch["recipients"]
+    eligible: DriverBatch["recipients"],
+    markAttempted: MarkAttemptedFn
 ): Promise<{ halt?: string; nextDelayMs?: number }> {
     const campaignId = campaign._id as Id<"campaigns">;
 
@@ -218,6 +219,16 @@ async function sendEmailBatch_(
 
     for (let i = 0; i < prepared.length; i += SUB_BATCH) {
         const slice = prepared.slice(i, i + SUB_BATCH);
+
+        // Durably mark this chunk `attempted` BEFORE handing it to Graph (PRD #55
+        // / #58). A worker crash after this point but before the chunk's response
+        // is settled leaves at most these ≤20 recipients in `attempted` — the
+        // eligibility rule (#56) then declines to auto-resend them, bounding the
+        // blast radius of a crash to one chunk instead of a mass re-send. The
+        // chunk holds only validated recipients; pre-flight invalids were recorded
+        // `failed` in phase 1 and never reach here.
+        await markAttempted(slice.map((p) => p.recipient.id));
+
         const sendResults = await sendEmailBatch(slice.map((p) => p.message));
 
         for (let j = 0; j < slice.length; j++) {

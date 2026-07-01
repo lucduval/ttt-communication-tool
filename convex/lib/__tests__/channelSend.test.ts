@@ -154,6 +154,58 @@ describe("runChannelSend driver", () => {
         });
     });
 
+    it("hands the adapter a markAttempted that enriches ids into the driver-owned idempotent upsert", async () => {
+        // The driver owns the `attempted` write shape (PRD #55 / #58): the adapter
+        // calls markAttempted with bare ids; the driver enriches them from
+        // batch.recipients (email/phone/name) + its channel and delegates to the
+        // single idempotent `messages.markAttemptedBatch` upsert.
+        const batchWithRecipients = {
+            _id: "batch-1",
+            recipients: [
+                { id: "r1", email: "a@x.test", name: "Alice" },
+                { id: "r2", phone: "+2782", name: "Bob" },
+                { id: "r3", email: "c@x.test", name: "Carol" },
+            ],
+        };
+
+        const sender = fakeSender(
+            async (_ctx, _campaign, _batch, _emit, _eligible, markAttempted) => {
+                // The adapter marks a chunk of two of the three recipients.
+                await markAttempted(["r1", "r3"]);
+                return {};
+            }
+        );
+
+        const { ctx, mutations } = createCtx({ campaign, batch: batchWithRecipients });
+
+        await runChannelSend(ctx as any, { campaignId: "c1" as any, sender });
+
+        const mark = mutations.find((m) => m.name === "messages:markAttemptedBatch");
+        expect(mark?.args).toEqual({
+            campaignId: "c1",
+            channel: "email",
+            recipients: [
+                { recipientId: "r1", recipientEmail: "a@x.test", recipientPhone: undefined, recipientName: "Alice" },
+                { recipientId: "r3", recipientEmail: "c@x.test", recipientPhone: undefined, recipientName: "Carol" },
+            ],
+        });
+    });
+
+    it("does not issue an upsert when the adapter marks an empty chunk", async () => {
+        const sender = fakeSender(
+            async (_ctx, _campaign, _batch, _emit, _eligible, markAttempted) => {
+                await markAttempted([]);
+                return {};
+            }
+        );
+
+        const { ctx, mutations } = createCtx({ campaign, batch });
+
+        await runChannelSend(ctx as any, { campaignId: "c1" as any, sender });
+
+        expect(mutations.some((m) => m.name === "messages:markAttemptedBatch")).toBe(false);
+    });
+
     it("maps emitted results to per-recipient status writes (incl. externalMessageId)", async () => {
         const sender = fakeSender(async (_ctx, _campaign, _batch, emit: EmitFn) => {
             await emit([{ recipientId: "a", success: true, externalMessageId: "wamid-1" }]);

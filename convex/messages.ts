@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { internalMutation, internalQuery, query } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { tallyCampaign } from "./lib/campaignTally";
 
 // Statuses that can be filtered server-side via the by_campaign_status index.
@@ -198,6 +199,83 @@ export const getExistingMessageStatuses = internalQuery({
         }
         return rows;
     },
+});
+
+/**
+ * Idempotent "handed to Graph" marker write — the durable `attempted` row the
+ * email path previously lacked (PRD #55, slice #58). The Channel Send driver owns
+ * this write shape so it is identical across channels; the adapter owns only
+ * *when* it fires (email: once per ≤20 `$batch` chunk, immediately before the
+ * Graph call).
+ *
+ * Upsert keyed by (campaignId, recipientId):
+ *   - no row              → insert a fresh `attempted` row
+ *   - existing `pending`  → advance to `attempted` (forward progress, not a
+ *                           regression — `pending` means "not yet attempted")
+ *   - any other status    → no-op (never regress a settled `sent`/`delivered`/
+ *                           `failed`, never duplicate an existing `attempted`)
+ *
+ * So a recovery re-run that re-marks an already-marked or already-settled
+ * recipient is a no-op — never a duplicate row, never a status regression. This
+ * is what bounds a mid-batch worker crash to at most one chunk (≤20) stranded in
+ * `attempted`, which the eligibility rule (#56) then declines to auto-resend.
+ */
+export async function markAttemptedBatchImpl(
+    ctx: { db: any },
+    args: {
+        campaignId: Id<"campaigns">;
+        channel: "email" | "whatsapp" | "personalised";
+        recipients: Array<{
+            recipientId: string;
+            recipientEmail?: string;
+            recipientPhone?: string;
+            recipientName: string;
+        }>;
+    }
+): Promise<void> {
+    for (const r of args.recipients) {
+        const existing = await ctx.db
+            .query("messages")
+            .withIndex("by_campaign_recipient", (q: any) =>
+                q.eq("campaignId", args.campaignId).eq("recipientId", r.recipientId)
+            )
+            .first();
+
+        if (!existing) {
+            await ctx.db.insert("messages", {
+                campaignId: args.campaignId,
+                recipientId: r.recipientId,
+                recipientEmail: r.recipientEmail,
+                recipientPhone: r.recipientPhone,
+                recipientName: r.recipientName,
+                status: "attempted",
+                channel: args.channel,
+            });
+        } else if (existing.status === "pending") {
+            await ctx.db.patch(existing._id, { status: "attempted" });
+        }
+        // else: already `attempted` or settled — no-op (no dup row, no regression).
+    }
+}
+
+export const markAttemptedBatch = internalMutation({
+    args: {
+        campaignId: v.id("campaigns"),
+        channel: v.union(
+            v.literal("email"),
+            v.literal("whatsapp"),
+            v.literal("personalised")
+        ),
+        recipients: v.array(
+            v.object({
+                recipientId: v.string(),
+                recipientEmail: v.optional(v.string()),
+                recipientPhone: v.optional(v.string()),
+                recipientName: v.string(),
+            })
+        ),
+    },
+    handler: async (ctx, args) => markAttemptedBatchImpl(ctx, args),
 });
 
 // Batch update message statuses - much more efficient than per-message updates
