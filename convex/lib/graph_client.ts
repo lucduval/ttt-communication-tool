@@ -242,19 +242,6 @@ export interface BatchSendResult {
     status?: number;
 }
 
-/**
- * Case-insensitive header lookup. Microsoft Graph $batch responses preserve
- * original header casing, which varies between sub-services.
- */
-function findHeader(headers: Record<string, string> | undefined, name: string): string | null {
-    if (!headers) return null;
-    const target = name.toLowerCase();
-    for (const [k, v] of Object.entries(headers)) {
-        if (k.toLowerCase() === target) return v;
-    }
-    return null;
-}
-
 function formatBatchErrorBody(body: unknown): string {
     if (body === null || body === undefined) return "";
     if (typeof body === "string") return body.slice(0, 300);
@@ -275,9 +262,12 @@ function formatBatchErrorBody(body: unknown): string {
  *  - Microsoft Graph forwards at most 4 sub-requests at a time to Outlook,
  *    regardless of batch size. A batch of 20 effectively executes as 5 groups
  *    of 4 in parallel on the Outlook side.
- *  - SDKs do NOT auto-retry sub-items that hit 429. We retry per-item here,
- *    honouring each item's Retry-After header for 429s and using exponential
- *    backoff for 5xx.
+ *  - At-most-once (PRD #55, issue #57): a non-2xx *sub-response* is TERMINAL —
+ *    that recipient settles `failed` with no in-call resend. Such a response
+ *    may arrive after the message was already accepted and delivered, so
+ *    resending it is what produced the reported 6× duplicate. The only retry
+ *    is the outer envelope: a rejected $batch POST (before any sub-request runs)
+ *    delivered nothing, so retrying the whole envelope is safe.
  */
 export async function sendEmailBatch(
     messages: EmailMessage[]
@@ -287,10 +277,8 @@ export async function sendEmailBatch(
         throw new Error("Microsoft Graph $batch supports at most 20 sub-requests");
     }
 
-    const results: BatchSendResult[] = new Array(messages.length);
-
-    // Pre-build sub-request bodies once. Reuse across attempts so we don't
-    // rebuild large attachment payloads on retries.
+    // Pre-build sub-request bodies once. Reuse across outer-envelope retries so
+    // we don't rebuild large attachment payloads.
     const subRequests = messages.map((message, idx) => {
         const { payload, sharedMailbox } = buildSendMailPayload(message);
         return {
@@ -302,13 +290,11 @@ export async function sendEmailBatch(
         };
     });
 
-    let pending = messages.map((_, i) => i);
     const maxAttempts = 3;
     const baseDelayMs = 1000;
 
-    for (let attempt = 1; attempt <= maxAttempts && pending.length > 0; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         const token = await getGraphAccessToken();
-        const requestsForThisAttempt = pending.map((idx) => subRequests[idx]);
 
         const batchResponse = await fetch("https://graph.microsoft.com/v1.0/$batch", {
             method: "POST",
@@ -316,24 +302,23 @@ export async function sendEmailBatch(
                 Authorization: `Bearer ${token}`,
                 "Content-Type": "application/json",
             },
-            body: JSON.stringify({ requests: requestsForThisAttempt }),
+            body: JSON.stringify({ requests: subRequests }),
         });
 
         // Outer $batch HTTP failure (rare — usually only on auth or network).
+        // Nothing was forwarded to Outlook, so retrying the whole envelope is
+        // safe. This is the ONLY retry.
         if (!batchResponse.ok) {
             const errText = await batchResponse.text();
             console.error(`$batch HTTP ${batchResponse.status}: ${errText}`);
 
             const isLastAttempt = attempt === maxAttempts;
             if (isLastAttempt || !isRetryableHttpStatus(batchResponse.status)) {
-                for (const idx of pending) {
-                    results[idx] = {
-                        success: false,
-                        status: batchResponse.status,
-                        error: `$batch failed: ${batchResponse.status} - ${errText.slice(0, 300)}`,
-                    };
-                }
-                return results;
+                return messages.map(() => ({
+                    success: false,
+                    status: batchResponse.status,
+                    error: `$batch failed: ${batchResponse.status} - ${errText.slice(0, 300)}`,
+                }));
             }
 
             const retryAfterSec =
@@ -357,63 +342,46 @@ export async function sendEmailBatch(
             }>;
         };
 
-        const nextPending: number[] = [];
-        let maxRetryDelayMs = 0;
-
+        // The outer POST was accepted, so every sub-request reached Outlook.
+        // Settle each sub-response terminally — 2xx succeeds, anything else
+        // fails with no resend (at-most-once, issue #57).
+        const results: BatchSendResult[] = new Array(messages.length);
         for (const sub of responseBody.responses) {
             const idx = parseInt(sub.id, 10);
-            if (Number.isNaN(idx)) continue;
+            if (Number.isNaN(idx) || idx < 0 || idx >= messages.length) continue;
 
-            // sendMail returns 202 Accepted on success
+            // sendMail returns 202 Accepted on success.
             if (sub.status >= 200 && sub.status < 300) {
                 results[idx] = { success: true, status: sub.status };
-                continue;
+            } else {
+                results[idx] = {
+                    success: false,
+                    status: sub.status,
+                    error: `${sub.status} - ${formatBatchErrorBody(sub.body)}`,
+                };
             }
-
-            const retryable = sub.status === 429 || (sub.status >= 500 && sub.status < 600);
-            if (retryable && attempt < maxAttempts) {
-                nextPending.push(idx);
-                if (sub.status === 429) {
-                    const ra = parseRetryAfter(findHeader(sub.headers, "Retry-After"));
-                    // Honour Retry-After if present; otherwise minimum 30s.
-                    // Graph IncomingBytes 429s reset over a 5-min window, but
-                    // sendMail throttling typically suggests shorter waits via
-                    // the header — trust it when given.
-                    const itemDelayMs = (ra ?? 30) * 1000;
-                    maxRetryDelayMs = Math.max(maxRetryDelayMs, itemDelayMs);
-                } else {
-                    maxRetryDelayMs = Math.max(
-                        maxRetryDelayMs,
-                        baseDelayMs * Math.pow(2, attempt - 1)
-                    );
-                }
-                continue;
-            }
-
-            results[idx] = {
-                success: false,
-                status: sub.status,
-                error: `${sub.status} - ${formatBatchErrorBody(sub.body)}`,
-            };
         }
 
-        pending = nextPending;
-        if (pending.length > 0 && maxRetryDelayMs > 0) {
-            await new Promise((resolve) => setTimeout(resolve, maxRetryDelayMs));
+        // Defensive: a sub-request the batch omitted from its responses is a
+        // bug on Graph's side; settle it failed rather than leaving a hole.
+        for (let idx = 0; idx < messages.length; idx++) {
+            if (!results[idx]) {
+                results[idx] = {
+                    success: false,
+                    error: "No sub-response returned for this recipient",
+                };
+            }
         }
+
+        return results;
     }
 
-    // Defensive: anything still pending without a recorded result is a bug.
-    for (const idx of pending) {
-        if (!results[idx]) {
-            results[idx] = {
-                success: false,
-                error: "Unknown failure (exhausted retries with no response)",
-            };
-        }
-    }
-
-    return results;
+    // Unreachable: the loop above either returns or exhausts outer-envelope
+    // retries (which returns on the last attempt). Kept for exhaustiveness.
+    return messages.map(() => ({
+        success: false,
+        error: "Unknown failure (exhausted retries with no response)",
+    }));
 }
 
 /**
