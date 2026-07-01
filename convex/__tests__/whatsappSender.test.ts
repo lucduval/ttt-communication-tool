@@ -131,6 +131,59 @@ describe("whatsappSender.sendBatch (faked Meta send boundary)", () => {
         expect(ret.halt).toBeUndefined();
     });
 
+    it("sends only the eligible subset and marks each attempted before its send (seam adoption, #61)", async () => {
+        const batch = {
+            _id: "batch-1" as any,
+            recipients: [
+                { id: "r1", phone: "+27821111111", name: "A" },
+                { id: "r2", phone: "+27822222222", name: "B" },
+            ],
+        };
+        // r2 is already handled (not in the driver's eligible set); only r1 sends.
+        const eligible = [batch.recipients[0]];
+
+        // Record the interleaving of markAttempted vs the Meta send so we can
+        // assert the mark lands BEFORE the provider call (crash-blast-radius).
+        const order: string[] = [];
+        const markAttempted = vi.fn(async (ids: string[]) => {
+            order.push(`mark:${ids.join(",")}`);
+        });
+        boundary.sendTemplateWithRetry.mockImplementation(async () => {
+            order.push("send");
+            return { status: "sent", wamid: "wamid.R1", attempts: 1, latencyMs: 1 };
+        });
+
+        const { emitted, emit } = collector();
+        const { ctx } = createCtx();
+        await whatsappSender.sendBatch(ctx as any, campaign, batch, emit, eligible, markAttempted);
+
+        // Only the eligible recipient reached the provider — r2 is never re-sent.
+        expect(boundary.sendTemplateWithRetry).toHaveBeenCalledTimes(1);
+        expect(emitted.map((e) => e.recipientId)).toEqual(["r1"]);
+        expect(emitted[0]).toMatchObject({ success: true, externalMessageId: "wamid.R1" });
+
+        // markAttempted fired for exactly r1, immediately before its send.
+        expect(markAttempted).toHaveBeenCalledTimes(1);
+        expect(markAttempted).toHaveBeenCalledWith(["r1"]);
+        expect(order).toEqual(["mark:r1", "send"]);
+    });
+
+    it("does not mark an invalid-phone recipient attempted (never handed to Meta)", async () => {
+        const batch = {
+            _id: "batch-1" as any,
+            recipients: [{ id: "r1", phone: "", name: "A" }],
+        };
+        const markAttempted = vi.fn(async () => {});
+        const { emitted, emit } = collector();
+        const { ctx } = createCtx();
+        await whatsappSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients, markAttempted);
+
+        expect(boundary.sendTemplateWithRetry).not.toHaveBeenCalled();
+        expect(markAttempted).not.toHaveBeenCalled();
+        expect(emitted[0]).toMatchObject({ success: false });
+        expect(emitted[0].error).toContain("Invalid phone number");
+    });
+
     it("returns { halt } after three consecutive permanent template errors", async () => {
         const batch = {
             _id: "batch-1" as any,

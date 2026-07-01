@@ -308,7 +308,9 @@ async function sendWhatsAppBatch_(
     ctx: ActionCtx,
     campaign: any,
     batch: DriverBatch,
-    emit: EmitFn
+    emit: EmitFn,
+    eligible: DriverBatch["recipients"],
+    markAttempted: MarkAttemptedFn
 ): Promise<{ halt?: string; nextDelayMs?: number }> {
     const campaignId = campaign._id as Id<"campaigns">;
 
@@ -402,13 +404,18 @@ async function sendWhatsAppBatch_(
     );
     const neededFields = [...Object.values(varToField), ...buttonVars];
     const { fetchContactFieldsByIds } = await import("./lib/dynamics_util");
+    // Send only to the driver-computed eligible set (the send-path idempotency
+    // seam, PRD #55 / #56 / #61): a recipient already handled — `attempted`,
+    // `sent`, `delivered`, or a terminal `failed` — is never here, so an
+    // ambiguous Meta response settled `failed` is never auto-resent on a
+    // recovery re-run, while a fresh campaign's `pending` recipients all send.
     const crmFieldMap = await fetchContactFieldsByIds(
-        batch.recipients.map((r) => r.id),
+        eligible.map((r) => r.id),
         neededFields
     );
 
     await Promise.all(
-        batch.recipients.map(async (recipient) => {
+        eligible.map(async (recipient) => {
             if (templateAbortReason) {
                 await emit([
                     { recipientId: recipient.id, success: false, error: `Aborted: ${templateAbortReason}` },
@@ -463,7 +470,17 @@ async function sendWhatsAppBatch_(
             // The payload builder picks body variables from template.variables and the
             // button variable from template.buttonUrlVariable, both from this map.
             const body = buildTemplateRequestBody(templateForSend, toDigits, allVariables);
-            const result = await limiter.schedule(() => sendTemplateWithRetry(config, body));
+            // Durably mark this recipient `attempted` immediately BEFORE handing it
+            // to Meta (PRD #55 / #58 / #61). Marking inside the rate-limiter slot —
+            // not before scheduling — means only recipients the limiter has actually
+            // released to send are marked, so a mid-batch action kill strands at most
+            // the in-flight recipients (not the whole queued fan-out) in `attempted`;
+            // the eligibility rule (#56) then declines to auto-resend them, so an
+            // ambiguous Meta response is treated as handed-off, never re-sent.
+            const result = await limiter.schedule(async () => {
+                await markAttempted([recipient.id]);
+                return sendTemplateWithRetry(config, body);
+            });
 
             if (result.status === "sent") {
                 consecutiveTemplateErrors = 0;
@@ -537,7 +554,9 @@ async function sendPersonalisedBatch_(
     ctx: ActionCtx,
     campaign: any,
     batch: DriverBatch,
-    emit: EmitFn
+    emit: EmitFn,
+    eligible: DriverBatch["recipients"],
+    markAttempted: MarkAttemptedFn
 ): Promise<{ halt?: string; nextDelayMs?: number }> {
     const campaignId = campaign._id as Id<"campaigns">;
 
@@ -552,23 +571,21 @@ async function sendPersonalisedBatch_(
     const { buildPersonalisedEmail } = await import("./lib/emailTemplatePersonalised");
     const { sendEmail } = await import("./lib/graph_client");
 
-    // Create pending message records so click/open tracking and setOpportunityId can find them.
-    await ctx.runMutation(internal.messages.createBatch, {
-        messages: batch.recipients.map((r) => ({
-            campaignId,
-            recipientId: r.id,
-            recipientEmail: r.email ?? undefined,
-            recipientName: r.name,
-            status: "pending" as const,
-            channel: "personalised" as const,
-        })),
-    });
+    // Row creation is now the seam's, not the adapter's (PRD #55 / #61). The seed
+    // `createBatches` writes a `pending` row per recipient up front (#63) — the
+    // click/open-tracking and `setOpportunityId` reconciliation the personalised
+    // path depends on — and `markAttempted` (below) advances that row to
+    // `attempted` immediately before the send, so the row still exists throughout.
+    // Iterating `eligible` rather than `batch.recipients` is what makes this path
+    // at-most-once: a recipient already handled (`attempted`/`sent`/`delivered`/
+    // `failed`) is not here, so an ambiguous Graph response settled `failed` is
+    // never auto-resent on a recovery re-run, matching the email seam exactly.
 
     // The driver owns the result buffer, so track successful recipientIds locally
     // for the post-loop personalised-history dedup write.
     const successfulIds: string[] = [];
 
-    for (const recipient of batch.recipients) {
+    for (const recipient of eligible) {
         try {
             // 1. Fetch tax data. The Tax Profile module owns the ITA34/IRP5 read,
             // latest-year selection, and field mapping; the contact lookup (name,
@@ -635,7 +652,12 @@ async function sendPersonalisedBatch_(
             const subjectTemplate = campaign.subject || "{firstName}, your personalised RA plan";
             const emailSubject = subjectTemplate.replace(/\{firstName\}/g, recipientFirstName);
 
-            // 7. Send
+            // 7. Send. Mark `attempted` immediately BEFORE the Graph call (PRD #55
+            // / #58 / #61): a crash between the mark and the response strands this
+            // one recipient in `attempted`, which the eligibility rule (#56)
+            // declines to auto-resend — the same crash-blast-radius guarantee the
+            // email seam gives, one recipient at a time for this sequential path.
+            await markAttempted([recipient.id]);
             const result = await sendEmail({
                 subject: emailSubject,
                 body: emailBody,

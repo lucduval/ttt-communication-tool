@@ -136,4 +136,55 @@ describe("personalisedSender.sendBatch (faked Dynamics + AI + send boundary)", (
         expect(ret.nextDelayMs).toBe(500);
         expect(ret.halt).toBeUndefined();
     }, 20000);
+
+    it("sends only the eligible subset and marks each attempted before its send (seam adoption, #61)", async () => {
+        const batch = {
+            _id: "pbatch-1" as any,
+            recipients: [
+                { id: "p1", email: "pat@example.com", name: "Pat Jones" },
+                { id: "p2", email: "sam@example.com", name: "Sam Lee" },
+            ],
+        };
+        // p2 is already handled (not in the driver's eligible set); only p1 sends,
+        // even though both have full tax data.
+        const eligible = [batch.recipients[0]];
+
+        boundary.dynamicsRequest.mockImplementation(async (path: string) => {
+            if (path.includes("riivo_ita34s")) return { value: [ita34] };
+            if (path.includes("riivo_irp5s")) return { value: [] };
+            if (path.includes("contacts(")) {
+                return { fullname: "Pat Jones", firstname: "Pat", ttt_idnumber: null, riivo_age: 40 };
+            }
+            return { value: [] };
+        });
+        boundary.generatePersonalisedCopy.mockResolvedValue({ greeting: "Hi Pat", closingText: "Regards" });
+
+        const order: string[] = [];
+        const markAttempted = vi.fn(async (ids: string[]) => {
+            order.push(`mark:${ids.join(",")}`);
+        });
+        boundary.sendEmail.mockImplementation(async () => {
+            order.push("send");
+            return { success: true };
+        });
+
+        const { emitted, emit } = collector();
+        const { ctx } = createCtx();
+        await personalisedSender.sendBatch(ctx as any, campaign, batch, emit, eligible, markAttempted);
+
+        // Only the eligible recipient reached generation + send — p2 is never re-sent.
+        expect(boundary.sendEmail).toHaveBeenCalledTimes(1);
+        expect(emitted.map((e) => e.recipientId)).toEqual(["p1"]);
+        expect(emitted[0]).toMatchObject({ success: true });
+
+        // markAttempted fired for exactly p1, immediately before its send.
+        expect(markAttempted).toHaveBeenCalledTimes(1);
+        expect(markAttempted).toHaveBeenCalledWith(["p1"]);
+        expect(order).toEqual(["mark:p1", "send"]);
+
+        // The adapter no longer pre-creates rows itself — row creation is the seam's
+        // (seed createBatches + markAttempted), matching the email path.
+        const mutationNames = ctx.runMutation.mock.calls.map((c: any[]) => getFunctionName(c[0] as any));
+        expect(mutationNames).not.toContain("messages:createBatch");
+    }, 20000);
 });
