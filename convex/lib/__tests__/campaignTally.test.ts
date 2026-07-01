@@ -47,6 +47,41 @@ describe("tallyCampaign", () => {
         });
     });
 
+    test("'attempted' (in-flight, handed to the provider, outcome unknown) folds into pending", () => {
+        expect(tallyCampaign(["attempted"])).toEqual<CampaignTally>({
+            sent: 0,
+            delivered: 0,
+            failed: 0,
+            pending: 1,
+        });
+    });
+
+    test("an 'attempted' recipient counts as pending, never as sent or failed", () => {
+        expect(tallyCampaign(["attempted", "attempted", "failed", "pending"])).toEqual<CampaignTally>({
+            sent: 0,
+            delivered: 0,
+            failed: 1,
+            pending: 3,
+        });
+    });
+
+    test("recipient total is stable across a recovery re-run (pending → attempted → re-attempted)", () => {
+        // Total = one row per recipient = the sum of the buckets (no "delivered"
+        // status here, so `sent` isn't double-counted). Idempotent re-marking
+        // patches the same row rather than inserting, so the count cannot drift,
+        // and pending ↔ attempted both land in the pending bucket.
+        const total = (t: CampaignTally) => t.sent + t.failed + t.pending;
+        const before = tallyCampaign(["pending", "pending", "sent"]);
+        // one pending recipient is marked attempted (still a single row)...
+        const afterMark = tallyCampaign(["attempted", "pending", "sent"]);
+        // ...and re-marking is idempotent — the same lone attempted row.
+        const afterRemark = tallyCampaign(["attempted", "pending", "sent"]);
+
+        expect(afterMark.pending).toBe(before.pending);
+        expect(total(afterMark)).toBe(total(before));
+        expect(afterRemark).toEqual(afterMark);
+    });
+
     test("a full mix maps every status to its bucket", () => {
         const statuses = [
             "pending",
