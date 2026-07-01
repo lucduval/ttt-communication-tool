@@ -26,6 +26,8 @@ interface CtxOpts {
     batch?: unknown;
     acquired?: boolean;
     hasMoreBatches?: boolean;
+    /** Existing `messages` rows the eligibility query returns for the batch. */
+    existingRows?: Array<{ recipientId: string; status: string }>;
 }
 
 function createCtx(opts: CtxOpts) {
@@ -34,12 +36,14 @@ function createCtx(opts: CtxOpts) {
     const mutations: Array<{ name: string; args: any }> = [];
 
     const ctx = {
-        runQuery: vi.fn(async (ref: unknown) => {
+        runQuery: vi.fn(async (ref: unknown, _args?: any) => {
             switch (getFunctionName(ref as any)) {
                 case "campaignBatches:getCampaign":
                     return opts.campaign;
                 case "campaignBatches:getNextPendingBatchInternal":
                     return opts.batch;
+                case "messages:getExistingMessageStatuses":
+                    return opts.existingRows ?? [];
                 default:
                     return undefined;
             }
@@ -106,6 +110,48 @@ describe("runChannelSend driver", () => {
 
         // Successor scheduled for the same channel after the adapter's nextDelayMs.
         expect(scheduled).toEqual([{ ms: 500, name: "campaignQueue:processEmailBatch" }]);
+    });
+
+    it("runs the eligibility query once at batch start and passes only eligible recipients to the adapter", async () => {
+        // The driver owns the send-path idempotency seam (PRD #55 / #56): it
+        // queries existing rows once, applies the pure eligibility rule, and hands
+        // the adapter only recipients with no row in any status. r2 has a terminal
+        // `failed` row, so it is already-handled and must not reach the adapter.
+        const batchWithRecipients = {
+            _id: "batch-1",
+            recipients: [
+                { id: "r1", name: "Alice" },
+                { id: "r2", name: "Bob" },
+                { id: "r3", name: "Carol" },
+            ],
+        };
+
+        let received: Array<{ id: string }> | undefined;
+        const sender = fakeSender(async (_ctx, _campaign, _batch, _emit, eligible) => {
+            received = eligible;
+            return {};
+        });
+
+        const { ctx } = createCtx({
+            campaign,
+            batch: batchWithRecipients,
+            existingRows: [{ recipientId: "r2", status: "failed" }],
+        });
+
+        await runChannelSend(ctx as any, { campaignId: "c1" as any, sender });
+
+        expect(received?.map((r) => r.id)).toEqual(["r1", "r3"]);
+
+        // The eligibility query is scoped to exactly this batch's recipients and
+        // runs once.
+        const eligibilityCalls = ctx.runQuery.mock.calls.filter(
+            (c) => getFunctionName(c[0] as any) === "messages:getExistingMessageStatuses"
+        );
+        expect(eligibilityCalls).toHaveLength(1);
+        expect(eligibilityCalls[0][1]).toEqual({
+            campaignId: "c1",
+            recipientIds: ["r1", "r2", "r3"],
+        });
     });
 
     it("maps emitted results to per-recipient status writes (incl. externalMessageId)", async () => {

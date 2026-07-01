@@ -113,7 +113,7 @@ export default defineSchema({
         recipientEmail: v.optional(v.string()),
         recipientPhone: v.optional(v.string()),
         recipientName: v.string(),
-        status: v.string(), // pending, queued, sent, delivered, failed
+        status: v.string(), // pending, attempted, queued, sent, delivered, failed (see convex/lib/sendEligibility.ts)
         channel: v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
         errorMessage: v.optional(v.string()),
         dynamicsActivityId: v.optional(v.string()),

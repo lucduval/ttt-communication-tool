@@ -97,7 +97,7 @@ interface CtxOpts {
     campaignContent?: unknown;
     batch?: unknown;
     template?: unknown;
-    alreadySent?: string[];
+    existingRows?: Array<{ recipientId: string; status: string }>;
     acquired?: boolean;
     hasMoreBatches?: boolean;
 }
@@ -118,8 +118,8 @@ function createCtx(opts: CtxOpts) {
                     return opts.batch;
                 case "campaignBatches:getWhatsAppTemplate":
                     return opts.template;
-                case "messages:getSentRecipientIds":
-                    return opts.alreadySent ?? [];
+                case "messages:getExistingMessageStatuses":
+                    return opts.existingRows ?? [];
                 case "personalisedHistory:getContactIdsForCampaignName":
                     return [];
                 case "files:getDownloadUrlInternal":
@@ -237,7 +237,12 @@ describe("email per-recipient output (faked Graph $batch boundary)", () => {
         expect(updateBatches).toHaveLength(0);
     });
 
-    it("skips recipients already flushed as sent (idempotent recovery)", async () => {
+    it("skips recipients with any existing row, including a terminal failed (idempotency seam)", async () => {
+        // Under the send-path eligibility rule (PRD #55 / #56) a recipient with a
+        // `messages` row in ANY status is already-handled and never auto-resent.
+        // This pins the headline behaviour change: a `failed` recipient — which
+        // the old sent/delivered-only guard would have re-sent on recovery — is
+        // now skipped. Recovering it is a separate operator-initiated path (#60).
         const batch = {
             _id: "batch-1",
             recipients: [
@@ -253,12 +258,12 @@ describe("email per-recipient output (faked Graph $batch boundary)", () => {
             campaign,
             campaignContent,
             batch,
-            alreadySent: ["r1"],
+            existingRows: [{ recipientId: "r1", status: "failed" }],
         });
 
         await emailHandler(ctx, { campaignId: "c1" });
 
-        // Only r2 is sent; r1 is skipped entirely.
+        // Only r2 is sent; the failed r1 is skipped entirely.
         expect(boundary.sendEmailBatch.mock.calls[0][0]).toHaveLength(1);
         expect(boundary.sendEmailBatch.mock.calls[0][0][0].toRecipients[0].email).toBe(
             "bob@example.com"

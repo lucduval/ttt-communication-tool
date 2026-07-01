@@ -22,7 +22,6 @@ import { emailSender } from "../channelSenders";
 
 interface CtxOpts {
     campaignContent?: unknown;
-    alreadySent?: string[];
 }
 
 function createCtx(opts: CtxOpts) {
@@ -31,8 +30,6 @@ function createCtx(opts: CtxOpts) {
             switch (getFunctionName(ref as any)) {
                 case "campaignBatches:getCampaignContent":
                     return opts.campaignContent ?? null;
-                case "messages:getSentRecipientIds":
-                    return opts.alreadySent ?? [];
                 case "files:getDownloadUrlInternal":
                     return null;
                 default:
@@ -85,7 +82,8 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
         };
 
         const { ctx } = createCtx({ campaignContent });
-        const ret = await emailSender.sendBatch(ctx as any, campaign, batch, emit);
+        // The driver hands the adapter the eligible set; here all recipients are eligible.
+        const ret = await emailSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients);
 
         const byId = Object.fromEntries(emitted.map((r) => [r.recipientId, r]));
         expect(byId.r1).toMatchObject({ success: true });
@@ -104,7 +102,11 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
         expect(ret.halt).toBeUndefined();
     });
 
-    it("skips recipients already flushed as sent (idempotent recovery)", async () => {
+    it("sends only the eligible recipients the driver hands it (idempotent recovery)", async () => {
+        // The adapter no longer runs its own guard: the driver applies the
+        // eligibility rule (PRD #55 / #56) and passes the eligible subset. Here
+        // r1 already has a `messages` row so the driver excluded it; the adapter
+        // must send only r2 and never touch r1.
         const batch = {
             _id: "batch-1" as any,
             recipients: [
@@ -112,6 +114,7 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
                 { id: "r2", email: "bob@example.com", name: "Bob" },
             ],
         };
+        const eligible = [batch.recipients[1]]; // driver-filtered: only r2
         boundary.sendEmailBatch.mockImplementation(async (msgs: any[]) => msgs.map(() => ({ success: true })));
 
         const emitted: SendResult[] = [];
@@ -119,10 +122,10 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
             emitted.push(...results);
         };
 
-        const { ctx } = createCtx({ campaignContent, alreadySent: ["r1"] });
-        await emailSender.sendBatch(ctx as any, campaign, batch, emit);
+        const { ctx } = createCtx({ campaignContent });
+        await emailSender.sendBatch(ctx as any, campaign, batch, emit, eligible);
 
-        // Only r2 reaches the send boundary; r1 is skipped and never emitted.
+        // Only r2 reaches the send boundary; r1 is never sent nor emitted.
         expect(boundary.sendEmailBatch.mock.calls[0][0]).toHaveLength(1);
         expect(boundary.sendEmailBatch.mock.calls[0][0][0].toRecipients[0].email).toBe(
             "bob@example.com"

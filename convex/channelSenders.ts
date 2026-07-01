@@ -56,8 +56,9 @@ function getUnsubscribeFooter(unsubscribeUrl: string): string {
 async function sendEmailBatch_(
     ctx: ActionCtx,
     campaign: any,
-    batch: DriverBatch,
-    emit: EmitFn
+    _batch: DriverBatch,
+    emit: EmitFn,
+    eligible: DriverBatch["recipients"]
 ): Promise<{ halt?: string; nextDelayMs?: number }> {
     const campaignId = campaign._id as Id<"campaigns">;
 
@@ -65,13 +66,12 @@ async function sendEmailBatch_(
         campaignId,
     });
 
-    // Recipients already flushed as sent for this batch are skipped, making batch
-    // processing idempotent across a crash/timeout-driven recovery.
-    const alreadySentArr = await ctx.runQuery(internal.messages.getSentRecipientIds, {
-        campaignId,
-        recipientIds: batch.recipients.map((r) => r.id),
-    });
-    const alreadySent = new Set(alreadySentArr);
+    // `eligible` is the driver-provided set of recipients with no existing
+    // `messages` row for this campaign (the send-path idempotency seam core,
+    // PRD #55 / #56). Iterating it — rather than re-querying a sent/delivered-only
+    // guard — is what makes batch processing at-most-once across a crash/timeout
+    // recovery: an already-handled recipient (including a terminal `failed`) is
+    // never here, so it is never re-sent.
 
     const crmQueue: Array<{ recipientId: string; subject: string; body: string }> = [];
 
@@ -120,9 +120,8 @@ async function sendEmailBatch_(
         }
     }
 
-    // Phase 1: validate + render every recipient that hasn't already been sent.
-    // Invalid recipients are recorded as failures up-front so they never reach
-    // the $batch call.
+    // Phase 1: validate + render every eligible recipient. Invalid recipients
+    // are recorded as failures up-front so they never reach the $batch call.
     const siteUrl = process.env.CONVEX_SITE_URL || "";
     type PreparedSend = {
         recipient: { id: string; email?: string; name: string };
@@ -130,9 +129,7 @@ async function sendEmailBatch_(
     };
     const prepared: PreparedSend[] = [];
 
-    for (const recipient of batch.recipients) {
-        if (alreadySent.has(recipient.id)) continue;
-
+    for (const recipient of eligible) {
         // Strip whitespace and Unicode space characters (e.g. \u00a0 from Dynamics CRM)
         // that pass a truthiness check but are rejected by the Graph API.
         const cleanEmail = recipient.email?.replace(/[\u00a0\u200B-\u200D\uFEFF\s]/g, "");

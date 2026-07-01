@@ -3,6 +3,7 @@ import type { ActionCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
 import { batchProcessorFor, handleBatchError, type Channel } from "./channelDispatch";
 import { shouldBeat } from "./batchLease";
+import { eligibleRecipients } from "./sendEligibility";
 
 /**
  * One per-recipient outcome streamed back to the Channel Send driver via `emit`.
@@ -41,7 +42,17 @@ export interface ChannelSender {
         ctx: ActionCtx,
         campaign: any,
         batch: DriverBatch,
-        emit: EmitFn
+        emit: EmitFn,
+        /**
+         * The subset of `batch.recipients` eligible to send — those with no
+         * existing `messages` row for the campaign, in any status. The driver
+         * computes this once at batch start via the send-path eligibility rule
+         * (the idempotency seam core, PRD #55 / #56), so a recipient already
+         * handled — including a terminal `failed` — is never auto-resent. Email
+         * consumes this instead of re-querying; WhatsApp/personalised adopt it
+         * in a later slice (#61) and for now still iterate `batch.recipients`.
+         */
+        eligible: DriverBatch["recipients"]
     ): Promise<{ halt?: string; nextDelayMs?: number }>;
 }
 
@@ -126,6 +137,17 @@ export async function runChannelSend(
         return;
     }
 
+    // Send-path idempotency seam core (PRD #55 / #56): run the eligibility query
+    // once at batch start and apply the pure rule. A recipient is eligible iff it
+    // has no `messages` row for the campaign in any status, so a recovery re-run
+    // never re-sends an already-handled recipient (including a terminal `failed`).
+    // The adapter consumes this eligible set instead of guarding for itself.
+    const existingRows = await ctx.runQuery(internal.messages.getExistingMessageStatuses, {
+        campaignId,
+        recipientIds: batch.recipients.map((r) => r.id),
+    });
+    const eligible = eligibleRecipients(existingRows, batch.recipients);
+
     let successCount = 0;
     let failedCount = 0;
     const buffer: SendResult[] = [];
@@ -192,7 +214,7 @@ export async function runChannelSend(
     };
 
     try {
-        const { halt, nextDelayMs } = await sender.sendBatch(ctx, campaign, batch, emit);
+        const { halt, nextDelayMs } = await sender.sendBatch(ctx, campaign, batch, emit, eligible);
 
         // Final flush of whatever is left in the buffer.
         await flush();

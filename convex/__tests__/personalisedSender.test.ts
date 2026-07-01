@@ -121,7 +121,7 @@ describe("personalisedSender.sendBatch (faked Dynamics + AI + send boundary)", (
 
         const { emitted, emit } = collector();
         const { ctx } = createCtx();
-        const ret = await personalisedSender.sendBatch(ctx as any, campaign, batch, emit);
+        const ret = await personalisedSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients);
 
         const byId = Object.fromEntries(emitted.map((r) => [r.recipientId, r]));
         expect(byId.p1).toMatchObject({ success: true });

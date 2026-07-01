@@ -61,6 +61,8 @@ function createCtx(opts: CtxOpts) {
                     return { _id: "c1", status: "active" };
                 case "campaignBatches:getNextPendingBatchInternal":
                     return { _id: "batch-1", recipients: [] };
+                case "messages:getExistingMessageStatuses":
+                    return [];
                 default:
                     return undefined;
             }
