@@ -380,6 +380,37 @@ describe("prepareUploadForSend (materialised rows → send payload — AC #5)", 
         expect(result.recipients[0].email).toBeUndefined();
     });
 
+    it("refuses to send content-held rows when a validation context is supplied (#67)", () => {
+        // Two clean-identity rows, but one has an empty referenced cell and a bad
+        // email — the full gate must keep it out of the send payload.
+        const uploaded = parseUploadedColumns([
+            ["Email", "Contact", "Amount"],
+            ["alice@example.com", A, "R1,200.00"], // clean → sends
+            ["nope", B, ""], // bad email + empty {Amount} → held
+        ]);
+        const result = prepareUploadForSend(
+            uploaded,
+            { sendAddress: "Email", trackingKey: "Contact" },
+            { placeholders: ["Amount"] },
+        );
+        if (result.status !== "ok") throw new Error("expected ok");
+        expect(result.recipients.map((r) => r.id)).toEqual([A]);
+        expect(result.report?.held).toEqual([
+            {
+                rowIndex: 1,
+                trackingKey: B,
+                reasons: ["empty-referenced-cell", "invalid-send-address"],
+            },
+        ]);
+    });
+
+    it("holds no rows and omits the report when no validation context is supplied", () => {
+        const result = prepareUploadForSend(upload(), persisted);
+        if (result.status !== "ok") throw new Error("expected ok");
+        expect(result.report).toBeUndefined();
+        expect(result.recipients.map((r) => r.id)).toEqual([A, B]);
+    });
+
     it("surfaces held rows (duplicate + missing tracking key) alongside the recipients for the report", () => {
         const uploaded = parseUploadedColumns([
             ["Email", "Contact", "Amount"],

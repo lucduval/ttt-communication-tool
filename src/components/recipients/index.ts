@@ -23,8 +23,10 @@ export {
     materialiseRecipients,
     resolveColumnRoles,
     prepareUploadForSend,
+    toUploadRecipient,
     type UploadRecipient,
     type PrepareUploadResult,
+    type ValidationContext,
     type UploadedColumns,
     type UploadedColumnsStatus,
     type ColumnRoles,
@@ -36,3 +38,13 @@ export {
     type HeldRow,
     type HeldReason,
 } from "./columnRoles";
+export {
+    buildValidationReport,
+    extractPlaceholders,
+    isValidSendAddress,
+    BUILT_IN_PLACEHOLDERS,
+    type PdfStatus,
+    type ValidationHoldReason,
+    type ValidationHold,
+    type ValidationReport,
+} from "./validationReport";

@@ -1635,6 +1635,7 @@ export default function NewCampaignPage() {
                                                 campaignChannel === "email" ||
                                                 campaignChannel === "personalised"
                                             }
+                                            templateText={`${subject}\n${htmlContent}`}
                                             onResult={handleUploadResult}
                                         />
                                     )}

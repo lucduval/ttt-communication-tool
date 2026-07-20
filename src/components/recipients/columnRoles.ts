@@ -32,6 +32,11 @@
  */
 
 import { normaliseContactId, type DetectedColumn } from "./extractContactIds";
+import {
+    buildValidationReport,
+    type PdfStatus,
+    type ValidationReport,
+} from "./validationReport";
 
 export type UploadedColumnsStatus =
     | "ok" // the file had a header row (dataRows may still be empty)
@@ -88,6 +93,12 @@ export type ResolveColumnRolesResult =
     | { status: "unresolved"; unresolved: UnresolvedRole[] };
 
 export interface MaterialisedRecipient {
+    /**
+     * 0-based index of this row in the upload's data rows (excludes the header),
+     * so the pre-send validation report (#67) can point the operator at the exact
+     * row a content hold came from.
+     */
+    rowIndex: number;
     /**
      * The recipient's identity: the tracking-key cell, normalised to a canonical
      * GUID. Fills the existing `recipientId` slot so the idempotency/eligibility
@@ -242,6 +253,7 @@ export function materialiseRecipients(
         }
 
         recipients.push({
+            rowIndex,
             recipientId: key,
             sendAddress: cellForRole(row, roles.sendAddress),
             invoiceGuid: cellForRole(row, roles.invoiceGuid),
@@ -289,11 +301,47 @@ export type PrepareUploadResult =
     | { status: "unresolved"; unresolved: UnresolvedRole[] }
     | {
           status: "ok";
-          /** Rows that became sendable recipients, in first-seen order. */
+          /**
+           * Recipients the send path may send. Tracking-key holds are always
+           * excluded; when a {@link ValidationContext} is supplied, content-held
+           * rows (missing column, empty referenced cell, invalid address, missing
+           * PDF) are excluded too — so the send path refuses every held row.
+           */
           recipients: UploadRecipient[];
           /** Rows held out (blank/malformed key, or a duplicated key), for the report. */
           held: HeldRow[];
+          /**
+           * The full consolidated pre-send report — present only when a
+           * {@link ValidationContext} was supplied. Its `held` includes the
+           * tracking-key holds *and* the content holds; `sendable` matches
+           * `recipients`. This is the single report the operator reads (#67).
+           */
+          report?: ValidationReport;
       };
+
+/**
+ * Optional template + PDF context that turns {@link prepareUploadForSend} from a
+ * tracking-key-only gate into the full pre-send validation gate (#67). When
+ * supplied, the returned `recipients` are only those cleared by
+ * {@link buildValidationReport}, so held rows can never reach the send path.
+ */
+export interface ValidationContext {
+    /** The `{placeholder}` names the template references (subject + body). */
+    placeholders: readonly string[];
+    /** Per-recipient PDF status, keyed by `recipientId`; absent = passing sentinel. */
+    pdfStatus?: Readonly<Record<string, PdfStatus>>;
+}
+
+/** Project one materialised recipient into the send-path payload shape. */
+export function toUploadRecipient(r: MaterialisedRecipient): UploadRecipient {
+    const payload: UploadRecipient = {
+        id: r.recipientId,
+        name: "",
+        variables: JSON.stringify(r.variables),
+    };
+    if (r.sendAddress !== null) payload.email = r.sendAddress;
+    return payload;
+}
 
 /**
  * The AC #5 seam: turn a parsed upload + the campaign's persisted role
@@ -318,25 +366,34 @@ export type PrepareUploadResult =
 export function prepareUploadForSend(
     uploaded: UploadedColumns,
     persisted: PersistedColumnRoles,
+    validation?: ValidationContext,
 ): PrepareUploadResult {
     const resolved = resolveColumnRoles(uploaded.columns, persisted);
     if (resolved.status === "unresolved") {
         return { status: "unresolved", unresolved: resolved.unresolved };
     }
 
-    const { recipients, held } = materialiseRecipients(uploaded, resolved.roles);
+    const materialised = materialiseRecipients(uploaded, resolved.roles);
 
+    // No template context: tracking-key gate only (the #65 behaviour).
+    if (!validation) {
+        return {
+            status: "ok",
+            recipients: materialised.recipients.map(toUploadRecipient),
+            held: materialised.held,
+        };
+    }
+
+    // Full pre-send gate: only rows the report clears reach the send path.
+    const report = buildValidationReport(
+        validation.placeholders,
+        materialised,
+        validation.pdfStatus,
+    );
     return {
         status: "ok",
-        recipients: recipients.map((r): UploadRecipient => {
-            const payload: UploadRecipient = {
-                id: r.recipientId,
-                name: "",
-                variables: JSON.stringify(r.variables),
-            };
-            if (r.sendAddress !== null) payload.email = r.sendAddress;
-            return payload;
-        }),
-        held,
+        recipients: report.sendable.map(toUploadRecipient),
+        held: materialised.held,
+        report,
     };
 }

@@ -1,14 +1,14 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Upload, FileText, AlertTriangle, CheckCircle, Loader2 } from "lucide-react";
 import { readUploadedColumnsFromFile } from "./readContactIds";
 import {
     prepareUploadForSend,
     type UploadedColumns,
     type PersistedColumnRoles,
-    type HeldRow,
 } from "./columnRoles";
+import { extractPlaceholders, type ValidationReport, type ValidationHoldReason } from "./validationReport";
 import type { DetectedColumn } from "./extractContactIds";
 import type { CampaignRecipient } from "@/../convex/lib/recipientSelection";
 
@@ -41,12 +41,16 @@ import type { CampaignRecipient } from "@/../convex/lib/recipientSelection";
 
 /** What the panel hands up once a valid designation materialises recipients. */
 export interface UploadRolesResult {
-    /** Recipients materialised from the rows — the `upload`-shape selection value. */
+    /**
+     * Recipients cleared to send — the `upload`-shape selection value. Held rows
+     * (tracking-key *and* content holds from the validation gate) are excluded, so
+     * the send path only ever sees sendable recipients (#67).
+     */
     recipients: CampaignRecipient[];
     /** The designation persisted on the campaign (by header, survives a re-export). */
     roles: PersistedColumnRoles;
-    /** Rows held out (blank/duplicate tracking key) for the pre-send report. */
-    held: HeldRow[];
+    /** The consolidated pre-send validation report — held rows and why (#67). */
+    report: ValidationReport;
     fileName: string;
 }
 
@@ -71,10 +75,17 @@ function guessRoles(columns: DetectedColumn[]): RoleSelection {
 
 export function UploadListPanel({
     requireSendAddress,
+    templateText,
     onResult,
 }: {
     /** Email/personalised campaigns must designate a send address; WhatsApp need not. */
     requireSendAddress: boolean;
+    /**
+     * The template text (subject + body) whose `{placeholder}`s the validation gate
+     * checks against the uploaded columns. Passed as raw text so the panel derives
+     * — and memoises — the placeholder list itself (stable identity, no render loop).
+     */
+    templateText?: string;
     /** Fires with the materialised result, or `null` while the designation is incomplete. */
     onResult: (result: UploadRolesResult | null) => void;
 }) {
@@ -85,9 +96,13 @@ export function UploadListPanel({
     const [roles, setRoles] = useState<RoleSelection>(EMPTY_ROLES);
     const inputRef = useRef<HTMLInputElement>(null);
 
-    // Re-run the pure materialisation whenever the designation changes and push
-    // the result (or null) up. Kept in one place so every dropdown change and the
-    // initial guess funnel through the same seam.
+    // Derive the referenced placeholders once per template change (stable identity
+    // so the effect below does not re-fire every parent render).
+    const placeholders = useMemo(() => extractPlaceholders(templateText ?? ""), [templateText]);
+
+    // Re-run the pure gate whenever the designation changes and push the result (or
+    // null) up. Kept in one place so every dropdown change and the initial guess
+    // funnel through the same seam.
     const recompute = useCallback(
         (cols: UploadedColumns | null, sel: RoleSelection, name: string | null) => {
             if (!cols || cols.status === "empty" || !name) {
@@ -103,15 +118,26 @@ export function UploadListPanel({
                 sendAddress: sel.sendAddress || undefined,
                 invoiceGuid: sel.invoiceGuid || undefined,
             };
-            const prepared = prepareUploadForSend(cols, persisted);
-            if (prepared.status !== "ok") {
+            const prepared = prepareUploadForSend(cols, persisted, { placeholders });
+            if (prepared.status !== "ok" || !prepared.report) {
                 onResult(null); // a designated header vanished — hold the upload
                 return;
             }
-            onResult({ recipients: prepared.recipients, roles: persisted, held: prepared.held, fileName: name });
+            onResult({
+                recipients: prepared.recipients,
+                roles: persisted,
+                report: prepared.report,
+                fileName: name,
+            });
         },
-        [onResult, requireSendAddress],
+        [onResult, requireSendAddress, placeholders],
     );
+
+    // Re-run the gate when the template's placeholders change after an upload, so a
+    // newly-added `{column}` (or a fix) re-holds/re-clears rows without a re-upload.
+    useEffect(() => {
+        recompute(columns, roles, fileName);
+    }, [placeholders, columns, roles, fileName, recompute]);
 
     const handleFile = useCallback(
         async (file: File) => {
@@ -213,6 +239,7 @@ export function UploadListPanel({
                     columns={columns}
                     roles={roles}
                     requireSendAddress={requireSendAddress}
+                    placeholders={placeholders}
                     fileName={fileName}
                     onRole={setRole}
                 />
@@ -231,26 +258,33 @@ function RoleDesignation({
     columns,
     roles,
     requireSendAddress,
+    placeholders,
     fileName,
     onRole,
 }: {
     columns: UploadedColumns;
     roles: RoleSelection;
     requireSendAddress: boolean;
+    placeholders: readonly string[];
     fileName: string | null;
     onRole: (role: keyof RoleSelection, header: string) => void;
 }) {
     const requiredMissing =
         roles.trackingKey === "" || (requireSendAddress && roles.sendAddress === "");
 
-    // Derive the report the same way the page derives the send payload.
+    // Derive the report the same way the page derives the send payload — the full
+    // gate, so the operator sees every held row and reason before sending (#67).
     const prepared =
         !requiredMissing
-            ? prepareUploadForSend(columns, {
-                  trackingKey: roles.trackingKey,
-                  sendAddress: roles.sendAddress || undefined,
-                  invoiceGuid: roles.invoiceGuid || undefined,
-              })
+            ? prepareUploadForSend(
+                  columns,
+                  {
+                      trackingKey: roles.trackingKey,
+                      sendAddress: roles.sendAddress || undefined,
+                      invoiceGuid: roles.invoiceGuid || undefined,
+                  },
+                  { placeholders },
+              )
             : null;
 
     return (
@@ -297,8 +331,8 @@ function RoleDesignation({
                 </p>
             )}
 
-            {prepared?.status === "ok" && (
-                <UploadReport recipients={prepared.recipients.length} held={prepared.held} />
+            {prepared?.status === "ok" && prepared.report && (
+                <UploadReport report={prepared.report} />
             )}
         </div>
     );
@@ -339,10 +373,35 @@ function RoleSelect({
     );
 }
 
-/** The pre-send report: how many rows will send, and why any are held. */
-function UploadReport({ recipients, held }: { recipients: number; held: HeldRow[] }) {
-    const missing = held.filter((h) => h.reason === "missing-tracking-key").length;
-    const duplicate = held.filter((h) => h.reason === "duplicate-tracking-key").length;
+/** A human phrase for each hold reason, for the consolidated report. */
+const REASON_LABEL: Record<ValidationHoldReason, string> = {
+    "missing-tracking-key": "a missing/invalid tracking key",
+    "duplicate-tracking-key": "a duplicate tracking key (multi-invoice contact)",
+    "unmatched-placeholder": "a template placeholder with no matching column",
+    "empty-referenced-cell": "an empty cell in a referenced column",
+    "invalid-send-address": "an invalid/missing send address",
+    "missing-pdf": "no generated invoice PDF",
+};
+
+/**
+ * The consolidated pre-send validation report (#67): how many rows will send, and
+ * a count-per-reason of why any are held. One row can be held for several reasons,
+ * so we tally each reason it carries.
+ */
+function UploadReport({ report }: { report: ValidationReport }) {
+    const sendable = report.sendable.length;
+    const held = report.held;
+
+    // Count rows carrying each reason (a row may contribute to more than one).
+    const counts = new Map<ValidationHoldReason, number>();
+    for (const row of held) {
+        for (const reason of row.reasons) {
+            counts.set(reason, (counts.get(reason) ?? 0) + 1);
+        }
+    }
+    const summary = [...counts.entries()].map(
+        ([reason, n]) => `${n} with ${REASON_LABEL[reason]}`,
+    );
 
     return (
         <div
@@ -359,15 +418,23 @@ function UploadReport({ recipients, held }: { recipients: number; held: HeldRow[
             )}
             <div className="space-y-1 text-sm">
                 <p className="font-medium">
-                    {recipients.toLocaleString()} recipient{recipients === 1 ? "" : "s"} ready to send.
+                    {sendable.toLocaleString()} recipient{sendable === 1 ? "" : "s"} ready to send.
                 </p>
+                {report.unmatchedPlaceholders.length > 0 && (
+                    <p>
+                        Template placeholder{report.unmatchedPlaceholders.length === 1 ? "" : "s"}{" "}
+                        with no matching column:{" "}
+                        <span className="font-mono">
+                            {report.unmatchedPlaceholders.map((p) => `{${p}}`).join(", ")}
+                        </span>
+                        . Add the column{report.unmatchedPlaceholders.length === 1 ? "" : "s"} or
+                        remove the placeholder{report.unmatchedPlaceholders.length === 1 ? "" : "s"}.
+                    </p>
+                )}
                 {held.length > 0 && (
                     <p>
                         {held.length.toLocaleString()} row{held.length === 1 ? "" : "s"} held —{" "}
-                        {duplicate > 0 && `${duplicate} with a duplicate tracking key (multi-invoice contact)`}
-                        {duplicate > 0 && missing > 0 && ", "}
-                        {missing > 0 && `${missing} with a missing/invalid tracking key`}. Fix the export
-                        and re-upload to include them.
+                        {summary.join(", ")}. Fix the export and re-upload to include them.
                     </p>
                 )}
             </div>
