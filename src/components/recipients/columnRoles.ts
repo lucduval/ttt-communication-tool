@@ -268,6 +268,13 @@ function cellForRole(row: string[], columnIndex: number | null): string | null {
 export interface UploadRecipient {
     /** The recipient's identity: the normalised tracking-key value. */
     id: string;
+    /**
+     * Display name for the send payload's required `name` slot. The bad-debt
+     * model has **no name role** — messages render entirely from the `{column}`
+     * merge bag — so this is always `""`; it exists only because the send-path
+     * payload (and the attempted-row seam) requires a `name` field.
+     */
+    name: string;
     /** The send-address cell, omitted when no send-address role is designated. */
     email?: string;
     /**
@@ -324,6 +331,7 @@ export function prepareUploadForSend(
         recipients: recipients.map((r): UploadRecipient => {
             const payload: UploadRecipient = {
                 id: r.recipientId,
+                name: "",
                 variables: JSON.stringify(r.variables),
             };
             if (r.sendAddress !== null) payload.email = r.sendAddress;

@@ -2,10 +2,13 @@
  * Recipient Selection module — pure core (PRD: lead-query / recipient-selection, issue #19)
  *
  * Owns *who a campaign sends to* as a single value. A selection is in exactly
- * one of two mutually-exclusive shapes (CONTEXT.md): **explicit** (hand-picked
- * contacts held in memory) or **filtered** ("select all" over a Contact Query —
+ * one of three mutually-exclusive shapes (CONTEXT.md): **explicit** (hand-picked
+ * contacts held in memory), **filtered** ("select all" over a Contact Query —
  * the captured filter plus an excluded-id set, i.e. "everyone matching, minus
- * these unchecks"). Both shapes ship here.
+ * these unchecks"), or **upload** (recipients already materialised from an
+ * uploaded file's rows — identity, address, and the full-row merge bag baked in
+ * up front, so the send path never re-resolves them from Dynamics; PRD
+ * bad-debt-excel-campaign, issue #65).
  *
  * Everything here is pure — no React, no Convex — so the selection value and its
  * projections are the test surface. The projections (`count`, `toCampaignArgs`)
@@ -57,9 +60,6 @@ export interface FilteredSelection {
     total: number;
 }
 
-/** The single selection value — one of the two mutually-exclusive shapes. */
-export type RecipientSelection = ExplicitSelection | FilteredSelection;
-
 /** One materialised recipient in the `recipients[]` payload the send path consumes. */
 export interface CampaignRecipient {
     id: string;
@@ -68,6 +68,23 @@ export interface CampaignRecipient {
     phone?: string;
     variables?: string;
 }
+
+/**
+ * Recipients materialised from an uploaded file's rows (issue #65). Unlike the
+ * explicit shape — which holds `SelectableContact`s and re-derives the payload —
+ * the upload shape holds the **already-materialised** `CampaignRecipient`s
+ * verbatim: each carries its tracking-key identity in `id`, its send address,
+ * and the full row as a JSON `variables` bag. `toCampaignArgs` hands them
+ * straight to the send path with no re-resolution, which is the whole point of
+ * the file-as-source-of-truth reversal.
+ */
+export interface UploadSelection {
+    shape: "upload";
+    recipients: CampaignRecipient[];
+}
+
+/** The single selection value — one of the three mutually-exclusive shapes. */
+export type RecipientSelection = ExplicitSelection | FilteredSelection | UploadSelection;
 
 /**
  * What `toCampaignArgs` yields. Exactly one field is populated, by shape:
@@ -96,6 +113,16 @@ export function explicitSelection(contacts: SelectableContact[]): RecipientSelec
  */
 export function filteredSelection(filters: FilterPayload, total: number): RecipientSelection {
     return { shape: "filtered", filters: { ...filters }, excludeContactIds: [], total };
+}
+
+/**
+ * Activate an upload: hold the recipients already materialised from the file's
+ * rows (see `prepareUploadForSend`). Replaces whatever shape the selection was in
+ * (one shape at a time). The recipients are copied so later mutation of the
+ * caller's array cannot alter the captured selection.
+ */
+export function uploadSelection(recipients: CampaignRecipient[]): RecipientSelection {
+    return { shape: "upload", recipients: [...recipients] };
 }
 
 /**
@@ -159,6 +186,9 @@ export function count(selection: RecipientSelection): number {
     if (selection.shape === "filtered") {
         return Math.max(0, selection.total - selection.excludeContactIds.length);
     }
+    if (selection.shape === "upload") {
+        return selection.recipients.length;
+    }
     return selection.contacts.length;
 }
 
@@ -206,11 +236,20 @@ export function excludedContactIds(selection: RecipientSelection): Set<string> {
  *   `{ id, email, name }`.
  * - whatsapp: every selected contact reachable by phone (international preferred,
  *   falling back to local), as `{ id, phone, name, variables }`.
+ *
+ * Upload shape → `{ recipients }` verbatim: the recipients were already
+ * materialised from the file's rows (identity, address, and the full-row merge
+ * bag baked in), so they pass straight through with no channel re-keying and no
+ * Dynamics re-resolution — the file is the source of truth.
  */
 export function toCampaignArgs(
     selection: RecipientSelection,
     opts: { channel: Channel; whatsappVariables?: string },
 ): CampaignArgs {
+    if (selection.shape === "upload") {
+        return { recipients: [...selection.recipients] };
+    }
+
     if (selection.shape === "filtered") {
         return {
             filters: JSON.stringify({

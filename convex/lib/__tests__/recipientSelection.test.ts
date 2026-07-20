@@ -21,8 +21,10 @@ import {
     reselectContact,
     isFiltered,
     excludedContactIds,
+    uploadSelection,
     type SelectableContact,
     type FilterPayload,
+    type CampaignRecipient,
 } from "../recipientSelection";
 
 const alice: SelectableContact = {
@@ -294,6 +296,77 @@ describe("recipientSelection — filtered shape", () => {
             const sel = filteredSelection(clientsFilter, 10);
             expect(toCampaignArgs(sel, { channel: "email" })).toEqual(
                 toCampaignArgs(sel, { channel: "whatsapp" }),
+            );
+        });
+    });
+});
+
+describe("recipientSelection — upload shape (#65)", () => {
+    // Recipients as `prepareUploadForSend` materialises them: tracking-key
+    // identity in `id`, send address, no name role (""), full-row merge bag.
+    const r1: CampaignRecipient = {
+        id: "11111111-1111-1111-1111-111111111111",
+        name: "",
+        email: "alice@example.com",
+        variables: JSON.stringify({ Amount: "R1,200.00", Contact: "…" }),
+    };
+    const r2: CampaignRecipient = {
+        id: "22222222-2222-2222-2222-222222222222",
+        name: "",
+        email: "bob@example.com",
+        variables: JSON.stringify({ Amount: "R980.00", Contact: "…" }),
+    };
+
+    describe("transitions", () => {
+        it("holds the materialised recipients verbatim", () => {
+            const sel = uploadSelection([r1, r2]);
+            expect(sel.shape).toBe("upload");
+            expect(count(sel)).toBe(2);
+        });
+
+        it("copies the array so later caller mutation cannot alter the selection", () => {
+            const source = [r1];
+            const sel = uploadSelection(source);
+            source.push(r2);
+            expect(count(sel)).toBe(1);
+        });
+
+        it("is not the filtered shape", () => {
+            expect(isFiltered(uploadSelection([r1]))).toBe(false);
+        });
+
+        it("exposes no checkbox/excluded ids (its recipients are pre-materialised)", () => {
+            const sel = uploadSelection([r1, r2]);
+            expect(selectedContactIds(sel)).toEqual(new Set());
+            expect(excludedContactIds(sel)).toEqual(new Set());
+        });
+
+        it("clears back to an empty explicit selection", () => {
+            const sel = uploadSelection([r1, r2]);
+            expect(count(clearSelection())).toBe(0);
+            expect(count(sel)).toBe(2); // original value is immutable
+        });
+    });
+
+    describe("toCampaignArgs projection", () => {
+        it("hands the recipients straight to the send path, unchanged", () => {
+            const args = toCampaignArgs(uploadSelection([r1, r2]), { channel: "email" });
+            expect(args.filters).toBeUndefined();
+            expect(args.recipients).toEqual([r1, r2]);
+        });
+
+        it("preserves the JSON variables bag so the email adapter can merge by column", () => {
+            const args = toCampaignArgs(uploadSelection([r1]), { channel: "email" });
+            expect(JSON.parse(args.recipients![0].variables!)).toEqual({
+                Amount: "R1,200.00",
+                Contact: "…",
+            });
+        });
+
+        it("is channel-independent — the row cells are already the source of truth", () => {
+            const sel = uploadSelection([r1, r2]);
+            expect(toCampaignArgs(sel, { channel: "whatsapp" })).toEqual(
+                toCampaignArgs(sel, { channel: "email" }),
             );
         });
     });

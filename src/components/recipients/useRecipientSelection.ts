@@ -5,6 +5,7 @@ import {
     emptySelection,
     explicitSelection,
     filteredSelection,
+    uploadSelection,
     toggleContact,
     deselectContact,
     reselectContact,
@@ -19,6 +20,7 @@ import {
     type FilterPayload,
     type Channel,
     type CampaignArgs,
+    type CampaignRecipient,
 } from "@/../convex/lib/recipientSelection";
 
 /**
@@ -38,6 +40,11 @@ export function useRecipientSelection() {
 
     const activateFiltered = useCallback((filters: FilterPayload, total: number) => {
         setSelection(filteredSelection(filters, total));
+    }, []);
+
+    // Activate an uploaded file's already-materialised recipients (issue #65).
+    const activateUpload = useCallback((recipients: CampaignRecipient[]) => {
+        setSelection(uploadSelection(recipients));
     }, []);
 
     const toggle = useCallback((contact: SelectableContact) => {
@@ -72,12 +79,13 @@ export function useRecipientSelection() {
             deselectedIds: excludedContactIds(selection),
             setExplicit,
             activateFiltered,
+            activateUpload,
             toggle,
             deselect,
             reselect,
             clear,
             toCampaignArgs: toArgs,
         }),
-        [selection, setExplicit, activateFiltered, toggle, deselect, reselect, clear, toArgs],
+        [selection, setExplicit, activateFiltered, activateUpload, toggle, deselect, reselect, clear, toArgs],
     );
 }

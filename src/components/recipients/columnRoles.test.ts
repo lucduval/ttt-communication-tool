@@ -345,6 +345,12 @@ describe("prepareUploadForSend (materialised rows → send payload — AC #5)", 
         expect(result.recipients.map((r) => r.id)).toEqual([A, B]);
     });
 
+    it("fills the required name slot with \"\" (the bad-debt model has no name role)", () => {
+        const result = prepareUploadForSend(upload(), persisted);
+        if (result.status !== "ok") throw new Error("expected ok");
+        expect(result.recipients.map((r) => r.name)).toEqual(["", ""]);
+    });
+
     it("puts the send-address cell in the email slot", () => {
         const result = prepareUploadForSend(upload(), persisted);
         if (result.status !== "ok") throw new Error("expected ok");

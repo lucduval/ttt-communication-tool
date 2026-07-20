@@ -135,6 +135,16 @@ export const create = mutation({
         totalRecipients: v.number(),
         subject: v.optional(v.string()), // Email subject
         templateId: v.optional(v.string()), // WhatsApp template ID
+        // Uploaded-file role designation (issue #65), persisted by column header
+        // so it survives a re-export that reorders/relabels columns. Unset for
+        // non-uploaded campaigns.
+        columnRoles: v.optional(
+            v.object({
+                sendAddress: v.optional(v.string()),
+                trackingKey: v.string(),
+                invoiceGuid: v.optional(v.string()),
+            }),
+        ),
     },
     handler: async (ctx, args) => {
         const access = await checkAccessHelper(ctx);
@@ -154,6 +164,7 @@ export const create = mutation({
             createdBy: identity.subject,
             subject: args.subject,
             templateId: args.templateId,
+            columnRoles: args.columnRoles,
         });
 
         return campaignId;
