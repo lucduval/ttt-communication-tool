@@ -21,9 +21,13 @@ export {
 export {
     parseUploadedColumns,
     materialiseRecipients,
+    resolveColumnRoles,
     type UploadedColumns,
     type UploadedColumnsStatus,
     type ColumnRoles,
+    type PersistedColumnRoles,
+    type UnresolvedRole,
+    type ResolveColumnRolesResult,
     type MaterialisedRecipient,
     type MaterialiseResult,
     type HeldRow,

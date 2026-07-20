@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
     parseUploadedColumns,
     materialiseRecipients,
+    resolveColumnRoles,
     type ColumnRoles,
 } from "./columnRoles";
 
@@ -142,6 +143,112 @@ describe("materialiseRecipients (tracking-key identity + variables bag)", () => 
         });
         expect(recipients[0].sendAddress).toBeNull();
         expect(recipients[0].invoiceGuid).toBeNull();
+    });
+});
+
+describe("resolveColumnRoles (persisted-by-header → index designation)", () => {
+    // The columns as read back from a (possibly re-exported) upload.
+    const columns = parseUploadedColumns([
+        ["Full Name", "Email", "Contact", "InvoiceGuid", "Amount"],
+    ]).columns;
+
+    it("resolves each persisted header to its column index", () => {
+        const result = resolveColumnRoles(columns, {
+            sendAddress: "Email",
+            trackingKey: "Contact",
+            invoiceGuid: "InvoiceGuid",
+        });
+        expect(result).toEqual({
+            status: "ok",
+            roles: { sendAddress: 1, trackingKey: 2, invoiceGuid: 3 },
+        });
+    });
+
+    it("leaves optional roles null when their header is unset (absent, null, or blank)", () => {
+        const result = resolveColumnRoles(columns, { trackingKey: "Contact" });
+        expect(result).toEqual({
+            status: "ok",
+            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null },
+        });
+        expect(
+            resolveColumnRoles(columns, {
+                sendAddress: null,
+                trackingKey: "Contact",
+                invoiceGuid: "  ",
+            }),
+        ).toEqual({ status: "ok", roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null } });
+    });
+
+    it("resolves against columns reordered by a re-export, as long as headers match (durability)", () => {
+        const reordered = parseUploadedColumns([
+            ["Amount", "Contact", "Email"], // same headers, different order
+        ]).columns;
+        const result = resolveColumnRoles(reordered, {
+            sendAddress: "Email",
+            trackingKey: "Contact",
+        });
+        expect(result).toEqual({
+            status: "ok",
+            roles: { sendAddress: 2, trackingKey: 1, invoiceGuid: null },
+        });
+    });
+
+    it("trims persisted headers before matching the (already-trimmed) columns", () => {
+        const result = resolveColumnRoles(columns, { trackingKey: "  Contact  " });
+        expect(result).toEqual({
+            status: "ok",
+            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null },
+        });
+    });
+
+    it("reports the required tracking-key role as unresolved when its header is gone", () => {
+        const result = resolveColumnRoles(columns, { trackingKey: "ContactId" });
+        expect(result).toEqual({
+            status: "unresolved",
+            unresolved: [{ role: "trackingKey", header: "ContactId" }],
+        });
+    });
+
+    it("reports a designated optional role whose header is gone, in role order", () => {
+        const result = resolveColumnRoles(columns, {
+            sendAddress: "EmailAddress",
+            trackingKey: "Contact",
+            invoiceGuid: "Invoice",
+        });
+        expect(result).toEqual({
+            status: "unresolved",
+            unresolved: [
+                { role: "sendAddress", header: "EmailAddress" },
+                { role: "invoiceGuid", header: "Invoice" },
+            ],
+        });
+    });
+
+    it("picks the first matching column when a header is duplicated", () => {
+        const dupes = parseUploadedColumns([["Contact", "Email", "Contact"]]).columns;
+        const result = resolveColumnRoles(dupes, { trackingKey: "Contact" });
+        expect(result).toEqual({
+            status: "ok",
+            roles: { sendAddress: null, trackingKey: 0, invoiceGuid: null },
+        });
+    });
+
+    it("feeds straight into materialiseRecipients (the AC #4 → #5 bridge)", () => {
+        const uploaded = parseUploadedColumns([
+            ["Email", "Contact"],
+            ["alice@example.com", "11111111-1111-1111-1111-111111111111"],
+        ]);
+        const resolved = resolveColumnRoles(uploaded.columns, {
+            sendAddress: "Email",
+            trackingKey: "Contact",
+        });
+        expect(resolved.status).toBe("ok");
+        if (resolved.status !== "ok") return;
+        const { recipients } = materialiseRecipients(uploaded, resolved.roles);
+        expect(recipients.map((r) => r.recipientId)).toEqual([
+            "11111111-1111-1111-1111-111111111111",
+        ]);
+        expect(recipients[0].sendAddress).toBe("alice@example.com");
     });
 });
 

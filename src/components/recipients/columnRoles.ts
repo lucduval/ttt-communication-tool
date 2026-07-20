@@ -62,6 +62,31 @@ export interface ColumnRoles {
     invoiceGuid: number | null;
 }
 
+/**
+ * The role designation as it is **persisted on the campaign** (schema
+ * `campaigns.columnRoles`): each role names a **column header**, not an index.
+ * Naming headers (rather than indices) is what makes the designation durable
+ * across a re-export that reorders or re-labels columns — the same headers
+ * re-resolve to whatever positions they now occupy. Optional roles are absent,
+ * null, or blank when the operator did not designate them.
+ */
+export interface PersistedColumnRoles {
+    sendAddress?: string | null;
+    trackingKey: string;
+    invoiceGuid?: string | null;
+}
+
+/** One designated role whose persisted header is not among the uploaded columns. */
+export interface UnresolvedRole {
+    role: keyof PersistedColumnRoles;
+    /** The (trimmed) header that was designated but not found. */
+    header: string;
+}
+
+export type ResolveColumnRolesResult =
+    | { status: "ok"; roles: ColumnRoles }
+    | { status: "unresolved"; unresolved: UnresolvedRole[] };
+
 export interface MaterialisedRecipient {
     /**
      * The recipient's identity: the tracking-key cell, normalised to a canonical
@@ -121,6 +146,57 @@ export function parseUploadedColumns(rows: string[][]): UploadedColumns {
     );
 
     return { status: "ok", columns, dataRows };
+}
+
+/**
+ * Bridge the campaign's **persisted (header-keyed)** role designation to the
+ * **index-keyed** {@link ColumnRoles} that {@link materialiseRecipients}
+ * consumes, resolved against the columns as read back from the (possibly
+ * re-exported) upload. This is the AC #4 → #5 link: roles are stored by header
+ * so they survive a re-export, and re-resolved to indices at send time.
+ *
+ * Each designated header is matched (after trimming) against the already-trimmed
+ * column headers; a duplicated header resolves to its **first** occurrence.
+ * Optional roles left unset (absent / null / blank) resolve to `null`. If the
+ * required `trackingKey` header — or any designated optional header — is not
+ * present among the columns, the result is `unresolved`, listing each missing
+ * role in `sendAddress, trackingKey, invoiceGuid` order, so the caller can hold
+ * the upload rather than materialise against the wrong columns.
+ */
+export function resolveColumnRoles(
+    columns: DetectedColumn[],
+    persisted: PersistedColumnRoles,
+): ResolveColumnRolesResult {
+    const unresolved: UnresolvedRole[] = [];
+
+    const resolve = (role: keyof PersistedColumnRoles, header: string): number | null => {
+        const wanted = header.trim();
+        const column = columns.find((c) => c.header === wanted);
+        if (column === undefined) {
+            unresolved.push({ role, header: wanted });
+            return null;
+        }
+        return column.index;
+    };
+
+    const resolveOptional = (
+        role: keyof PersistedColumnRoles,
+        header: string | null | undefined,
+    ): number | null => {
+        if (header === null || header === undefined || header.trim() === "") return null;
+        return resolve(role, header);
+    };
+
+    // Resolve in role order so `unresolved` reads sendAddress → trackingKey → invoiceGuid.
+    const sendAddress = resolveOptional("sendAddress", persisted.sendAddress);
+    const trackingKey = resolve("trackingKey", persisted.trackingKey);
+    const invoiceGuid = resolveOptional("invoiceGuid", persisted.invoiceGuid);
+
+    if (unresolved.length > 0 || trackingKey === null) {
+        return { status: "unresolved", unresolved };
+    }
+
+    return { status: "ok", roles: { sendAddress, trackingKey, invoiceGuid } };
 }
 
 /**
