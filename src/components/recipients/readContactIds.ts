@@ -4,6 +4,7 @@ import {
     extractContactIdsForColumn,
     type ContactIdExtraction,
 } from "./extractContactIds";
+import { parseUploadedColumns, type UploadedColumns } from "./columnRoles";
 
 /**
  * File readers (PRD #48, issues #50 + #51) — the thin impure seam between a
@@ -126,4 +127,16 @@ export async function extractContactIdsForColumnFromFile(
     columnIndex: number,
 ): Promise<ContactIdExtraction> {
     return extractContactIdsForColumn(await readRows(file), columnIndex);
+}
+
+/**
+ * Read a dropped CSV or XLSX file and retain **every** column (PRD
+ * `prd-bad-debt-excel-campaign.md`, issue #65) — the source-of-truth path where
+ * the file drives message content, not just targeting. Impure (reads the File);
+ * reuses the exact same {@link readRows} seam as the contact-id path, so a file
+ * parses identically whichever path consumes it. All decisions live in the pure
+ * {@link parseUploadedColumns} core it delegates to.
+ */
+export async function readUploadedColumnsFromFile(file: File): Promise<UploadedColumns> {
+    return parseUploadedColumns(await readRows(file));
 }

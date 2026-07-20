@@ -14,6 +14,18 @@ export {
 export {
     readContactIdsFromFile,
     extractContactIdsForColumnFromFile,
+    readUploadedColumnsFromFile,
     parseCsv,
     parseXlsx,
 } from "./readContactIds";
+export {
+    parseUploadedColumns,
+    materialiseRecipients,
+    type UploadedColumns,
+    type UploadedColumnsStatus,
+    type ColumnRoles,
+    type MaterialisedRecipient,
+    type MaterialiseResult,
+    type HeldRow,
+    type HeldReason,
+} from "./columnRoles";

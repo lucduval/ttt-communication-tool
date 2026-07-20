@@ -50,6 +50,16 @@ export default defineSchema({
         createOpportunities: v.optional(v.boolean()),
         // Font size for email content
         fontSize: v.optional(v.string()),
+        // Designated column roles for a source-of-truth uploaded-file campaign
+        // (PRD prd-bad-debt-excel-campaign.md, issue #65). Persisted by column
+        // header (durable across re-exports that share headers) — the send
+        // address (email), the tracking key (contact GUID = recipient identity),
+        // and the invoice GUID. Unset for non-uploaded campaigns.
+        columnRoles: v.optional(v.object({
+            sendAddress: v.optional(v.string()),
+            trackingKey: v.string(),
+            invoiceGuid: v.optional(v.string()),
+        })),
     })
         .index("by_status", ["status"])
         .index("by_user", ["createdBy"])
