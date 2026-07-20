@@ -117,6 +117,28 @@ export default defineSchema({
         .index("by_campaign_status", ["campaignId", "status"])
         .index("by_status", ["status"]),
 
+    // Per-recipient invoice-PDF pre-generation state for source-of-truth uploaded
+    // campaigns (PRD prd-bad-debt-excel-campaign.md, issue #68). Kept in its own
+    // table — NOT overloaded onto `messages.status` — because pre-generation is a
+    // distinct phase that runs before the send lifecycle, and the send-eligibility
+    // rule keys on `messages` rows. One row per (campaign, recipient); the recipient
+    // is the normalised tracking-key value (matches `messages.recipientId`), so the
+    // status map feeds `buildValidationReport`'s missing-PDF hold directly.
+    // Documents store only the `storageId` reference — never PDF bytes — to stay
+    // under Convex's ~1 MiB per-document limit.
+    invoicePdfs: defineTable({
+        campaignId: v.id("campaigns"),
+        recipientId: v.string(), // normalised tracking-key value = recipient identity
+        invoiceGuid: v.string(), // the new_invoicesid GUID the PDF was generated from
+        status: v.string(), // pending | generated | failed (see validationReport.ts PdfStatus)
+        storageId: v.optional(v.id("_storage")), // set only when generated; never bytes
+        invoiceType: v.optional(v.string()), // Tax | Accounting, when designated
+        errorMessage: v.optional(v.string()), // failure detail, drives the gate's missing-pdf hold
+    })
+        .index("by_campaign", ["campaignId"])
+        .index("by_campaign_recipient", ["campaignId", "recipientId"])
+        .index("by_campaign_status", ["campaignId", "status"]),
+
     messages: defineTable({
         campaignId: v.id("campaigns"),
         recipientId: v.string(), // Dynamics contact/account ID
