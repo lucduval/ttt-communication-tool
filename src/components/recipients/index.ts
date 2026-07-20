@@ -4,7 +4,7 @@ export { useRecipientSample } from "./useRecipientSample";
 export { useRecipientPagination } from "./useRecipientPagination";
 export { filterSignature } from "./filterSignature";
 export { materialiseExplicit } from "./materialiseExplicit";
-export { UploadListPanel } from "./UploadListPanel";
+export { UploadListPanel, type UploadRolesResult } from "./UploadListPanel";
 export {
     extractContactIds,
     extractContactIdsForColumn,

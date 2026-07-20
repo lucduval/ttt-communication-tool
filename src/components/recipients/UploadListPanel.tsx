@@ -2,80 +2,143 @@
 
 import { useCallback, useRef, useState } from "react";
 import { Upload, FileText, AlertTriangle, CheckCircle, Loader2 } from "lucide-react";
-import { readContactIdsFromFile, extractContactIdsForColumnFromFile } from "./readContactIds";
-import type { ContactIdExtraction, DetectedColumn } from "./extractContactIds";
+import { readUploadedColumnsFromFile } from "./readContactIds";
+import {
+    prepareUploadForSend,
+    type UploadedColumns,
+    type PersistedColumnRoles,
+    type HeldRow,
+} from "./columnRoles";
+import type { DetectedColumn } from "./extractContactIds";
+import type { CampaignRecipient } from "@/../convex/lib/recipientSelection";
 
 /**
- * "Upload list" audience panel (PRD #48, issue #50).
+ * "Upload list" audience panel — role-designation flow (PRD
+ * `prd-bad-debt-excel-campaign.md`, issue #65).
  *
- * A dropzone that swaps in for the filter panel when the Upload-list audience
- * mode is active. It reads a dropped CSV through the impure
- * {@link readContactIdsFromFile} seam and hands the pure extraction result back
- * up via `onResult`; the page turns a successful result into the same
- * `filtered` selection carrying `{ contactIds }` that the send path (#49)
- * already understands. The file is purely a source of contact ids — never
- * per-recipient template data.
+ * This is the load-bearing reversal of the uploaded-file model. Where the
+ * original panel treated a file as *only* a bag of contact ids (extract one
+ * column, discard the rest, re-resolve everything from Dynamics at send), this
+ * panel **retains every column** and lets the operator designate roles:
  *
- * When detection is `ambiguous` (#54) the panel keeps the dropped file and the
- * extraction's `candidates`, and shows a column-chooser dropdown. Picking a
- * column re-reads that file through {@link extractContactIdsForColumnFromFile}
- * — the same validate / dedupe / skip pipeline — and feeds the result back
- * through the very same `onResult` seam, so a hand-picked column activates the
- * `{ contactIds }` selection exactly like an auto-detected one.
+ *   - **send address** (email column) — required for email/personalised sends,
+ *   - **tracking key** (contact GUID) — always required; the recipient identity,
+ *   - **invoice GUID** — optional; drives the per-recipient PDF slice (#68).
  *
- * This panel only renders and parses; the count badge and the recipient total
- * live with the selection value on the page, so the displayed status is read
- * from the `result`/`fileName` props rather than owned here.
+ * Every remaining column stays available as a `{column}` merge variable. Once
+ * the required roles are designated the panel materialises the rows via the pure
+ * {@link prepareUploadForSend} seam — keying each recipient by its tracking-key
+ * value and carrying the full row as a JSON `variables` bag — and hands the
+ * result up via `onResult`. The page turns that into an `upload`-shape selection
+ * whose recipients flow straight to the send path with **no CRM round-trip**.
+ *
+ * Rows that cannot be identified (blank/duplicate tracking key) are *held*, never
+ * silently dropped, and surfaced here as the pre-send report's first slice (#67).
+ *
+ * The panel only renders, parses, and designates; the count badge and recipient
+ * total live with the selection value on the page.
  */
+
+/** What the panel hands up once a valid designation materialises recipients. */
+export interface UploadRolesResult {
+    /** Recipients materialised from the rows — the `upload`-shape selection value. */
+    recipients: CampaignRecipient[];
+    /** The designation persisted on the campaign (by header, survives a re-export). */
+    roles: PersistedColumnRoles;
+    /** Rows held out (blank/duplicate tracking key) for the pre-send report. */
+    held: HeldRow[];
+    fileName: string;
+}
+
+/** Local role selection — header strings; `""` means "not yet designated". */
+type RoleSelection = { sendAddress: string; trackingKey: string; invoiceGuid: string };
+
+const EMPTY_ROLES: RoleSelection = { sendAddress: "", trackingKey: "", invoiceGuid: "" };
+
+/**
+ * Best-effort initial guess for each role from the column headers, so a
+ * conventional CRM export lands designated. The operator can always override.
+ */
+function guessRoles(columns: DetectedColumn[]): RoleSelection {
+    const find = (re: RegExp) => columns.find((c) => re.test(c.header))?.header ?? "";
+    return {
+        // "email" but not "emailoptin" etc. — a plain address column.
+        sendAddress: find(/^e-?mail$|email address/i),
+        trackingKey: find(/contact\s*id|tracking\s*key|contactid/i),
+        invoiceGuid: find(/invoice.*(guid|id)/i),
+    };
+}
+
 export function UploadListPanel({
-    result,
-    fileName,
+    requireSendAddress,
     onResult,
 }: {
-    result: ContactIdExtraction | null;
-    fileName: string | null;
-    onResult: (result: ContactIdExtraction, fileName: string) => void;
+    /** Email/personalised campaigns must designate a send address; WhatsApp need not. */
+    requireSendAddress: boolean;
+    /** Fires with the materialised result, or `null` while the designation is incomplete. */
+    onResult: (result: UploadRolesResult | null) => void;
 }) {
     const [isDragging, setIsDragging] = useState(false);
     const [isParsing, setIsParsing] = useState(false);
+    const [columns, setColumns] = useState<UploadedColumns | null>(null);
+    const [fileName, setFileName] = useState<string | null>(null);
+    const [roles, setRoles] = useState<RoleSelection>(EMPTY_ROLES);
     const inputRef = useRef<HTMLInputElement>(null);
-    // The ambiguous file awaiting a manual column choice (#54), and the columns
-    // to offer. Held here (not on the page) because re-extraction re-reads the
-    // same file. Cleared the moment a different file is dropped or detection
-    // resolves cleanly; kept after a pick so a wrong choice can be re-picked.
-    const [chooser, setChooser] = useState<{ file: File; candidates: DetectedColumn[] } | null>(null);
+
+    // Re-run the pure materialisation whenever the designation changes and push
+    // the result (or null) up. Kept in one place so every dropdown change and the
+    // initial guess funnel through the same seam.
+    const recompute = useCallback(
+        (cols: UploadedColumns | null, sel: RoleSelection, name: string | null) => {
+            if (!cols || cols.status === "empty" || !name) {
+                onResult(null);
+                return;
+            }
+            if (sel.trackingKey === "" || (requireSendAddress && sel.sendAddress === "")) {
+                onResult(null); // required roles not yet designated
+                return;
+            }
+            const persisted: PersistedColumnRoles = {
+                trackingKey: sel.trackingKey,
+                sendAddress: sel.sendAddress || undefined,
+                invoiceGuid: sel.invoiceGuid || undefined,
+            };
+            const prepared = prepareUploadForSend(cols, persisted);
+            if (prepared.status !== "ok") {
+                onResult(null); // a designated header vanished — hold the upload
+                return;
+            }
+            onResult({ recipients: prepared.recipients, roles: persisted, held: prepared.held, fileName: name });
+        },
+        [onResult, requireSendAddress],
+    );
 
     const handleFile = useCallback(
         async (file: File) => {
             setIsParsing(true);
             try {
-                const extraction = await readContactIdsFromFile(file);
-                setChooser(
-                    extraction.status === "ambiguous"
-                        ? { file, candidates: extraction.candidates }
-                        : null,
-                );
-                onResult(extraction, file.name);
+                const cols = await readUploadedColumnsFromFile(file);
+                const guessed = guessRoles(cols.columns);
+                setColumns(cols);
+                setFileName(file.name);
+                setRoles(guessed);
+                recompute(cols, guessed, file.name);
             } finally {
                 setIsParsing(false);
             }
         },
-        [onResult],
+        [recompute],
     );
 
-    const handleChooseColumn = useCallback(
-        async (columnIndex: number) => {
-            if (!chooser) return;
-            const { file } = chooser;
-            setIsParsing(true);
-            try {
-                const extraction = await extractContactIdsForColumnFromFile(file, columnIndex);
-                onResult(extraction, file.name);
-            } finally {
-                setIsParsing(false);
-            }
+    const setRole = useCallback(
+        (role: keyof RoleSelection, header: string) => {
+            setRoles((prev) => {
+                const next = { ...prev, [role]: header };
+                recompute(columns, next, fileName);
+                return next;
+            });
         },
-        [chooser, onResult],
+        [columns, fileName, recompute],
     );
 
     const onDrop = useCallback(
@@ -129,112 +192,185 @@ export function UploadListPanel({
                     {isParsing ? "Reading file…" : "Drop a CSV or Excel file here, or click to choose a file"}
                 </p>
                 <p className="text-xs text-gray-500">
-                    The file needs a <span className="font-mono">contactid</span> column of Dynamics
-                    contact ids. It is used only to target recipients.
+                    The tool reads back every column. Designate which columns are the send address,
+                    the tracking key, and the invoice below — the rest are available as{" "}
+                    <span className="font-mono">{"{column}"}</span> merge variables.
                 </p>
             </div>
 
-            {!isParsing && result && result.status !== "ambiguous" && (
-                <UploadStatus result={result} fileName={fileName} />
+            {!isParsing && columns && columns.status === "empty" && (
+                <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3">
+                    <AlertTriangle className="h-5 w-5 shrink-0 text-red-600" />
+                    <div className="text-sm text-red-700">
+                        <p className="font-medium">No columns found{fileName ? ` in ${fileName}` : ""}.</p>
+                        <p>The file appears to be empty.</p>
+                    </div>
+                </div>
             )}
-            {!isParsing && chooser && (
-                <ColumnChooser candidates={chooser.candidates} onChoose={handleChooseColumn} />
+
+            {!isParsing && columns && columns.status === "ok" && (
+                <RoleDesignation
+                    columns={columns}
+                    roles={roles}
+                    requireSendAddress={requireSendAddress}
+                    fileName={fileName}
+                    onRole={setRole}
+                />
             )}
         </div>
     );
 }
 
 /**
- * Manual column choice for an ambiguous file (#54). Lists the extraction's
- * `candidates` so the user names the contact-id column; the selection runs the
- * same pipeline as auto-detection. Shown only while `chooser` is set — i.e.
- * never for auto-detected (tier 1–3) files.
+ * The three role dropdowns plus a live status line. Recomputing the recipients
+ * on every change is the page's job (via `onRole` → `recompute`); this component
+ * derives the *display* status from the same pure seam so the operator sees the
+ * held-row report before sending (#67).
  */
-function ColumnChooser({
-    candidates,
-    onChoose,
-}: {
-    candidates: DetectedColumn[];
-    onChoose: (columnIndex: number) => void;
-}) {
-    return (
-        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
-            <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600" />
-            <div className="space-y-2 text-sm text-amber-800">
-                <p className="font-medium">We couldn’t identify the contact-id column automatically.</p>
-                <p>Choose which column holds the Dynamics contact ids:</p>
-                <select
-                    defaultValue=""
-                    onChange={(e) => {
-                        if (e.target.value !== "") onChoose(Number(e.target.value));
-                    }}
-                    className="w-full rounded-md border border-amber-300 bg-white px-2 py-1.5 text-sm text-gray-800 focus:border-[#1E3A5F] focus:outline-none"
-                >
-                    <option value="" disabled>
-                        Select a column…
-                    </option>
-                    {candidates.map((c) => (
-                        <option key={c.index} value={c.index}>
-                            {c.header || `Column ${c.index + 1}`}
-                        </option>
-                    ))}
-                </select>
-            </div>
-        </div>
-    );
-}
-
-function UploadStatus({
-    result,
+function RoleDesignation({
+    columns,
+    roles,
+    requireSendAddress,
     fileName,
+    onRole,
 }: {
-    result: ContactIdExtraction;
+    columns: UploadedColumns;
+    roles: RoleSelection;
+    requireSendAddress: boolean;
     fileName: string | null;
+    onRole: (role: keyof RoleSelection, header: string) => void;
 }) {
-    const validCount = result.contactIds.length;
-    const hasIds = validCount > 0;
+    const requiredMissing =
+        roles.trackingKey === "" || (requireSendAddress && roles.sendAddress === "");
 
-    if (!hasIds) {
-        return (
-            <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3">
-                <AlertTriangle className="h-5 w-5 shrink-0 text-red-600" />
-                <div className="text-sm text-red-700">
-                    <p className="font-medium">No contact ids found{fileName ? ` in ${fileName}` : ""}.</p>
-                    <p>{errorMessage(result)}</p>
-                </div>
-            </div>
-        );
-    }
+    // Derive the report the same way the page derives the send payload.
+    const prepared =
+        !requiredMissing
+            ? prepareUploadForSend(columns, {
+                  trackingKey: roles.trackingKey,
+                  sendAddress: roles.sendAddress || undefined,
+                  invoiceGuid: roles.invoiceGuid || undefined,
+              })
+            : null;
 
     return (
-        <div className="flex items-start gap-2 rounded-lg border border-green-200 bg-green-50 p-3">
-            <CheckCircle className="h-5 w-5 shrink-0 text-green-600" />
-            <div className="text-sm text-green-800">
-                <p className="flex items-center gap-1 font-medium">
-                    <FileText className="h-4 w-4" />
-                    {validCount.toLocaleString()} contact id{validCount === 1 ? "" : "s"} found
-                    {fileName ? ` in ${fileName}` : ""}
-                    {result.skippedRows > 0
-                        ? ` — ${result.skippedRows.toLocaleString()} row${
-                              result.skippedRows === 1 ? "" : "s"
-                          } skipped`
-                        : ""}
-                    .
+        <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+            <p className="text-sm font-medium text-gray-700">
+                <FileText className="mr-1 inline h-4 w-4" />
+                {columns.dataRows.length.toLocaleString()} row
+                {columns.dataRows.length === 1 ? "" : "s"}
+                {fileName ? ` in ${fileName}` : ""} — designate the columns:
+            </p>
+
+            <RoleSelect
+                label="Send address (email)"
+                required={requireSendAddress}
+                value={roles.sendAddress}
+                columns={columns.columns}
+                onChange={(h) => onRole("sendAddress", h)}
+            />
+            <RoleSelect
+                label="Tracking key (contact GUID)"
+                required
+                value={roles.trackingKey}
+                columns={columns.columns}
+                onChange={(h) => onRole("trackingKey", h)}
+            />
+            <RoleSelect
+                label="Invoice GUID (optional)"
+                required={false}
+                value={roles.invoiceGuid}
+                columns={columns.columns}
+                onChange={(h) => onRole("invoiceGuid", h)}
+            />
+
+            {requiredMissing && (
+                <p className="text-xs text-amber-700">
+                    Designate the {requireSendAddress ? "send address and " : ""}tracking key to
+                    continue.
                 </p>
-                <p className="text-green-700">
-                    The final recipient count is confirmed at send: contacts you can&apos;t access,
-                    that are unreachable on this channel, or no longer in the CRM are skipped.
+            )}
+
+            {prepared?.status === "unresolved" && (
+                <p className="text-xs text-red-700">
+                    A designated column is no longer present in the file. Re-pick the roles.
                 </p>
-            </div>
+            )}
+
+            {prepared?.status === "ok" && (
+                <UploadReport recipients={prepared.recipients.length} held={prepared.held} />
+            )}
         </div>
     );
 }
 
-function errorMessage(result: ContactIdExtraction): string {
-    // `ambiguous` never reaches here — that status renders the ColumnChooser
-    // instead of UploadStatus. The remaining no-ids cases are an empty file and
-    // a resolved column (auto-detected or hand-picked) that held no valid ids.
-    return result.status === "empty"
-        ? "The file is empty."
-        : "No valid contact ids were found in the id column.";
+function RoleSelect({
+    label,
+    required,
+    value,
+    columns,
+    onChange,
+}: {
+    label: string;
+    required: boolean;
+    value: string;
+    columns: DetectedColumn[];
+    onChange: (header: string) => void;
+}) {
+    return (
+        <label className="block text-sm">
+            <span className="mb-1 block font-medium text-gray-600">
+                {label}
+                {required && <span className="text-red-600"> *</span>}
+            </span>
+            <select
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+                className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-800 focus:border-[#1E3A5F] focus:outline-none"
+            >
+                <option value="">{required ? "Select a column…" : "None"}</option>
+                {columns.map((c) => (
+                    <option key={c.index} value={c.header}>
+                        {c.header || `Column ${c.index + 1}`}
+                    </option>
+                ))}
+            </select>
+        </label>
+    );
+}
+
+/** The pre-send report: how many rows will send, and why any are held. */
+function UploadReport({ recipients, held }: { recipients: number; held: HeldRow[] }) {
+    const missing = held.filter((h) => h.reason === "missing-tracking-key").length;
+    const duplicate = held.filter((h) => h.reason === "duplicate-tracking-key").length;
+
+    return (
+        <div
+            className={`flex items-start gap-2 rounded-lg border p-3 ${
+                held.length > 0
+                    ? "border-amber-200 bg-amber-50 text-amber-800"
+                    : "border-green-200 bg-green-50 text-green-800"
+            }`}
+        >
+            {held.length > 0 ? (
+                <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600" />
+            ) : (
+                <CheckCircle className="h-5 w-5 shrink-0 text-green-600" />
+            )}
+            <div className="space-y-1 text-sm">
+                <p className="font-medium">
+                    {recipients.toLocaleString()} recipient{recipients === 1 ? "" : "s"} ready to send.
+                </p>
+                {held.length > 0 && (
+                    <p>
+                        {held.length.toLocaleString()} row{held.length === 1 ? "" : "s"} held —{" "}
+                        {duplicate > 0 && `${duplicate} with a duplicate tracking key (multi-invoice contact)`}
+                        {duplicate > 0 && missing > 0 && ", "}
+                        {missing > 0 && `${missing} with a missing/invalid tracking key`}. Fix the export
+                        and re-upload to include them.
+                    </p>
+                )}
+            </div>
+        </div>
+    );
 }

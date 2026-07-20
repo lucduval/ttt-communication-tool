@@ -22,7 +22,8 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, type Contact, type ContactIdExtraction } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, type Contact, type UploadRolesResult } from "@/components/recipients";
+import type { PersistedColumnRoles } from "@/components/recipients/columnRoles";
 import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
 import {
     getConvexSiteUrl,
@@ -172,12 +173,12 @@ export default function NewCampaignPage() {
     } = useRecipientPagination(LOAD_MORE_SIZE);
     const [isLoadingMore, setIsLoadingMore] = useState(false);
     const [audience, setAudience] = useState<"clients" | "employees" | "leads" | "upload">("clients");
-    // Upload-list audience (#50): the latest CSV extraction and its file name, so
-    // the dropzone can render its status. A successful parse is turned into a
-    // `filtered` selection carrying `{ contactIds }`; this state is reset whenever
-    // the audience changes (see the audience-change effect).
-    const [uploadResult, setUploadResult] = useState<ContactIdExtraction | null>(null);
-    const [uploadFileName, setUploadFileName] = useState<string | null>(null);
+    // Upload-list audience (#65): the column-role designation the operator made
+    // for the current upload, persisted on the campaign so it survives a
+    // re-export. The materialised recipients live in the selection value (the
+    // `upload` shape); this holds only the roles to persist. Reset whenever the
+    // audience changes (see the audience-change effect).
+    const [columnRoles, setColumnRoles] = useState<PersistedColumnRoles | null>(null);
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
         status: "all",
@@ -763,8 +764,7 @@ export default function NewCampaignPage() {
             // Resets to the empty explicit shape — clears any filtered select-all too.
             recipientSelection.clear();
             // Switching audience (incl. away from Upload list) drops the uploaded set.
-            setUploadResult(null);
-            setUploadFileName(null);
+            setColumnRoles(null);
         }
     }, [currentStep, audience]);
 
@@ -776,7 +776,14 @@ export default function NewCampaignPage() {
     // from the prioritised union of every available source so no selected id is
     // dropped just because one source was short.
     useEffect(() => {
-        if ((currentStep === "compose" || currentStep === "preview") && !isSelectAllActive) {
+        // The upload audience already holds pre-materialised recipients in the
+        // `upload` selection shape (issue #65) — re-materialising from `selectedIds`
+        // (always empty for uploads) would wipe them, so skip it here.
+        if (
+            (currentStep === "compose" || currentStep === "preview") &&
+            !isSelectAllActive &&
+            audience !== "upload"
+        ) {
             recipientSelection.setExplicit(
                 materialiseExplicit(
                     selectedIds,
@@ -786,7 +793,7 @@ export default function NewCampaignPage() {
                 ),
             );
         }
-    }, [currentStep, contacts, selectedIds, isSelectAllActive, allFilteredContactsRef]);
+    }, [currentStep, contacts, selectedIds, isSelectAllActive, allFilteredContactsRef, audience]);
 
     // Reset template selection when switching channels
     useEffect(() => {
@@ -998,6 +1005,16 @@ export default function NewCampaignPage() {
                 attachments: backendAttachments,
                 whatsappTemplateId: campaignChannel === "whatsapp" ? selectedTemplate?._id : undefined,
                 variableValues: campaignChannel === "whatsapp" ? JSON.stringify(variableValues) : undefined,
+                columnRoles:
+                    audience === "upload" && columnRoles
+                        ? {
+                              trackingKey: columnRoles.trackingKey,
+                              // PersistedColumnRoles permits null (absent role); the
+                              // stored shape is string | undefined, so coerce here.
+                              sendAddress: columnRoles.sendAddress ?? undefined,
+                              invoiceGuid: columnRoles.invoiceGuid ?? undefined,
+                          }
+                        : undefined,
                 createDynamicsActivity: audience === "clients",
                 fromMailbox: (campaignChannel === "email" || campaignChannel === "personalised") ? selectedMailbox || undefined : undefined,
                 aiPrompt: campaignChannel === "personalised" ? aiUserPrompt : undefined,
@@ -1039,7 +1056,13 @@ export default function NewCampaignPage() {
             case "channel":
                 return campaignTitle.trim() !== "";
             case "recipients":
-                return selectedIds.size > 0 || isSelectAllActive;
+                // Upload audience proceeds on its materialised recipient count
+                // (its selection is the `upload` shape, not hand-picked ids).
+                return (
+                    selectedIds.size > 0 ||
+                    isSelectAllActive ||
+                    (audience === "upload" && recipientSelection.count > 0)
+                );
             case "compose":
                 if (campaignChannel === "personalised") {
                     return aiUserPrompt.trim() !== "" && subject.trim() !== "" && selectedMailbox !== null;
@@ -1223,23 +1246,21 @@ export default function NewCampaignPage() {
         recipientSelection.clear();
     };
 
-    // Upload-list (#50): a parsed CSV becomes the same `filtered` selection the
-    // step already understands, carrying `{ contactIds }` for the send path (#49)
-    // to re-resolve. The captured `total` is the parsed id count; the real
-    // recipient total (after access/reachability/CRM checks) is confirmed at send.
-    // A file with no valid ids surfaces an error and leaves nothing selected.
+    // Upload-list (#65): once the operator has designated the column roles, the
+    // panel materialises the rows (identity + full-row merge bag) via the pure
+    // `prepareUploadForSend` seam and hands them up here. They become the `upload`
+    // selection shape, whose recipients flow straight to the send path with NO
+    // Dynamics re-resolution — the file is the source of truth. A `null` result
+    // (designation incomplete/invalid) clears the selection.
     const handleUploadResult = useCallback(
-        (result: ContactIdExtraction, fileName: string) => {
-            setUploadResult(result);
-            setUploadFileName(fileName);
+        (result: UploadRolesResult | null) => {
             setSelectedIds(new Set());
-            if (result.contactIds.length > 0) {
-                recipientSelection.activateFiltered(
-                    { contactIds: result.contactIds },
-                    result.contactIds.length,
-                );
+            if (result) {
+                recipientSelection.activateUpload(result.recipients);
+                setColumnRoles(result.roles);
             } else {
                 recipientSelection.clear();
+                setColumnRoles(null);
             }
         },
         [recipientSelection],
@@ -1500,7 +1521,7 @@ export default function NewCampaignPage() {
                                         </div>
                                     </div>
 
-                                    {showValidationErrors && selectedIds.size === 0 && !isSelectAllActive && (
+                                    {showValidationErrors && selectedIds.size === 0 && !isSelectAllActive && audience !== "upload" && (
                                         <div className="p-3 bg-red-50 border border-red-200 rounded-lg mb-4">
                                             <p className="text-sm text-red-600 font-medium">
                                                 Please select at least one recipient to continue, or use "Select All" to send to everyone.
@@ -1610,8 +1631,10 @@ export default function NewCampaignPage() {
 
                                     {audience === "upload" && (
                                         <UploadListPanel
-                                            result={uploadResult}
-                                            fileName={uploadFileName}
+                                            requireSendAddress={
+                                                campaignChannel === "email" ||
+                                                campaignChannel === "personalised"
+                                            }
                                             onResult={handleUploadResult}
                                         />
                                     )}

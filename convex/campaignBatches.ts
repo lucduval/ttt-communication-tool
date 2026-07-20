@@ -407,6 +407,15 @@ export const startCampaign = mutation({
         ),
         whatsappTemplateId: v.optional(v.id("whatsappTemplates")),
         variableValues: v.optional(v.string()),
+        // Uploaded-file role designation (issue #65), persisted by column header so
+        // it survives a re-export. Unset for non-uploaded campaigns.
+        columnRoles: v.optional(
+            v.object({
+                sendAddress: v.optional(v.string()),
+                trackingKey: v.string(),
+                invoiceGuid: v.optional(v.string()),
+            }),
+        ),
         createDynamicsActivity: v.optional(v.boolean()),
         fromMailbox: v.optional(v.string()),
         ccEmail: v.optional(v.string()),
@@ -460,6 +469,7 @@ export const startCampaign = mutation({
             createdBy: identity.subject,
             subject: args.subject,
             whatsappTemplateId: args.whatsappTemplateId,
+            columnRoles: args.columnRoles,
             createDynamicsActivity: args.createDynamicsActivity,
             fromMailbox: args.fromMailbox,
             ccEmail: args.ccEmail,
