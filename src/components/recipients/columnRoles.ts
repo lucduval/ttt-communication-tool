@@ -257,3 +257,78 @@ function cellForRole(row: string[], columnIndex: number | null): string | null {
     if (columnIndex === null) return null;
     return (row[columnIndex] ?? "").trim();
 }
+
+/**
+ * A recipient in the exact shape `campaignQueue.queueCampaignBatches` consumes on
+ * its **explicit-recipients** path — identity in `id`, the send address in
+ * `email`, and the row's full merge bag JSON-encoded in `variables`. Producing
+ * this shape is how an uploaded row reaches the send pipeline **without** a
+ * Dynamics re-fetch: the row's own cells travel through as the recipient.
+ */
+export interface UploadRecipient {
+    /** The recipient's identity: the normalised tracking-key value. */
+    id: string;
+    /** The send-address cell, omitted when no send-address role is designated. */
+    email?: string;
+    /**
+     * The per-recipient merge bag (`{ header: cell }`) as a JSON string — the
+     * `variables` slot the email/WhatsApp adapters parse for `{column}`
+     * substitution. Always present (an empty-bag row still serialises to `{}`).
+     */
+    variables: string;
+}
+
+export type PrepareUploadResult =
+    | { status: "unresolved"; unresolved: UnresolvedRole[] }
+    | {
+          status: "ok";
+          /** Rows that became sendable recipients, in first-seen order. */
+          recipients: UploadRecipient[];
+          /** Rows held out (blank/malformed key, or a duplicated key), for the report. */
+          held: HeldRow[];
+      };
+
+/**
+ * The AC #5 seam: turn a parsed upload + the campaign's persisted role
+ * designation into the recipients the send pipeline consumes — the load-bearing
+ * reversal that makes the **uploaded row**, not a Dynamics re-fetch, the source
+ * of truth at send time.
+ *
+ * It composes {@link resolveColumnRoles} (persisted-header → index) and
+ * {@link materialiseRecipients} (tracking-key identity + variables bag), then
+ * projects each materialised recipient into the {@link UploadRecipient} payload:
+ * the tracking key fills `id` (so the one-message-per-`(campaign, recipient)`
+ * idempotency seam keeps working unchanged), the send-address cell fills `email`
+ * (omitted when unassigned, e.g. a WhatsApp upload), and the full row travels as
+ * the JSON-encoded `variables` bag.
+ *
+ * When a designated header is missing from the upload the roles cannot be
+ * resolved, so it returns `unresolved` (the caller holds the whole upload rather
+ * than materialising against the wrong columns). Otherwise it returns the
+ * sendable `recipients` **and** the `held` rows, so the caller can both send and
+ * show the pre-send validation report (#67).
+ */
+export function prepareUploadForSend(
+    uploaded: UploadedColumns,
+    persisted: PersistedColumnRoles,
+): PrepareUploadResult {
+    const resolved = resolveColumnRoles(uploaded.columns, persisted);
+    if (resolved.status === "unresolved") {
+        return { status: "unresolved", unresolved: resolved.unresolved };
+    }
+
+    const { recipients, held } = materialiseRecipients(uploaded, resolved.roles);
+
+    return {
+        status: "ok",
+        recipients: recipients.map((r): UploadRecipient => {
+            const payload: UploadRecipient = {
+                id: r.recipientId,
+                variables: JSON.stringify(r.variables),
+            };
+            if (r.sendAddress !== null) payload.email = r.sendAddress;
+            return payload;
+        }),
+        held,
+    };
+}

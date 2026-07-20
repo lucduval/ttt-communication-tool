@@ -3,6 +3,7 @@ import {
     parseUploadedColumns,
     materialiseRecipients,
     resolveColumnRoles,
+    prepareUploadForSend,
     type ColumnRoles,
 } from "./columnRoles";
 
@@ -309,5 +310,87 @@ describe("materialiseRecipients (held rows — the single-invoice hard gate)", (
         const { recipients, held } = materialiseRecipients(uploaded, roles);
         expect(recipients).toEqual([]);
         expect(held).toEqual([]);
+    });
+});
+
+describe("prepareUploadForSend (materialised rows → send payload — AC #5)", () => {
+    // A CRM-shaped export: identity in "Contact", the address in "Email",
+    // an invoice GUID column, and pre-rendered merge columns.
+    const upload = () =>
+        parseUploadedColumns([
+            ["Full Name", "Email", "Contact", "InvoiceGuid", "Amount"],
+            ["Alice", "alice@example.com", A, INV_A, "R1,200.00"],
+            ["Bob", "bob@example.com", B, INV_B, "R980.00"],
+        ]);
+
+    const persisted = {
+        sendAddress: "Email",
+        trackingKey: "Contact",
+        invoiceGuid: "InvoiceGuid",
+    };
+
+    it("passes the unresolved status through when a designated header is missing", () => {
+        const result = prepareUploadForSend(upload(), {
+            trackingKey: "NoSuchColumn",
+        });
+        expect(result.status).toBe("unresolved");
+        if (result.status !== "unresolved") throw new Error("expected unresolved");
+        expect(result.unresolved).toEqual([{ role: "trackingKey", header: "NoSuchColumn" }]);
+    });
+
+    it("materialises recipients keyed by the tracking-key value into the id slot", () => {
+        const result = prepareUploadForSend(upload(), persisted);
+        expect(result.status).toBe("ok");
+        if (result.status !== "ok") throw new Error("expected ok");
+        expect(result.recipients.map((r) => r.id)).toEqual([A, B]);
+    });
+
+    it("puts the send-address cell in the email slot", () => {
+        const result = prepareUploadForSend(upload(), persisted);
+        if (result.status !== "ok") throw new Error("expected ok");
+        expect(result.recipients.map((r) => r.email)).toEqual([
+            "alice@example.com",
+            "bob@example.com",
+        ]);
+    });
+
+    it("carries the full row as a JSON-encoded variables bag (the merge source of truth)", () => {
+        const result = prepareUploadForSend(upload(), persisted);
+        if (result.status !== "ok") throw new Error("expected ok");
+        expect(JSON.parse(result.recipients[0].variables)).toEqual({
+            "Full Name": "Alice",
+            Email: "alice@example.com",
+            Contact: A,
+            InvoiceGuid: INV_A,
+            Amount: "R1,200.00",
+        });
+    });
+
+    it("omits the email slot when no send-address role is designated (e.g. a WhatsApp upload)", () => {
+        const result = prepareUploadForSend(upload(), {
+            trackingKey: "Contact",
+        });
+        if (result.status !== "ok") throw new Error("expected ok");
+        expect(result.recipients[0].email).toBeUndefined();
+    });
+
+    it("surfaces held rows (duplicate + missing tracking key) alongside the recipients for the report", () => {
+        const uploaded = parseUploadedColumns([
+            ["Email", "Contact", "Amount"],
+            ["alice@example.com", A, "R1,200.00"], // ok
+            ["dup@example.com", A, "R500.00"], // duplicate tracking key — held
+            ["blank@example.com", "", "R700.00"], // missing tracking key — held
+        ]);
+        const result = prepareUploadForSend(uploaded, {
+            sendAddress: "Email",
+            trackingKey: "Contact",
+        });
+        if (result.status !== "ok") throw new Error("expected ok");
+        expect(result.recipients).toEqual([]);
+        expect(result.held.map((h) => h.reason)).toEqual([
+            "duplicate-tracking-key",
+            "duplicate-tracking-key",
+            "missing-tracking-key",
+        ]);
     });
 });
