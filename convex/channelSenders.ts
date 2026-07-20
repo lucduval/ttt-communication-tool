@@ -18,6 +18,7 @@ import {
 } from "./lib/whatsapp";
 import { logWhatsAppActivity } from "./lib/dynamics_logging";
 import { notifyTinaOfOutboundTemplate, substitutedBodyVariables } from "./lib/notifyTina";
+import { applyMerge } from "./lib/applyMerge";
 
 /**
  * Channel Senders — the per-channel adapters behind the Channel Send seam. Each
@@ -161,27 +162,52 @@ async function sendEmailBatch_(
             const recipientFullName = recipient.name || "";
             const recipientEmail = emailAddresses[0];
 
-            const applyMergeFields = (text: string) =>
-                text
-                    .replace(/\{firstName\}/g, recipientFirstName)
-                    .replace(/\{fullName\}/g, recipientFullName)
-                    .replace(/\{email\}/g, recipientEmail);
+            // Excel-driven campaigns (PRD bad-debt-excel-campaign, #66): the
+            // per-recipient `variables` bag carries the full uploaded row, keyed
+            // by column header, and is the source of truth for `{column}` merge —
+            // no Dynamics re-fetch on this path. Non-upload campaigns have no bag,
+            // so only the built-in fields below resolve, preserving prior behaviour.
+            const rowVariables: Record<string, string> = {};
+            if (recipient.variables) {
+                try {
+                    const parsed = JSON.parse(recipient.variables);
+                    if (parsed && typeof parsed === "object") {
+                        for (const [k, val] of Object.entries(parsed)) {
+                            rowVariables[k.trim()] = val == null ? "" : String(val);
+                        }
+                    }
+                } catch {
+                    // Malformed bag → no row variables; built-ins still resolve.
+                }
+            }
+            // Row columns are the source of truth: they override the built-ins when
+            // a header collides (e.g. an export column literally named `email`).
+            const rowContext: Record<string, string> = {
+                firstName: recipientFirstName,
+                fullName: recipientFullName,
+                email: recipientEmail,
+                ...rowVariables,
+            };
+
+            const applyMergeFields = (text: string) => applyMerge(text, rowContext);
 
             const unsubscribeUrl = siteUrl ? `${siteUrl}/unsubscribe?id=${recipient.id}` : "";
 
             const mergedHtmlBody = applyMergeFields(campaignContent?.htmlBody || "");
+            // Merge the subject first: wrapEmail embeds it as the document title
+            // inside the body, so an un-merged subject would leak a raw
+            // `{placeholder}` into the body (PRD #66 — nothing raw ever ships).
+            const mergedSubject = applyMergeFields(campaign.subject || "");
 
             let emailBody = wrapEmail(
                 mergedHtmlBody + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : ""),
-                campaign.subject || "Notification",
+                mergedSubject || "Notification",
                 campaignContent?.fontSize || "15px"
             );
 
             if (siteUrl) {
                 emailBody = (await rewriteEmailLinks(emailBody, siteUrl, campaignId, recipient.id)) as string;
             }
-
-            const mergedSubject = applyMergeFields(campaign.subject || "");
 
             prepared.push({
                 recipient,

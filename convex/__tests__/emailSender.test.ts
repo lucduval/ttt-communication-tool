@@ -187,4 +187,86 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
         // 25 recipients → two chunks (20 + 5), each marked right before its send.
         expect(events).toEqual(["mark:20", "send:20", "mark:5", "send:5"]);
     });
+
+    it("merges each recipient's row `variables` bag into subject and body (PRD #66)", async () => {
+        // Excel-driven campaigns: the full uploaded row travels as a JSON
+        // `variables` bag keyed by column header, and the email adapter must
+        // render `{column}` from that row — no Dynamics re-fetch on this path.
+        const content = {
+            htmlBody: "<p>You owe {amount} on invoice {invoiceNumber}.</p>",
+            fontSize: "15px",
+            attachments: [],
+        };
+        const mergeCampaign = { ...campaign, subject: "Overdue: {invoiceNumber}" };
+        const batch = {
+            _id: "batch-1" as any,
+            recipients: [
+                {
+                    id: "r1",
+                    email: "alice@example.com",
+                    name: "",
+                    variables: JSON.stringify({ amount: "R1,200.00", invoiceNumber: "INV-42" }),
+                },
+                {
+                    id: "r2",
+                    email: "bob@example.com",
+                    name: "",
+                    variables: JSON.stringify({ amount: "R99.50", invoiceNumber: "INV-7" }),
+                },
+            ],
+        };
+        boundary.sendEmailBatch.mockImplementation(async (msgs: any[]) =>
+            msgs.map(() => ({ success: true }))
+        );
+
+        const emit = async () => {};
+        const { ctx } = createCtx({ campaignContent: content });
+        await emailSender.sendBatch(
+            ctx as any,
+            mergeCampaign,
+            batch,
+            emit,
+            batch.recipients,
+            async () => {}
+        );
+
+        const sent = boundary.sendEmailBatch.mock.calls[0][0];
+        expect(sent[0].subject).toBe("Overdue: INV-42");
+        expect(sent[0].body).toContain("You owe R1,200.00 on invoice INV-42.");
+        expect(sent[1].subject).toBe("Overdue: INV-7");
+        expect(sent[1].body).toContain("You owe R99.50 on invoice INV-7.");
+    });
+
+    it("never leaks a raw {placeholder} when a referenced column is absent (PRD #66)", async () => {
+        const content = {
+            htmlBody: "<p>Amount: {amount}</p>",
+            fontSize: "15px",
+            attachments: [],
+        };
+        const batch = {
+            _id: "batch-1" as any,
+            recipients: [
+                { id: "r1", email: "alice@example.com", name: "", variables: JSON.stringify({}) },
+            ],
+        };
+        boundary.sendEmailBatch.mockImplementation(async (msgs: any[]) =>
+            msgs.map(() => ({ success: true }))
+        );
+
+        const emit = async () => {};
+        const { ctx } = createCtx({ campaignContent: content });
+        await emailSender.sendBatch(
+            ctx as any,
+            { ...campaign, subject: "re {amount}" },
+            batch,
+            emit,
+            batch.recipients,
+            async () => {}
+        );
+
+        const sent = boundary.sendEmailBatch.mock.calls[0][0];
+        expect(sent[0].subject).toBe("re ");
+        expect(sent[0].body).not.toContain("{amount}");
+        expect(sent[0].body).toContain("Amount: </p>");
+    });
 });
