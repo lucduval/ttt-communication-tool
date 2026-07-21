@@ -35,6 +35,7 @@ export function UploadPreviewSample({
     invoiceGuidDesignated,
     emailType,
     unsubscribeUrl,
+    disclaimerHtml,
     generatePdf,
 }: {
     subject: string;
@@ -48,6 +49,8 @@ export function UploadPreviewSample({
     emailType?: EmailType;
     /** A representative unsubscribe URL; empty/absent means none is configured (no footer). */
     unsubscribeUrl?: string;
+    /** The selected disclaimer's HTML, appended (merged) above the unsubscribe footer; absent = "None". */
+    disclaimerHtml?: string;
     /** Generate one recipient's invoice PDF on demand; resolves to a viewable URL or an error. */
     generatePdf: (
         invoiceGuid: string,
@@ -56,6 +59,7 @@ export function UploadPreviewSample({
     const messages = buildPreviewMessages(subject, htmlContent, recipients, SAMPLE_SIZE, {
         emailType,
         unsubscribeUrl,
+        disclaimerHtml,
     });
 
     if (messages.length === 0) {

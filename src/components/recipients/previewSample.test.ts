@@ -140,3 +140,42 @@ describe("buildPreviewMessages — preview↔send fidelity (PRD #74, #75)", () =
         expect(msg.body).toBe("<p>Body</p>");
     });
 });
+
+describe("buildPreviewMessages — disclaimer append + merge (issue #77)", () => {
+    const UNSUB = "https://app.example.com/unsubscribe";
+
+    it("appends the merged disclaimer after the body and before the unsubscribe footer", () => {
+        const [msg] = buildPreviewMessages(
+            "s",
+            "<p>Body</p>",
+            [recipient()],
+            1,
+            {
+                emailType: "marketing",
+                unsubscribeUrl: UNSUB,
+                disclaimerHtml: "<small>Owed: {Amount}</small>",
+            },
+        );
+        const bodyIdx = msg.body.indexOf("<p>Body</p>");
+        const disclaimerIdx = msg.body.indexOf("Owed: R1,200.00");
+        const footerIdx = msg.body.indexOf("unsubscribe here");
+        // Merge runs over the disclaimer exactly as over the body.
+        expect(disclaimerIdx).toBeGreaterThan(bodyIdx);
+        expect(footerIdx).toBeGreaterThan(disclaimerIdx);
+    });
+
+    it("renders an unknown placeholder in the disclaimer empty — never a raw token", () => {
+        const [msg] = buildPreviewMessages("s", "<p>Body</p>", [recipient()], 1, {
+            disclaimerHtml: "<small>Hi {missingColumn}!</small>",
+        });
+        expect(msg.body).toContain("<small>Hi !</small>");
+        expect(msg.body).not.toContain("{missingColumn}");
+    });
+
+    it("appends nothing when no disclaimer is selected (None)", () => {
+        const [msg] = buildPreviewMessages("s", "<p>Body</p>", [recipient()], 1, {
+            emailType: "marketing",
+        });
+        expect(msg.body).toBe("<p>Body</p>");
+    });
+});

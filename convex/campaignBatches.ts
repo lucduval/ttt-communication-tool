@@ -431,6 +431,9 @@ export const startCampaign = mutation({
         // Per-campaign email type governing unsubscribe gating (PRD #74, issue #75).
         // Unset is treated as Marketing (today's unsubscribe-present behaviour).
         emailType: v.optional(v.union(v.literal("marketing"), v.literal("utility"))),
+        // Selected managed disclaimer to attach (PRD #74, issue #77). Unset = "None".
+        // Its wording is snapshotted onto campaignContent at send time.
+        disclaimerId: v.optional(v.id("disclaimers")),
         scheduledAt: v.optional(v.number()),
     },
     handler: startCampaignImpl,
@@ -495,6 +498,17 @@ export async function startCampaignImpl(ctx: any, args: any) {
             emailType: args.emailType,
         });
 
+        // Snapshot the selected disclaimer's wording at send time (issue #77):
+        // resolve the source disclaimer once here and freeze its HTML onto the content
+        // record, so the send loop reads the snapshot (no per-batch lookup) and a later
+        // edit/archive of the disclaimer never rewrites this campaign. "None" (no
+        // disclaimerId) leaves both fields unset.
+        let disclaimerHtml: string | undefined;
+        if (args.disclaimerId) {
+            const disclaimer = await ctx.db.get(args.disclaimerId);
+            disclaimerHtml = disclaimer?.htmlContent;
+        }
+
         // Store large content fields separately to keep campaign docs lightweight
         // for list/dashboard queries.
         await ctx.db.insert("campaignContent", {
@@ -506,6 +520,8 @@ export async function startCampaignImpl(ctx: any, args: any) {
             aiPrompt: args.aiPrompt,
             aiSystemPrompt: args.aiSystemPrompt,
             fontSize: args.fontSize,
+            disclaimerId: args.disclaimerId,
+            disclaimerHtml,
         });
 
         // Messages are now created downstream in createBatches for both direct and filtered campaigns.
@@ -549,6 +565,8 @@ export const getCampaignContent = internalQuery({
             aiPrompt: (campaign as any).aiPrompt as string | undefined,
             aiSystemPrompt: (campaign as any).aiSystemPrompt as string | undefined,
             fontSize: (campaign as any).fontSize as string | undefined,
+            disclaimerId: (campaign as any).disclaimerId as Id<"disclaimers"> | undefined,
+            disclaimerHtml: (campaign as any).disclaimerHtml as string | undefined,
         };
     },
 });

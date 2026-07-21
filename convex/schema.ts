@@ -103,6 +103,14 @@ export default defineSchema({
         aiPrompt: v.optional(v.string()),
         aiSystemPrompt: v.optional(v.string()),
         fontSize: v.optional(v.string()),
+        // Managed-disclaimer attachment (PRD #74, issue #77). The disclaimer's wording
+        // is snapshotted onto the content record at send time (mirroring the campaign
+        // content), so a later edit/archive of the source disclaimer never rewrites what
+        // an already-sent campaign contained. `disclaimerId` references the source for
+        // traceability; `disclaimerHtml` is the frozen wording the send/preview render.
+        // Both unset = "None" (no disclaimer appended).
+        disclaimerId: v.optional(v.id("disclaimers")),
+        disclaimerHtml: v.optional(v.string()),
     })
         .index("by_campaign", ["campaignId"]),
 

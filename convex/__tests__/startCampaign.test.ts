@@ -11,7 +11,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { startCampaignImpl } from "../campaignBatches";
 
-function createCtx() {
+function createCtx(docsById: Record<string, any> = {}) {
     const inserts: Array<{ table: string; doc: any }> = [];
     let seq = 0;
     const ctx = {
@@ -21,6 +21,7 @@ function createCtx() {
                 inserts.push({ table, doc });
                 return `${table}-${seq++}`;
             }),
+            get: vi.fn(async (id: string) => docsById[id] ?? null),
             query: vi.fn(() => ({
                 withIndex: () => ({ first: async () => null }),
             })),
@@ -57,5 +58,35 @@ describe("startCampaignImpl — email type persistence", () => {
 
         const campaign = inserts.find((i) => i.table === "campaigns");
         expect(campaign?.doc.emailType).toBeUndefined();
+    });
+});
+
+describe("startCampaignImpl — disclaimer snapshot (issue #77)", () => {
+    it("snapshots the selected disclaimer's id and HTML onto the campaign content record", async () => {
+        const { ctx, inserts } = createCtx({
+            "disclaimers-abc": {
+                _id: "disclaimers-abc",
+                name: "GDPR",
+                htmlContent: "<div>Legal small print, {firstName}.</div>",
+            },
+        });
+
+        await startCampaignImpl(ctx as any, { ...baseArgs, disclaimerId: "disclaimers-abc" });
+
+        const content = inserts.find((i) => i.table === "campaignContent");
+        // Snapshots the wording at send time — a later edit to the disclaimer never
+        // rewrites what this campaign contained.
+        expect(content?.doc.disclaimerId).toBe("disclaimers-abc");
+        expect(content?.doc.disclaimerHtml).toBe("<div>Legal small print, {firstName}.</div>");
+    });
+
+    it("stores no disclaimer snapshot when the operator selects None (no disclaimerId)", async () => {
+        const { ctx, inserts } = createCtx();
+
+        await startCampaignImpl(ctx as any, { ...baseArgs });
+
+        const content = inserts.find((i) => i.table === "campaignContent");
+        expect(content?.doc.disclaimerId).toBeUndefined();
+        expect(content?.doc.disclaimerHtml).toBeUndefined();
     });
 });

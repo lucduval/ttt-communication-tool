@@ -248,14 +248,17 @@ async function sendEmailBatch_(
             // (Utility omits the unsubscribe footer even where a URL exists; Marketing
             // and unset append it when a URL is present) and the body → disclaimer →
             // unsubscribe append order. The preview renders through the same core, so
-            // fidelity holds by construction. `disclaimerHtml` is empty until the
-            // disclaimer-attach slice populates it.
+            // fidelity holds by construction. The disclaimer HTML was snapshotted onto
+            // the content record at send time (issue #77) — we read that frozen wording,
+            // not the live disclaimer, and run the merge engine over it exactly as over
+            // the body so a `{firstName}` etc. substitutes (unknown tokens render empty).
+            const mergedDisclaimer = applyMergeFields(campaignContent?.disclaimerHtml || "");
             let emailBody = wrapEmail(
                 composeEmailContent({
                     body: mergedHtmlBody,
                     emailType: campaign.emailType,
                     unsubscribeUrl,
-                    disclaimerHtml: "",
+                    disclaimerHtml: mergedDisclaimer,
                 }),
                 mergedSubject || "Notification",
                 campaignContent?.fontSize || "15px"

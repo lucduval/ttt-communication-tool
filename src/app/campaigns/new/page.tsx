@@ -206,6 +206,9 @@ export default function NewCampaignPage() {
     // Per-campaign email type (PRD #74, issue #75). Marketing (default) appends the
     // unsubscribe footer as today; Utility suppresses it for transactional sends.
     const [emailType, setEmailType] = useState<"marketing" | "utility">("marketing");
+    // Selected managed disclaimer to attach (PRD #74, issue #77). Empty string = "None".
+    // Its wording is snapshotted onto the campaign at send time.
+    const [disclaimerId, setDisclaimerId] = useState<string>("");
     // Count of `<img>` tags in the current email body — derived from htmlContent.
     // We no longer track uploaded images in a separate state because each
     // insertion uploads to Convex storage immediately and embeds the URL into
@@ -283,8 +286,17 @@ export default function NewCampaignPage() {
 
     // Queries
     const whatsappTemplates = useQuery(api.whatsappTemplates.list, {});
+    // Non-archived managed disclaimers for the compose-step picker (issue #77).
+    const disclaimers = useQuery(api.disclaimers.list, {});
     const access = useQuery(api.users.checkAccess);
     const canAccessPersonalised = access?.user?.canAccessPersonalised === true;
+
+    // The disclaimer the operator has picked (or undefined for "None") — drives the
+    // inline compose-step preview and the disclaimer merged into the final preview.
+    const selectedDisclaimer = useMemo(
+        () => disclaimers?.find((d: Doc<"disclaimers">) => d._id === disclaimerId),
+        [disclaimers, disclaimerId],
+    );
 
     // Personalised campaign history — only fetched when building a personalised campaign
     const visibleContactIds = useMemo(() => contacts.map((c) => c.id), [contacts]);
@@ -1035,6 +1047,10 @@ export default function NewCampaignPage() {
                 bccEmail: (campaignChannel === "personalised" || campaignChannel === "email") ? bccEmail || undefined : undefined,
                 fontSize: (campaignChannel === "email" || campaignChannel === "personalised") ? fontSize : undefined,
                 emailType: campaignChannel === "email" ? emailType : undefined,
+                disclaimerId:
+                    campaignChannel === "email" && disclaimerId
+                        ? (disclaimerId as Id<"disclaimers">)
+                        : undefined,
                 scheduledAt: scheduledAtMs,
             });
 
@@ -1842,6 +1858,41 @@ export default function NewCampaignPage() {
                                         </div>
                                     </Card>
 
+                                    <Card title="Disclaimer">
+                                        <div className="space-y-3">
+                                            <select
+                                                value={disclaimerId}
+                                                onChange={(e) => setDisclaimerId(e.target.value)}
+                                                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 focus:border-[#1E3A5F] focus:outline-none focus:ring-1 focus:ring-[#1E3A5F]"
+                                            >
+                                                <option value="">None</option>
+                                                {(disclaimers ?? []).map((d: Doc<"disclaimers">) => (
+                                                    <option key={d._id} value={d._id}>
+                                                        {d.name}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            <p className="text-xs text-gray-500">
+                                                The selected disclaimer is appended to the foot of every email, above
+                                                the unsubscribe footer. Its wording is frozen when the campaign is
+                                                sent, so later edits never rewrite an already-sent campaign.
+                                            </p>
+                                            {selectedDisclaimer && (
+                                                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                                                    <p className="mb-2 text-xs font-medium text-gray-500">
+                                                        Preview — {selectedDisclaimer.name}
+                                                    </p>
+                                                    <div
+                                                        className="text-sm text-gray-700"
+                                                        dangerouslySetInnerHTML={{
+                                                            __html: selectedDisclaimer.htmlContent,
+                                                        }}
+                                                    />
+                                                </div>
+                                            )}
+                                        </div>
+                                    </Card>
+
                                     <Card>
                                         <div className="flex items-start gap-4">
                                             <div className="flex-1">
@@ -2030,6 +2081,7 @@ export default function NewCampaignPage() {
                                                 unsubscribeUrl={
                                                     getConvexSiteUrl() ? `${getConvexSiteUrl()}/unsubscribe` : ""
                                                 }
+                                                disclaimerHtml={selectedDisclaimer?.htmlContent}
                                                 generatePdf={(invoiceGuid) =>
                                                     previewInvoicePdf({ invoiceGuid })
                                                 }
