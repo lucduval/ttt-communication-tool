@@ -36,6 +36,7 @@ import type * as lib_campaignTally from "../lib/campaignTally.js";
 import type * as lib_channelDispatch from "../lib/channelDispatch.js";
 import type * as lib_channelSend from "../lib/channelSend.js";
 import type * as lib_claude from "../lib/claude.js";
+import type * as lib_composeEmailContent from "../lib/composeEmailContent.js";
 import type * as lib_contactQuery from "../lib/contactQuery.js";
 import type * as lib_dynamics_auth from "../lib/dynamics_auth.js";
 import type * as lib_dynamics_logging from "../lib/dynamics_logging.js";
@@ -62,6 +63,7 @@ import type * as migrations_migrateCampaignContent from "../migrations/migrateCa
 import type * as notifications from "../notifications.js";
 import type * as opportunities from "../opportunities.js";
 import type * as personalisedHistory from "../personalisedHistory.js";
+import type * as seedTemplates from "../seedTemplates.js";
 import type * as test_graph_cid from "../test_graph_cid.js";
 import type * as test_graph_raw from "../test_graph_raw.js";
 import type * as tracking from "../tracking.js";
@@ -103,6 +105,7 @@ declare const fullApi: ApiFromModules<{
   "lib/channelDispatch": typeof lib_channelDispatch;
   "lib/channelSend": typeof lib_channelSend;
   "lib/claude": typeof lib_claude;
+  "lib/composeEmailContent": typeof lib_composeEmailContent;
   "lib/contactQuery": typeof lib_contactQuery;
   "lib/dynamics_auth": typeof lib_dynamics_auth;
   "lib/dynamics_logging": typeof lib_dynamics_logging;
@@ -129,6 +132,7 @@ declare const fullApi: ApiFromModules<{
   notifications: typeof notifications;
   opportunities: typeof opportunities;
   personalisedHistory: typeof personalisedHistory;
+  seedTemplates: typeof seedTemplates;
   test_graph_cid: typeof test_graph_cid;
   test_graph_raw: typeof test_graph_raw;
   tracking: typeof tracking;

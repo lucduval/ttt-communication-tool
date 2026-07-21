@@ -148,24 +148,22 @@ export function UploadListPanel({
                 setColumns(cols);
                 setFileName(file.name);
                 setRoles(guessed);
-                recompute(cols, guessed, file.name);
+                // The effect re-runs the gate once these state updates commit —
+                // no imperative recompute needed (and it double-fires `onResult`).
             } finally {
                 setIsParsing(false);
             }
         },
-        [recompute],
+        [],
     );
 
-    const setRole = useCallback(
-        (role: keyof RoleSelection, header: string) => {
-            setRoles((prev) => {
-                const next = { ...prev, [role]: header };
-                recompute(columns, next, fileName);
-                return next;
-            });
-        },
-        [columns, fileName, recompute],
-    );
+    const setRole = useCallback((role: keyof RoleSelection, header: string) => {
+        // Just update the designation; the effect above re-runs the gate. Calling
+        // `recompute` (which fires `onResult` → parent setState) inside a setState
+        // updater runs it during render — "Cannot update a component while rendering
+        // a different component". The effect is the single, render-safe seam.
+        setRoles((prev) => ({ ...prev, [role]: header }));
+    }, []);
 
     const onDrop = useCallback(
         (e: React.DragEvent) => {

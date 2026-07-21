@@ -128,6 +128,36 @@ describe("generateInvoicePdf", () => {
         expect(fetchMock).toHaveBeenCalledTimes(3);
     });
 
+    it("aborts a hung request after timeoutMs and fails as a timeout", async () => {
+        // A fetch that never resolves on its own — it only settles when the
+        // request's abort signal fires, mirroring a genuinely hung connection.
+        const fetchMock = vi.fn(
+            (_url: string, init?: RequestInit) =>
+                new Promise<Response>((_resolve, reject) => {
+                    init?.signal?.addEventListener("abort", () =>
+                        reject(new DOMException("aborted", "AbortError")),
+                    );
+                }),
+        );
+        vi.stubGlobal("fetch", fetchMock);
+
+        const sleep = vi.fn(() => Promise.resolve());
+        const p = generateInvoicePdf({
+            invoiceId: "guid-hang",
+            config,
+            timeoutMs: 30_000,
+            maxAttempts: 1,
+            sleep,
+        });
+        await vi.runAllTimersAsync();
+        const result = await p;
+
+        expect(result.success).toBe(false);
+        if (result.success) throw new Error("expected failure");
+        expect(result.error).toMatch(/timed out after 30000 ms/);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
     it("rejects an empty invoiceId without calling fetch", async () => {
         const fetchMock = installFetch(() => pdfResponse(new Uint8Array([1])));
 

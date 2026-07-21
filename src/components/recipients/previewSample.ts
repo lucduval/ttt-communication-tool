@@ -27,6 +27,7 @@
  */
 
 import { applyMerge } from "../../../convex/lib/applyMerge";
+import { composeEmailContent, type EmailType } from "../../../convex/lib/composeEmailContent";
 import type { MaterialisedRecipient } from "./columnRoles";
 
 /** One rendered sample message — a true picture of what this recipient would receive. */
@@ -60,25 +61,52 @@ export function buildMergeContext(recipient: MaterialisedRecipient): Record<stri
     };
 }
 
+/** Compliance/layout inputs the preview shares with the real send path (PRD #74, #75). */
+export interface PreviewComposeOptions {
+    /** The campaign's email type; unset is treated as Marketing (footer present when a URL exists). */
+    emailType?: EmailType;
+    /**
+     * A representative unsubscribe URL — presence/absence is what the preview reflects.
+     * Empty/absent means no unsubscribe URL is configured for this campaign.
+     */
+    unsubscribeUrl?: string;
+    /** The merged disclaimer HTML to append; empty until the disclaimer-attach slice. */
+    disclaimerHtml?: string;
+}
+
 /**
  * Render up to `limit` of the validated `recipients` (in order) into preview messages, each
  * with its merged subject/body and the invoice GUID its attached PDF comes from. A
  * non-positive `limit` yields an empty sample.
+ *
+ * The rendered `body` is assembled through {@link composeEmailContent} — the same core the
+ * real send path uses — so the preview reflects the compliance decision (a Utility send omits
+ * the unsubscribe footer; Marketing/unset appends it when a URL is configured) and the
+ * `body → disclaimer → unsubscribe footer` order exactly as the recipient would receive it.
  */
 export function buildPreviewMessages(
     subject: string,
     body: string,
     recipients: readonly MaterialisedRecipient[],
     limit: number,
+    compose: PreviewComposeOptions = {},
 ): PreviewMessage[] {
     if (limit <= 0) return [];
     return recipients.slice(0, limit).map((recipient) => {
         const context = buildMergeContext(recipient);
+        const mergedBody = applyMerge(body, context);
         return {
             recipientId: recipient.recipientId,
             sendAddress: recipient.sendAddress,
             subject: applyMerge(subject, context),
-            body: applyMerge(body, context),
+            body: composeEmailContent({
+                body: mergedBody,
+                emailType: compose.emailType,
+                unsubscribeUrl: compose.unsubscribeUrl,
+                disclaimerHtml: compose.disclaimerHtml
+                    ? applyMerge(compose.disclaimerHtml, context)
+                    : "",
+            }),
             invoiceGuid: recipient.invoiceGuid,
             mergedValues: recipient.variables,
         };

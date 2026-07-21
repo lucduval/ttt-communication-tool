@@ -1,12 +1,40 @@
 "use node";
 
 import { v } from "convex/values";
-import { action, internalAction } from "./_generated/server";
+import { action, internalAction, type ActionCtx } from "./_generated/server";
 import { internal, api } from "./_generated/api";
+import type { Id } from "./_generated/dataModel";
 import type { ShimmedContact, CampaignFilters } from "./lib/dynamics_util";
-import { batchProcessorFor } from "./lib/channelDispatch";
+import { batchProcessorFor, type Channel } from "./lib/channelDispatch";
 import { runChannelSend } from "./lib/channelSend";
 import { emailSender, whatsappSender, personalisedSender } from "./channelSenders";
+
+/**
+ * Hand a campaign whose batches are already seeded to the send — either directly,
+ * or, for an upload campaign that attaches a per-recipient invoice PDF (an
+ * `invoiceGuid` column role is designated), via the invoice-PDF pre-generation
+ * gate first. In the gated case the pre-gen job kicks the channel's batch
+ * processor itself, exactly once, when every recipient's PDF is settled
+ * (`generated`/`failed`) — the PRD's "generate all, then send" gate. Every other
+ * campaign schedules the send directly, so non-upload behaviour is unchanged.
+ * `columnRoles.invoiceGuid` is only ever set for the upload audience, so clients/
+ * leads/internals never reach the gated branch.
+ */
+export async function scheduleSendAfterOptionalPregen(
+    ctx: ActionCtx,
+    campaignId: Id<"campaigns">,
+    channel: Channel,
+): Promise<void> {
+    const campaign = await ctx.runQuery(internal.campaignBatches.getCampaign, { campaignId });
+    if (campaign?.columnRoles?.invoiceGuid?.trim()) {
+        await ctx.scheduler.runAfter(0, internal.invoicePdfs.pregenerateCampaignInvoicePdfs, {
+            campaignId,
+            sendChannel: channel,
+        });
+    } else {
+        await ctx.scheduler.runAfter(0, batchProcessorFor(channel), { campaignId });
+    }
+}
 
 /**
  * Queue batches for a campaign (called after startCampaign)
@@ -111,10 +139,10 @@ export const queueCampaignBatches = action({
             });
 
             // A single email worker stays under the Graph IncomingBytes limit
-            // (150 MB / 5 min per mailbox).
-            await ctx.scheduler.runAfter(0, batchProcessorFor(args.channel), {
-                campaignId: args.campaignId,
-            });
+            // (150 MB / 5 min per mailbox). Upload campaigns that attach a
+            // per-recipient invoice PDF pre-generate first; the pre-gen job kicks
+            // the send itself once every PDF is settled.
+            await scheduleSendAfterOptionalPregen(ctx, args.campaignId, args.channel);
         }
 
         return { success: true };
@@ -220,9 +248,7 @@ export const kickoffScheduledCampaign = internalAction({
             attachments: args.attachments,
         });
 
-        await ctx.scheduler.runAfter(0, batchProcessorFor(args.channel), {
-            campaignId: args.campaignId,
-        });
+        await scheduleSendAfterOptionalPregen(ctx, args.campaignId, args.channel);
 
         return { success: true };
     },

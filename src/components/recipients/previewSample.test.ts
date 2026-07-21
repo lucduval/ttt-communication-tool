@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildMergeContext, buildPreviewMessages } from "./previewSample";
+import { composeEmailContent } from "../../../convex/lib/composeEmailContent";
 import type { MaterialisedRecipient } from "./columnRoles";
 
 const A = "11111111-1111-1111-1111-111111111111";
@@ -93,5 +94,49 @@ describe("buildPreviewMessages", () => {
     it("exposes the row's merged values so the operator can eyeball each cell", () => {
         const [msg] = buildPreviewMessages("s", "b", [recipient()], 1);
         expect(msg.mergedValues).toEqual({ Amount: "R1,200.00", InvoiceNo: "INV-001" });
+    });
+});
+
+describe("buildPreviewMessages — preview↔send fidelity (PRD #74, #75)", () => {
+    const UNSUB = "https://app.example.com/unsubscribe";
+
+    it("reflects the Marketing unsubscribe footer when a URL is configured", () => {
+        const [msg] = buildPreviewMessages("s", "<p>Body</p>", [recipient()], 1, {
+            emailType: "marketing",
+            unsubscribeUrl: UNSUB,
+        });
+        expect(msg.body).toContain("<p>Body</p>");
+        expect(msg.body).toContain("unsubscribe here");
+    });
+
+    it("omits the unsubscribe footer for a Utility send even when a URL is configured", () => {
+        const [msg] = buildPreviewMessages("s", "<p>Body</p>", [recipient()], 1, {
+            emailType: "utility",
+            unsubscribeUrl: UNSUB,
+        });
+        expect(msg.body).toBe("<p>Body</p>");
+        expect(msg.body).not.toContain("unsubscribe here");
+    });
+
+    it("matches composeEmailContent exactly — the preview is the core", () => {
+        const [msg] = buildPreviewMessages("s", "<p>{Amount}</p>", [recipient()], 1, {
+            emailType: "marketing",
+            unsubscribeUrl: UNSUB,
+        });
+        expect(msg.body).toBe(
+            composeEmailContent({
+                body: "<p>R1,200.00</p>",
+                emailType: "marketing",
+                unsubscribeUrl: UNSUB,
+                disclaimerHtml: "",
+            }),
+        );
+    });
+
+    it("omits the footer when no unsubscribe URL is configured, regardless of type", () => {
+        const [msg] = buildPreviewMessages("s", "<p>Body</p>", [recipient()], 1, {
+            emailType: "marketing",
+        });
+        expect(msg.body).toBe("<p>Body</p>");
     });
 });

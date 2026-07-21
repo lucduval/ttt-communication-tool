@@ -23,6 +23,7 @@ import {
     Eye,
     Type,
     Tag,
+    MousePointerClick,
 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/Input";
@@ -35,6 +36,19 @@ import {
     normalizeInlineBase64Images,
 } from "@/lib/imageUpload";
 
+/**
+ * One insertable merge field for the "Personalisation / Merge Fields" chip row.
+ * `label` is the exact token inserted at the cursor (e.g. `{firstName}` for a CRM
+ * audience, or `{Invoice No}` for an uploaded-file column — the raw header the
+ * merge engine and validation gate bind on). `example`, when present, is a live
+ * sample value shown after the chip.
+ */
+export interface MergeField {
+    label: string;
+    description?: string;
+    example?: string;
+}
+
 interface EmailComposerProps {
     subject: string;
     onSubjectChange: (subject: string) => void;
@@ -44,7 +58,20 @@ interface EmailComposerProps {
     onPreview?: () => void;
     fontSize?: string;
     onFontSizeChange?: (size: string) => void;
+    /**
+     * The merge fields offered as click-to-insert chips. Defaults to the CRM
+     * fields ({@link CRM_MERGE_FIELDS}); the uploaded-file audience passes its
+     * Excel columns instead, since there is no CRM to source names/email from.
+     */
+    mergeFields?: MergeField[];
 }
+
+/** The default chips — CRM-sourced fields, resolved per recipient at send. */
+const CRM_MERGE_FIELDS: MergeField[] = [
+    { label: "{firstName}", description: "Recipient's first name", example: "John" },
+    { label: "{fullName}", description: "Recipient's full name", example: "John Smith" },
+    { label: "{email}", description: "Recipient's email address", example: "john@email.com" },
+];
 
 // Bandwidth-only compression. Storage size is no longer a constraint (images
 // live in Convex storage), so we just keep dimensions reasonable for email
@@ -61,6 +88,85 @@ function escapeHtmlAttribute(value: string): string {
         .replace(/"/g, "&quot;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
+}
+
+/** Escape text destined for HTML element content (not attributes). Merge-field
+ * braces like {firstName} are left untouched — they contain no special chars. */
+function escapeHtmlText(value: string): string {
+    return value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+}
+
+/**
+ * CTA-button style presets offered in the composer. Colours are inline on the
+ * generated markup (email HTML can't rely on stylesheets). `outline` uses a
+ * white fill so the VML fallback (which has no real transparency) still reads
+ * as an outline against a light email background.
+ */
+const BUTTON_PRESETS = {
+    primary: { label: "Navy", bg: "#1E3A5F", text: "#ffffff", border: "#1E3A5F" },
+    blue: { label: "Blue", bg: "#0077BB", text: "#ffffff", border: "#0077BB" },
+    orange: { label: "Orange", bg: "#F5821F", text: "#ffffff", border: "#F5821F" },
+    secondary: { label: "Grey", bg: "#6B7280", text: "#ffffff", border: "#6B7280" },
+    outline: { label: "Outline", bg: "#ffffff", text: "#1E3A5F", border: "#1E3A5F" },
+} as const;
+type ButtonPreset = keyof typeof BUTTON_PRESETS;
+
+/**
+ * Corner-rounding options. `radius` is the CSS `border-radius` (px) used by the
+ * modern <a> fallback; `arcsize` is the VML `roundrect` corner ratio (percent
+ * of half the button height) that gives Outlook desktop its rounded corners.
+ * The button is a fixed 44px tall, so pill = 50% ≈ a 22px radius.
+ */
+const BUTTON_ROUNDING = {
+    square: { label: "Square", radius: 0, arcsize: 0 },
+    rounded: { label: "Rounded", radius: 8, arcsize: 18 },
+    pill: { label: "Pill", radius: 22, arcsize: 50 },
+} as const;
+type ButtonRounding = keyof typeof BUTTON_ROUNDING;
+
+const BUTTON_HEIGHT = 44;
+
+/**
+ * Build an email-safe "bulletproof" CTA button. A VML `roundrect` (fixed width,
+ * so Outlook desktop honours the rounded corners) is emitted inside an
+ * `[if mso]` conditional; every other client gets the styled `<a>` fallback.
+ * Merge-field tokens in `text`/`url` survive verbatim and are resolved per
+ * recipient at send time.
+ */
+function buildButtonHtml(opts: {
+    text: string;
+    url: string;
+    preset: ButtonPreset;
+    rounding: ButtonRounding;
+    width: number;
+    align: "left" | "center" | "right";
+}): string {
+    const preset = BUTTON_PRESETS[opts.preset];
+    const round = BUTTON_ROUNDING[opts.rounding];
+    const width = Math.max(40, Math.min(600, Math.round(opts.width) || 240));
+
+    let url = opts.url.trim();
+    // Prepend https:// for bare domains, but leave mailto:, existing schemes,
+    // and merge-field-led URLs (e.g. "{PaymentLink}") untouched.
+    if (url && !/^(https?:\/\/|mailto:|\{)/i.test(url)) url = "https://" + url;
+
+    const safeUrl = escapeHtmlAttribute(url);
+    const safeText = escapeHtmlText(opts.text.trim() || "Click here");
+
+    return `<div style="text-align:${opts.align};margin:16px 0;">
+<!--[if mso]>
+<v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="${safeUrl}" style="height:${BUTTON_HEIGHT}px;v-text-anchor:middle;width:${width}px;" arcsize="${round.arcsize}%" strokecolor="${preset.border}" fillcolor="${preset.bg}">
+<w:anchorlock/>
+<center style="color:${preset.text};font-family:Arial,sans-serif;font-size:16px;font-weight:bold;">${safeText}</center>
+</v:roundrect>
+<![endif]-->
+<!--[if !mso]><!-->
+<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="background-color:${preset.bg};border:2px solid ${preset.border};border-radius:${round.radius}px;box-sizing:border-box;color:${preset.text};display:inline-block;font-family:Arial,sans-serif;font-size:16px;font-weight:bold;height:${BUTTON_HEIGHT}px;line-height:${BUTTON_HEIGHT}px;text-align:center;text-decoration:none;width:${width}px;-webkit-text-size-adjust:none;">${safeText}</a>
+<!--<![endif]-->
+</div>`;
 }
 
 interface CompressedImage {
@@ -161,6 +267,7 @@ export function EmailComposer({
     onAttachmentsChange,
     fontSize = "18px",
     onFontSizeChange,
+    mergeFields,
 }: EmailComposerProps & {
     attachments?: File[];
     onAttachmentsChange?: (attachments: File[]) => void;
@@ -181,17 +288,31 @@ export function EmailComposer({
     const [linkUrl, setLinkUrl] = useState("");
     const [linkText, setLinkText] = useState("");
 
+    // CTA Button Popover State
+    const [isButtonPopoverOpen, setIsButtonPopoverOpen] = useState(false);
+    const [btnText, setBtnText] = useState("");
+    const [btnUrl, setBtnUrl] = useState("");
+    const [btnPreset, setBtnPreset] = useState<ButtonPreset>("primary");
+    const [btnRounding, setBtnRounding] = useState<ButtonRounding>("rounded");
+    const [btnWidth, setBtnWidth] = useState(240);
+    const [btnAlign, setBtnAlign] = useState<"left" | "center" | "right">("center");
+    // Which button field a merge chip inserts into (last focused).
+    const [activeButtonField, setActiveButtonField] = useState<"text" | "url">("text");
+    const btnTextRef = useRef<HTMLInputElement>(null);
+    const btnUrlRef = useRef<HTMLInputElement>(null);
+    // The editor caret/selection captured when the button popover opens, so the
+    // button can be inserted where the cursor was (focus moves to the popover
+    // inputs, which otherwise collapses the caret to the start of the editor).
+    const savedButtonRange = useRef<Range | null>(null);
+
     // Font Popover State
     const [isFontPopoverOpen, setIsFontPopoverOpen] = useState(false);
     const [currentFont, setCurrentFont] = useState("Arial");
     const [isFontSizePopoverOpen, setIsFontSizePopoverOpen] = useState(false);
 
-    // Available merge fields for personalisation
-    const MERGE_FIELDS = [
-        { label: "{firstName}", description: "Recipient's first name", example: "John" },
-        { label: "{fullName}", description: "Recipient's full name", example: "John Smith" },
-        { label: "{email}", description: "Recipient's email address", example: "john@email.com" },
-    ];
+    // The chips offered for insertion — the uploaded-file columns when supplied,
+    // otherwise the default CRM fields.
+    const fields = mergeFields ?? CRM_MERGE_FIELDS;
 
     const insertMergeField = (field: string) => {
         if (activeField === "subject") {
@@ -494,6 +615,52 @@ export function EmailComposer({
         }
     };
 
+    // Insert a merge field into the button's text or URL field (whichever was
+    // last focused), at the caret — mirrors insertMergeField for the popover.
+    const insertMergeIntoButton = (field: string) => {
+        const isText = activeButtonField === "text";
+        const input = (isText ? btnTextRef : btnUrlRef).current;
+        const value = isText ? btnText : btnUrl;
+        const setter = isText ? setBtnText : setBtnUrl;
+        if (input) {
+            const start = input.selectionStart ?? value.length;
+            const end = input.selectionEnd ?? value.length;
+            setter(value.slice(0, start) + field + value.slice(end));
+            setTimeout(() => {
+                input.focus();
+                input.setSelectionRange(start + field.length, start + field.length);
+            }, 0);
+        } else {
+            setter(value + field);
+        }
+    };
+
+    const insertButton = () => {
+        if (!btnUrl.trim()) return;
+        const html = buildButtonHtml({
+            text: btnText,
+            url: btnUrl,
+            preset: btnPreset,
+            rounding: btnRounding,
+            width: btnWidth,
+            align: btnAlign,
+        });
+        // Restore the caret we captured when the popover opened, then insert
+        // there — otherwise the button lands at the top of the editor.
+        editorRef.current?.focus();
+        const selection = window.getSelection();
+        if (savedButtonRange.current && selection) {
+            selection.removeAllRanges();
+            selection.addRange(savedButtonRange.current);
+        }
+        document.execCommand("insertHTML", false, html);
+        updateContent();
+        savedButtonRange.current = null;
+        setIsButtonPopoverOpen(false);
+        setBtnText("");
+        setBtnUrl("");
+    };
+
     const changeFont = (fontValue: string, fontName: string) => {
         execCommand("fontName", fontValue);
         setCurrentFont(fontName);
@@ -665,6 +832,203 @@ export function EmailComposer({
                 </Popover>
             )
         },
+        {
+            icon: MousePointerClick,
+            custom: (
+                <Popover open={isButtonPopoverOpen} onOpenChange={setIsButtonPopoverOpen}>
+                    <PopoverTrigger asChild>
+                        <button
+                            type="button"
+                            className="p-2 hover:bg-gray-200 rounded transition-colors"
+                            title="Insert Button"
+                            onMouseDown={(e: React.MouseEvent) => e.preventDefault()}
+                            onClick={() => {
+                                // Capture the editor caret now, before focus moves
+                                // to the popover, so we can insert there later.
+                                const selection = window.getSelection();
+                                if (
+                                    selection &&
+                                    selection.rangeCount > 0 &&
+                                    editorRef.current?.contains(selection.anchorNode)
+                                ) {
+                                    savedButtonRange.current = selection.getRangeAt(0).cloneRange();
+                                    // Pre-fill the label from any selected text.
+                                    if (!selection.isCollapsed) setBtnText(selection.toString());
+                                } else {
+                                    savedButtonRange.current = null;
+                                }
+                                setIsButtonPopoverOpen(true);
+                            }}
+                        >
+                            <MousePointerClick size={16} className="text-gray-600" />
+                        </button>
+                    </PopoverTrigger>
+                    <PopoverContent className="w-96 p-4 max-h-[80vh] overflow-y-auto" align="start">
+                        <div className="space-y-4">
+                            <h4 className="font-medium text-sm">Insert Button</h4>
+
+                            <div className="space-y-2">
+                                <label htmlFor="btn-text" className="text-sm font-medium">Button text</label>
+                                <Input
+                                    id="btn-text"
+                                    ref={btnTextRef}
+                                    value={btnText}
+                                    onChange={(e) => setBtnText(e.target.value)}
+                                    onFocus={() => setActiveButtonField("text")}
+                                    placeholder="Pay now"
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <label htmlFor="btn-url" className="text-sm font-medium">Link URL</label>
+                                <Input
+                                    id="btn-url"
+                                    ref={btnUrlRef}
+                                    value={btnUrl}
+                                    onChange={(e) => setBtnUrl(e.target.value)}
+                                    onFocus={() => setActiveButtonField("url")}
+                                    placeholder="https://"
+                                />
+                            </div>
+
+                            {fields.length > 0 && (
+                                <div className="space-y-1.5">
+                                    <p className="text-xs text-gray-500">
+                                        Insert a merge field into the {activeButtonField === "text" ? "button text" : "link URL"}:
+                                    </p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {fields.map((f) => (
+                                            <button
+                                                key={f.label}
+                                                type="button"
+                                                onMouseDown={(e) => e.preventDefault()}
+                                                onClick={() => insertMergeIntoButton(f.label)}
+                                                className="px-2 py-1 text-xs font-mono bg-white text-blue-700 border border-blue-300 rounded-full hover:bg-blue-600 hover:text-white hover:border-blue-600 transition-colors"
+                                            >
+                                                {f.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="space-y-1.5">
+                                <label className="text-sm font-medium">Style</label>
+                                <div className="grid grid-cols-3 gap-1.5">
+                                    {(Object.keys(BUTTON_PRESETS) as ButtonPreset[]).map((key) => {
+                                        const p = BUTTON_PRESETS[key];
+                                        return (
+                                            <button
+                                                key={key}
+                                                type="button"
+                                                onClick={() => setBtnPreset(key)}
+                                                className={`flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs rounded border transition-colors ${btnPreset === key ? "border-[#1E3A5F] ring-1 ring-[#1E3A5F] font-medium" : "border-gray-200 hover:bg-gray-50"}`}
+                                            >
+                                                <span
+                                                    className="inline-block w-3 h-3 rounded-sm border border-gray-300 shrink-0"
+                                                    style={{ backgroundColor: p.bg }}
+                                                />
+                                                {p.label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+
+                            <div className="space-y-1.5">
+                                <label className="text-sm font-medium">Corners</label>
+                                <div className="flex gap-1.5">
+                                    {(Object.keys(BUTTON_ROUNDING) as ButtonRounding[]).map((key) => (
+                                        <button
+                                            key={key}
+                                            type="button"
+                                            onClick={() => setBtnRounding(key)}
+                                            className={`flex-1 px-2 py-1.5 text-xs rounded border transition-colors ${btnRounding === key ? "border-[#1E3A5F] ring-1 ring-[#1E3A5F] font-medium" : "border-gray-200 hover:bg-gray-50"}`}
+                                        >
+                                            {BUTTON_ROUNDING[key].label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            <div className="flex gap-3">
+                                <div className="space-y-1.5 w-28">
+                                    <label htmlFor="btn-width" className="text-sm font-medium">Width (px)</label>
+                                    <Input
+                                        id="btn-width"
+                                        type="number"
+                                        min={40}
+                                        max={600}
+                                        value={btnWidth}
+                                        onChange={(e) => setBtnWidth(Number(e.target.value))}
+                                    />
+                                </div>
+                                <div className="space-y-1.5 flex-1">
+                                    <label className="text-sm font-medium">Alignment</label>
+                                    <div className="flex gap-1.5">
+                                        {([
+                                            { key: "left" as const, icon: AlignLeft },
+                                            { key: "center" as const, icon: AlignCenter },
+                                            { key: "right" as const, icon: AlignRight },
+                                        ]).map(({ key, icon: Icon }) => (
+                                            <button
+                                                key={key}
+                                                type="button"
+                                                onClick={() => setBtnAlign(key)}
+                                                className={`flex-1 flex items-center justify-center py-1.5 rounded border transition-colors ${btnAlign === key ? "border-[#1E3A5F] ring-1 ring-[#1E3A5F]" : "border-gray-200 hover:bg-gray-50"}`}
+                                                title={key}
+                                            >
+                                                <Icon size={14} className="text-gray-600" />
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Live preview (approximate — Outlook renders via VML) */}
+                            <div className="space-y-1.5">
+                                <label className="text-sm font-medium">Preview</label>
+                                <div
+                                    className="rounded border border-gray-200 bg-gray-50 p-3"
+                                    style={{ textAlign: btnAlign }}
+                                >
+                                    <span
+                                        style={{
+                                            display: "inline-block",
+                                            backgroundColor: BUTTON_PRESETS[btnPreset].bg,
+                                            border: `2px solid ${BUTTON_PRESETS[btnPreset].border}`,
+                                            borderRadius: `${BUTTON_ROUNDING[btnRounding].radius}px`,
+                                            color: BUTTON_PRESETS[btnPreset].text,
+                                            fontFamily: "Arial, sans-serif",
+                                            fontSize: "16px",
+                                            fontWeight: 700,
+                                            height: `${BUTTON_HEIGHT}px`,
+                                            lineHeight: `${BUTTON_HEIGHT}px`,
+                                            width: `${Math.max(40, Math.min(600, Math.round(btnWidth) || 240))}px`,
+                                            textAlign: "center",
+                                            overflow: "hidden",
+                                            whiteSpace: "nowrap",
+                                            boxSizing: "border-box",
+                                        }}
+                                    >
+                                        {btnText.trim() || "Click here"}
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div className="flex justify-end gap-2">
+                                <Button variant="ghost" onClick={() => setIsButtonPopoverOpen(false)} className="px-2 py-1 h-8 text-sm">
+                                    Cancel
+                                </Button>
+                                <Button onClick={insertButton} disabled={!btnUrl.trim()} className="px-2 py-1 h-8 text-sm">
+                                    Insert
+                                </Button>
+                            </div>
+                        </div>
+                    </PopoverContent>
+                </Popover>
+            )
+        },
         { icon: Image, action: handleImageClick, title: isUploadingImage ? "Uploading image..." : "Insert Image", disabled: isUploadingImage },
         { icon: Paperclip, action: handleAttachmentClick, title: "Attach File" },
         { divider: true },
@@ -701,20 +1065,28 @@ export function EmailComposer({
                     Click a field below to insert it at your cursor — in the subject line <em>or</em> the email body.
                     Each placeholder is replaced with the recipient&apos;s real data when the email is sent.
                 </p>
-                <div className="flex flex-wrap gap-2">
-                    {MERGE_FIELDS.map((f) => (
-                        <button
-                            key={f.label}
-                            type="button"
-                            title={`${f.description} — e.g. "${f.example}"`}
-                            onClick={() => insertMergeField(f.label)}
-                            className="group flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono bg-white text-blue-700 border border-blue-300 rounded-full hover:bg-blue-600 hover:text-white hover:border-blue-600 transition-colors shadow-sm"
-                        >
-                            <span>{f.label}</span>
-                            <span className="text-blue-400 group-hover:text-blue-200 font-sans not-italic">→ {f.example}</span>
-                        </button>
-                    ))}
-                </div>
+                {fields.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                        {fields.map((f) => (
+                            <button
+                                key={f.label}
+                                type="button"
+                                title={f.example ? `${f.description ?? f.label} — e.g. "${f.example}"` : f.description ?? f.label}
+                                onClick={() => insertMergeField(f.label)}
+                                className="group flex items-center gap-1.5 px-3 py-1.5 text-xs font-mono bg-white text-blue-700 border border-blue-300 rounded-full hover:bg-blue-600 hover:text-white hover:border-blue-600 transition-colors shadow-sm"
+                            >
+                                <span>{f.label}</span>
+                                {f.example && (
+                                    <span className="text-blue-400 group-hover:text-blue-200 font-sans not-italic">→ {f.example}</span>
+                                )}
+                            </button>
+                        ))}
+                    </div>
+                ) : (
+                    <p className="text-xs text-blue-600 italic">
+                        No merge columns available from your uploaded file.
+                    </p>
+                )}
                 <p className="text-xs text-blue-500">
                     💡 <strong>Tip:</strong> Click inside the subject or body first, then click a field chip to insert it at your cursor.
                 </p>

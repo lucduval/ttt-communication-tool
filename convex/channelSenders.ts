@@ -23,6 +23,7 @@ import {
 import { logWhatsAppActivity } from "./lib/dynamics_logging";
 import { notifyTinaOfOutboundTemplate, substitutedBodyVariables } from "./lib/notifyTina";
 import { applyMerge } from "./lib/applyMerge";
+import { composeEmailContent } from "./lib/composeEmailContent";
 import {
     chunkByPayload,
     base64Size,
@@ -43,20 +44,6 @@ import {
 // Email backs off further than other channels after a thrown error to let Graph
 // recover; on the success path the successor delay is GRAPH_BATCH_DELAY_MS.
 const emailBatchDelayMs = () => parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "500", 10) || 500;
-
-/**
- * Generate an HTML unsubscribe footer for marketing email compliance.
- */
-function getUnsubscribeFooter(unsubscribeUrl: string): string {
-    return `
-    <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #718096; font-family: Arial, Helvetica, sans-serif;">
-        <p style="margin: 4px 0;">You are receiving this email because you are a client of TTT.</p>
-        <p style="margin: 4px 0;">
-            If you no longer wish to receive these emails, you can
-            <a href="${unsubscribeUrl}" style="color: #1a73e8; text-decoration: underline;">unsubscribe here</a>.
-        </p>
-    </div>`;
-}
 
 /**
  * Email Channel Sender. Owns Graph `$batch` chunking, the validate/prepare phase,
@@ -90,6 +77,15 @@ async function sendEmailBatch_(
     const pdfRefByRecipient = new Map(
         (pdfRefs ?? []).map((ref) => [ref.recipientId, ref] as const),
     );
+
+    // Upload campaigns that attach a per-recipient invoice PDF (an `invoiceGuid`
+    // column role is designated) must never send an invoice-less email. By the time
+    // this runs the pre-gen gate has settled every recipient (`generated`/`failed`),
+    // so a recipient absent from `pdfRefByRecipient` is one whose PDF did not
+    // generate (blank/absent GUID or a terminal generation failure) — it is held as
+    // a failure below and never handed to Graph. Inert for every non-upload
+    // campaign, where this flag is false and the flow is unchanged.
+    const requiresInvoicePdf = !!campaign.columnRoles?.invoiceGuid?.trim();
 
     // `eligible` is the driver-provided set of recipients with no existing
     // `messages` row for this campaign, or a row still `pending` — the seed
@@ -168,6 +164,21 @@ async function sendEmailBatch_(
     const prepared: PreparedSend[] = [];
 
     for (const recipient of eligible) {
+        // Hold any recipient whose invoice PDF did not generate (upload campaigns
+        // only) \u2014 a bad-debt email must never go out without its invoice attached.
+        // Settled `failed` here so it surfaces in the failed-messages view for a
+        // later operator-initiated resend, and never reaches the $batch call.
+        if (requiresInvoicePdf && !pdfRefByRecipient.has(recipient.id)) {
+            await emit([
+                {
+                    recipientId: recipient.id,
+                    success: false,
+                    error: "Invoice PDF was not generated for this recipient",
+                },
+            ]);
+            continue;
+        }
+
         // Strip whitespace and Unicode space characters (e.g. \u00a0 from Dynamics CRM)
         // that pass a truthiness check but are rejected by the Graph API.
         const cleanEmail = recipient.email?.replace(/[\u00a0\u200B-\u200D\uFEFF\s]/g, "");
@@ -233,8 +244,19 @@ async function sendEmailBatch_(
             // `{placeholder}` into the body (PRD #66 — nothing raw ever ships).
             const mergedSubject = applyMergeFields(campaign.subject || "");
 
+            // The single composition core (PRD #74, #75) owns the compliance rule
+            // (Utility omits the unsubscribe footer even where a URL exists; Marketing
+            // and unset append it when a URL is present) and the body → disclaimer →
+            // unsubscribe append order. The preview renders through the same core, so
+            // fidelity holds by construction. `disclaimerHtml` is empty until the
+            // disclaimer-attach slice populates it.
             let emailBody = wrapEmail(
-                mergedHtmlBody + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : ""),
+                composeEmailContent({
+                    body: mergedHtmlBody,
+                    emailType: campaign.emailType,
+                    unsubscribeUrl,
+                    disclaimerHtml: "",
+                }),
                 mergedSubject || "Notification",
                 campaignContent?.fontSize || "15px"
             );

@@ -5,6 +5,7 @@ import type { Id } from "./_generated/dataModel";
 import { checkAccessHelper } from "./users";
 import { generateInvoicePdf } from "./lib/invoiceGenerator";
 import { pregenInvoicePdfs, type PregenItem } from "./lib/invoicePdfPregen";
+import { batchProcessorFor } from "./lib/channelDispatch";
 import type { PdfStatus } from "../src/components/recipients/validationReport";
 
 /**
@@ -378,9 +379,25 @@ export const previewInvoicePdf = action({
  * {@link recordPdfStatus}), and reschedules itself while any remain — the same
  * batch/queue shape the send workers use, so a long run stays inside the action
  * time limit and progress is durable across invocations.
+ *
+ * `sendChannel` implements the send gate (PRD choice: "generate all, then send").
+ * When set, this job owns the send kickoff: it schedules the channel's batch
+ * processor exactly once — on the terminal invocation, when no recipient is left
+ * `pending` — so the send never starts before every PDF is settled (`generated`
+ * or `failed`). It is passed through every self-reschedule and fires even when all
+ * generations failed, so the send loop can hold those recipients (see the email
+ * Channel Sender) and the campaign reaches a terminal state rather than hanging in
+ * `processing`. Omitted for the standalone/recovery invocation, which generates
+ * without triggering a send.
  */
 export const pregenerateCampaignInvoicePdfs = internalAction({
-    args: { campaignId: v.id("campaigns"), seeded: v.optional(v.boolean()) },
+    args: {
+        campaignId: v.id("campaigns"),
+        seeded: v.optional(v.boolean()),
+        sendChannel: v.optional(
+            v.union(v.literal("email"), v.literal("whatsapp"), v.literal("personalised")),
+        ),
+    },
     handler: async (ctx, args) => {
         if (!args.seeded) {
             await ctx.runMutation(internal.invoicePdfs.seedPendingForCampaign, {
@@ -392,42 +409,62 @@ export const pregenerateCampaignInvoicePdfs = internalAction({
             campaignId: args.campaignId,
             limit: PREGEN_CHUNK_SIZE,
         });
-        if (chunk.length === 0) return;
 
-        await pregenInvoicePdfs(chunk as PregenItem[], {
-            concurrency: PREGEN_CONCURRENCY,
-            fetchPdf: async (item) => {
-                const result = await generateInvoicePdf({
-                    invoiceId: item.invoiceGuid,
-                    type: item.type === "Tax" || item.type === "Accounting" ? item.type : undefined,
-                });
-                if (!result.success) throw new Error(result.error);
-                return result.bytes;
-            },
-            store: async (bytes) =>
-                await ctx.storage.store(new Blob([bytes], { type: "application/pdf" })),
-            record: async (outcome) => {
-                await ctx.runMutation(internal.invoicePdfs.recordPdfStatus, {
-                    campaignId: args.campaignId,
-                    recipientId: outcome.recipientId,
-                    invoiceGuid: outcome.invoiceGuid,
-                    status: outcome.status,
-                    storageId:
-                        outcome.status === "generated"
-                            ? (outcome.storageId as Id<"_storage">)
-                            : undefined,
-                    errorMessage: outcome.status === "failed" ? outcome.error : undefined,
-                });
-            },
-        });
+        if (chunk.length > 0) {
+            await pregenInvoicePdfs(chunk as PregenItem[], {
+                concurrency: PREGEN_CONCURRENCY,
+                fetchPdf: async (item) => {
+                    const result = await generateInvoicePdf({
+                        invoiceId: item.invoiceGuid,
+                        type:
+                            item.type === "Tax" || item.type === "Accounting" ? item.type : undefined,
+                    });
+                    if (!result.success) throw new Error(result.error);
+                    return result.bytes;
+                },
+                store: async (bytes) =>
+                    await ctx.storage.store(new Blob([bytes], { type: "application/pdf" })),
+                record: async (outcome) => {
+                    await ctx.runMutation(internal.invoicePdfs.recordPdfStatus, {
+                        campaignId: args.campaignId,
+                        recipientId: outcome.recipientId,
+                        invoiceGuid: outcome.invoiceGuid,
+                        status: outcome.status,
+                        storageId:
+                            outcome.status === "generated"
+                                ? (outcome.storageId as Id<"_storage">)
+                                : undefined,
+                        errorMessage: outcome.status === "failed" ? outcome.error : undefined,
+                    });
+                },
+            });
+        }
 
-        const remaining = await ctx.runQuery(internal.invoicePdfs.getPendingCount, {
-            campaignId: args.campaignId,
-        });
+        // An empty chunk means nothing is `pending`, i.e. generation is complete
+        // (all settled) — so we need not re-count. Otherwise re-count to decide
+        // whether another chunk remains.
+        const remaining =
+            chunk.length === 0
+                ? 0
+                : await ctx.runQuery(internal.invoicePdfs.getPendingCount, {
+                      campaignId: args.campaignId,
+                  });
+
         if (remaining > 0) {
             await ctx.scheduler.runAfter(0, internal.invoicePdfs.pregenerateCampaignInvoicePdfs, {
                 campaignId: args.campaignId,
                 seeded: true,
+                sendChannel: args.sendChannel,
+            });
+            return;
+        }
+
+        // Generation complete — lift the gate. If this was a gated kickoff, hand off
+        // to the channel's batch processor exactly here (the single terminal path),
+        // so the send starts only now that every PDF is settled.
+        if (args.sendChannel) {
+            await ctx.scheduler.runAfter(0, batchProcessorFor(args.sendChannel), {
+                campaignId: args.campaignId,
             });
         }
     },

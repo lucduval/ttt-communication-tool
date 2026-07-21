@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { FileText, Loader2, Paperclip, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import { buildPreviewMessages, type PreviewMessage } from "./previewSample";
+import type { EmailType } from "../../../convex/lib/composeEmailContent";
 import type { MaterialisedRecipient } from "./columnRoles";
 
 /**
@@ -32,6 +33,8 @@ export function UploadPreviewSample({
     senderEmail,
     recipients,
     invoiceGuidDesignated,
+    emailType,
+    unsubscribeUrl,
     generatePdf,
 }: {
     subject: string;
@@ -41,12 +44,19 @@ export function UploadPreviewSample({
     recipients: readonly MaterialisedRecipient[];
     /** Whether the campaign designated an invoice-GUID role (drives the PDF affordance). */
     invoiceGuidDesignated: boolean;
+    /** The campaign's email type — decides whether the preview shows the unsubscribe footer. */
+    emailType?: EmailType;
+    /** A representative unsubscribe URL; empty/absent means none is configured (no footer). */
+    unsubscribeUrl?: string;
     /** Generate one recipient's invoice PDF on demand; resolves to a viewable URL or an error. */
     generatePdf: (
         invoiceGuid: string,
     ) => Promise<{ success: true; url: string } | { success: false; error: string }>;
 }) {
-    const messages = buildPreviewMessages(subject, htmlContent, recipients, SAMPLE_SIZE);
+    const messages = buildPreviewMessages(subject, htmlContent, recipients, SAMPLE_SIZE, {
+        emailType,
+        unsubscribeUrl,
+    });
 
     if (messages.length === 0) {
         return (

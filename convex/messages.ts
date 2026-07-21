@@ -42,7 +42,8 @@ export const listByCampaign = query({
  * Definitions:
  *   total     – campaign.totalRecipients (set at creation / filter resolution)
  *   sent      – messages with status "sent" (email accepted by Graph API)
- *   delivered – messages with status "delivered" (confirmed delivery)
+ *   delivered – sent minus bounces; equals `sent` since a bounce demotes a
+ *               message out of the sent bucket (see campaignTally definitions)
  *   failed    – messages with status "failed"  (send error or bounce)
  *   pending   – messages with status "pending" (not yet attempted)
  */

@@ -11,20 +11,30 @@ describe("tallyCampaign", () => {
         });
     });
 
-    test("sent counts the 'sent' status", () => {
+    test("delivered equals sent (no post-handoff signal distinct from bounces)", () => {
         expect(tallyCampaign(["sent", "sent"])).toEqual<CampaignTally>({
             sent: 2,
-            delivered: 0,
+            delivered: 2,
             failed: 0,
             pending: 0,
         });
     });
 
-    test("sent includes delivered (successfully handed to provider)", () => {
+    test("both sent and delivered include the 'delivered' status", () => {
         expect(tallyCampaign(["sent", "delivered", "delivered"])).toEqual<CampaignTally>({
             sent: 3,
-            delivered: 2,
+            delivered: 3,
             failed: 0,
+            pending: 0,
+        });
+    });
+
+    test("bounces (which become 'failed') are excluded from delivered", () => {
+        // 3 handed off, 1 later bounced (now "failed"): delivered = 2, not 3.
+        expect(tallyCampaign(["sent", "sent", "failed"])).toEqual<CampaignTally>({
+            sent: 2,
+            delivered: 2,
+            failed: 1,
             pending: 0,
         });
     });
@@ -94,7 +104,7 @@ describe("tallyCampaign", () => {
         ];
         expect(tallyCampaign(statuses)).toEqual<CampaignTally>({
             sent: 4, // 2 sent + 2 delivered
-            delivered: 2,
+            delivered: 4, // delivered mirrors sent
             failed: 1,
             pending: 2,
         });
@@ -104,7 +114,7 @@ describe("tallyCampaign", () => {
         const statuses = ["sent", "queued", "opened", "clicked", "", "bounced"];
         expect(tallyCampaign(statuses)).toEqual<CampaignTally>({
             sent: 1,
-            delivered: 0,
+            delivered: 1,
             failed: 0,
             pending: 0,
         });
@@ -114,7 +124,7 @@ describe("tallyCampaign", () => {
         const statuses = new Set(["sent", "delivered", "failed", "pending"]);
         expect(tallyCampaign(statuses)).toEqual<CampaignTally>({
             sent: 2,
-            delivered: 1,
+            delivered: 2,
             failed: 1,
             pending: 1,
         });

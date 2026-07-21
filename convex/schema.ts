@@ -50,6 +50,12 @@ export default defineSchema({
         createOpportunities: v.optional(v.boolean()),
         // Font size for email content
         fontSize: v.optional(v.string()),
+        // Per-campaign email type governing unsubscribe gating (PRD #74, issue #75).
+        // "utility" (transactional) suppresses the unsubscribe footer even where a
+        // site URL is configured; "marketing" appends it as today. Unset is treated
+        // as Marketing, so existing/untouched campaigns keep today's behaviour — the
+        // choice records the operator's compliance decision, so it is auditable.
+        emailType: v.optional(v.union(v.literal("marketing"), v.literal("utility"))),
         // Designated column roles for a source-of-truth uploaded-file campaign
         // (PRD prd-bad-debt-excel-campaign.md, issue #65). Persisted by column
         // header (durable across re-exports that share headers) — the send

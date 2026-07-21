@@ -428,9 +428,20 @@ export const startCampaign = mutation({
         aiSystemPrompt: v.optional(v.string()),
         createOpportunities: v.optional(v.boolean()),
         fontSize: v.optional(v.string()),
+        // Per-campaign email type governing unsubscribe gating (PRD #74, issue #75).
+        // Unset is treated as Marketing (today's unsubscribe-present behaviour).
+        emailType: v.optional(v.union(v.literal("marketing"), v.literal("utility"))),
         scheduledAt: v.optional(v.number()),
     },
-    handler: async (ctx, args) => {
+    handler: startCampaignImpl,
+});
+
+/**
+ * Plain handler for {@link startCampaign}, extracted so the campaign-start contract
+ * (which selections are persisted where) is provable against a faked Convex `ctx`
+ * without the mutation wrapper — the same seam the `markAttempted`/`sendGate` tests use.
+ */
+export async function startCampaignImpl(ctx: any, args: any) {
         const identity = await ctx.auth.getUserIdentity();
         if (!identity) {
             throw new Error("Unauthenticated");
@@ -440,7 +451,7 @@ export const startCampaign = mutation({
         if (args.fromMailbox) {
             const user = await ctx.db
                 .query("users")
-                .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
+                .withIndex("by_clerk_id", (q: any) => q.eq("clerkId", identity.subject))
                 .first();
 
             if (!user) {
@@ -481,6 +492,7 @@ export const startCampaign = mutation({
             bccEmail: args.bccEmail,
             createOpportunities: args.createOpportunities,
             scheduledAt: args.scheduledAt,
+            emailType: args.emailType,
         });
 
         // Store large content fields separately to keep campaign docs lightweight
@@ -499,8 +511,7 @@ export const startCampaign = mutation({
         // Messages are now created downstream in createBatches for both direct and filtered campaigns.
 
         return campaignId;
-    },
-});
+}
 
 // Internal queries for actions to use
 export const getCampaign = internalQuery({

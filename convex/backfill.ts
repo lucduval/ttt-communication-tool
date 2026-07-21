@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { internalMutation } from "./_generated/server";
+import { recomputeCampaignStats } from "./campaignBatches";
 
 export const backfillAllMessages = internalMutation({
     args: {},
@@ -46,5 +47,24 @@ export const backfillAllMessages = internalMutation({
         }
 
         return { totalCreated };
+    },
+});
+
+/**
+ * Refresh the denormalized stat cache (sentCount/deliveredCount/failedCount)
+ * that the campaign LIST view reads, by re-running the canonical recompute over
+ * every campaign. Run once after changing a Campaign Tally count definition —
+ * completed campaigns never fire a batch/bounce event again, so their cache is
+ * otherwise frozen at the old numbers and the list diverges from the detail
+ * view (which recounts live).
+ */
+export const recomputeAllCampaignStats = internalMutation({
+    args: {},
+    handler: async (ctx) => {
+        const campaigns = await ctx.db.query("campaigns").collect();
+        for (const campaign of campaigns) {
+            await recomputeCampaignStats(ctx, campaign._id);
+        }
+        return { recomputed: campaigns.length };
     },
 });
