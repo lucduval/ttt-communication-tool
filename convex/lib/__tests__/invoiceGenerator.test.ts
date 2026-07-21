@@ -20,8 +20,10 @@ const config: InvoicePdfConfig = {
     functionKey: "secret-key",
 };
 
-function pdfResponse(bytes: Uint8Array, status = 200): Response {
-    return new Response(bytes, {
+function pdfResponse(bytes: Uint8Array<ArrayBuffer>, status = 200): Response {
+    // Wrap in a Blob (a BodyInit) so the DOM lib's typed-array buffer generics
+    // don't reject the raw Uint8Array; the source reads it back via arrayBuffer().
+    return new Response(new Blob([bytes]), {
         status,
         headers: { "Content-Type": "application/pdf" },
     });
@@ -30,7 +32,7 @@ function pdfResponse(bytes: Uint8Array, status = 200): Response {
 /** Install a fake fetch delegating each call to `handler(callIndex)`. */
 function installFetch(handler: (callIndex: number) => Response | Promise<Response>) {
     let calls = 0;
-    const fetchMock = vi.fn(async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => {
         const r = await handler(calls);
         calls++;
         return r;
