@@ -416,6 +416,10 @@ export const startCampaign = mutation({
                 invoiceGuid: v.optional(v.string()),
             }),
         ),
+        // Per-campaign WhatsApp variable→column mapping for an uploaded-file
+        // campaign (issue #70). JSON: logical template variable/button variable →
+        // Excel column header. Unset for non-uploaded / Dynamics-resolved campaigns.
+        whatsappVariableMappings: v.optional(v.string()),
         createDynamicsActivity: v.optional(v.boolean()),
         fromMailbox: v.optional(v.string()),
         ccEmail: v.optional(v.string()),
@@ -470,6 +474,7 @@ export const startCampaign = mutation({
             subject: args.subject,
             whatsappTemplateId: args.whatsappTemplateId,
             columnRoles: args.columnRoles,
+            whatsappVariableMappings: args.whatsappVariableMappings,
             createDynamicsActivity: args.createDynamicsActivity,
             fromMailbox: args.fromMailbox,
             ccEmail: args.ccEmail,

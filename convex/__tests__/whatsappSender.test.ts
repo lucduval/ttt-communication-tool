@@ -218,3 +218,267 @@ describe("whatsappSender.sendBatch (faked Meta send boundary)", () => {
         }
     });
 });
+
+// ---------------------------------------------------------------------------
+// Excel-driven upload path (PRD prd-bad-debt-excel-campaign.md, issue #70).
+// A WhatsApp campaign whose `columnRoles` are set resolves every template
+// variable — body + button suffix — from the recipient's uploaded row bag, and
+// sends that recipient's pre-generated invoice PDF as the document header
+// (uploaded to Meta per recipient → media id). Meta media upload + storage
+// download URL + media-id cache are faked; buildTemplateRequestBody runs for real
+// so we assert the exact Meta request body the row produced.
+// ---------------------------------------------------------------------------
+
+const uploadTemplate = {
+    _id: "t-upload",
+    name: "bad_debt_reminder",
+    language: "en",
+    body: "Hi, you owe {{1}} on {{2}}.",
+    variables: ["1", "2"],
+    headerType: "document",
+    buttonType: "url",
+    buttonText: "Pay Now",
+    buttonUrl: "https://pay.ttt.io/{{1}}",
+    buttonUrlVariable: "pay_token",
+};
+
+const uploadCampaign = {
+    _id: "c-upload",
+    status: "active",
+    whatsappTemplateId: "t-upload",
+    createDynamicsActivity: false,
+    // Presence of columnRoles selects the file-as-source path.
+    columnRoles: { trackingKey: "contactid", invoiceGuid: "invoiceguid" },
+    whatsappVariableMappings: JSON.stringify({
+        "1": "amount",
+        "2": "invoice_date",
+        pay_token: "pay_token",
+    }),
+};
+
+function rowRecipient(id: string, cells: Record<string, string>, phone = "+27821234567") {
+    return { id, phone, name: "Alice Smith", variables: JSON.stringify(cells) };
+}
+
+function createUploadCtx(opts: {
+    pdfRefs: Array<{
+        recipientId: string;
+        storageId: string;
+        whatsappMediaId?: string;
+        whatsappMediaIdUploadedAt?: number;
+    }>;
+    downloadUrl?: string | null;
+}) {
+    const recorded: Array<{ recipientId: string; whatsappMediaId: string }> = [];
+    const ctx = {
+        runQuery: vi.fn(async (ref: unknown, args: any) => {
+            switch (getFunctionName(ref as any)) {
+                case "campaignBatches:getWhatsAppTemplate":
+                    return uploadTemplate;
+                case "invoicePdfs:getWhatsAppPdfRefs":
+                    return opts.pdfRefs;
+                case "files:getDownloadUrlInternal":
+                    return opts.downloadUrl === undefined
+                        ? "https://convex.storage/" + args.storageId
+                        : opts.downloadUrl;
+                default:
+                    return undefined;
+            }
+        }),
+        runMutation: vi.fn(async (ref: unknown, args: any) => {
+            if (getFunctionName(ref as any) === "invoicePdfs:recordWhatsAppMediaId") {
+                recorded.push({ recipientId: args.recipientId, whatsappMediaId: args.whatsappMediaId });
+            }
+            return undefined;
+        }),
+        runAction: vi.fn(async () => undefined),
+        scheduler: { runAfter: vi.fn(async () => undefined) },
+    };
+    return { ctx, recorded };
+}
+
+describe("whatsappSender.sendBatch — Excel-driven upload path (#70)", () => {
+    it("renders body params + button suffix from the row and sends the per-recipient PDF as the document header", async () => {
+        const batch = {
+            _id: "batch-u" as any,
+            recipients: [
+                rowRecipient("guid-1", {
+                    amount: "R1,234.56",
+                    invoice_date: "21 July 2026",
+                    pay_token: "xY9abc",
+                }),
+            ],
+        };
+        boundary.uploadWhatsAppMedia.mockResolvedValue({
+            mediaId: "meta-media-1",
+            mimeType: "application/pdf",
+            sizeBytes: 2048,
+        });
+        boundary.sendTemplateWithRetry.mockResolvedValue({
+            status: "sent",
+            wamid: "wamid.U1",
+            attempts: 1,
+            latencyMs: 5,
+        });
+
+        const order: string[] = [];
+        const markAttempted = vi.fn(async (ids: string[]) => {
+            order.push(`mark:${ids.join(",")}`);
+        });
+        boundary.sendTemplateWithRetry.mockImplementation(async () => {
+            order.push("send");
+            return { status: "sent", wamid: "wamid.U1", attempts: 1, latencyMs: 5 };
+        });
+
+        const { emitted, emit } = collector();
+        const { ctx, recorded } = createUploadCtx({
+            pdfRefs: [{ recipientId: "guid-1", storageId: "store-1" }],
+        });
+
+        await whatsappSender.sendBatch(
+            ctx as any,
+            uploadCampaign,
+            batch,
+            emit,
+            batch.recipients,
+            markAttempted,
+        );
+
+        // The stored PDF was uploaded to Meta as a document, and its id cached.
+        expect(boundary.uploadWhatsAppMedia).toHaveBeenCalledTimes(1);
+        const uploadArgs = boundary.uploadWhatsAppMedia.mock.calls[0][1];
+        expect(uploadArgs).toMatchObject({
+            sourceUrl: "https://convex.storage/store-1",
+            headerType: "document",
+            mimeTypeOverride: "application/pdf",
+        });
+        expect(recorded).toEqual([{ recipientId: "guid-1", whatsappMediaId: "meta-media-1" }]);
+
+        // The Meta request body was built from the row: header doc = per-recipient
+        // media id, body params from mapped columns, button suffix (not a URL).
+        expect(boundary.sendTemplateWithRetry).toHaveBeenCalledTimes(1);
+        const sentBody = boundary.sendTemplateWithRetry.mock.calls[0][1];
+        const comps = sentBody.template.components;
+        expect(comps.find((c: any) => c.type === "header").parameters).toEqual([
+            { type: "document", document: { id: "meta-media-1", filename: "invoice.pdf" } },
+        ]);
+        expect(comps.find((c: any) => c.type === "body").parameters).toEqual([
+            { type: "text", text: "R1,234.56" },
+            { type: "text", text: "21 July 2026" },
+        ]);
+        expect(comps.find((c: any) => c.type === "button")).toEqual({
+            type: "button",
+            sub_type: "url",
+            index: "0",
+            parameters: [{ type: "text", text: "xY9abc" }],
+        });
+
+        expect(emitted[0]).toMatchObject({ success: true, externalMessageId: "wamid.U1" });
+        // Attempted before send — the crash-blast-radius seam holds with attachments.
+        expect(order).toEqual(["mark:guid-1", "send"]);
+    });
+
+    it("reuses a fresh cached media id and skips the re-upload", async () => {
+        const batch = {
+            _id: "batch-u" as any,
+            recipients: [rowRecipient("guid-1", { amount: "R9", invoice_date: "x", pay_token: "tok" })],
+        };
+        boundary.sendTemplateWithRetry.mockResolvedValue({
+            status: "sent",
+            wamid: "wamid.U2",
+            attempts: 1,
+            latencyMs: 5,
+        });
+
+        const { emitted, emit } = collector();
+        const { ctx, recorded } = createUploadCtx({
+            pdfRefs: [
+                {
+                    recipientId: "guid-1",
+                    storageId: "store-1",
+                    whatsappMediaId: "cached-1",
+                    whatsappMediaIdUploadedAt: Date.now(),
+                },
+            ],
+        });
+
+        await whatsappSender.sendBatch(
+            ctx as any,
+            uploadCampaign,
+            batch,
+            emit,
+            batch.recipients,
+            async () => {},
+        );
+
+        expect(boundary.uploadWhatsAppMedia).not.toHaveBeenCalled();
+        expect(recorded).toEqual([]);
+        const sentBody = boundary.sendTemplateWithRetry.mock.calls[0][1];
+        expect(sentBody.template.components.find((c: any) => c.type === "header").parameters).toEqual([
+            { type: "document", document: { id: "cached-1", filename: "invoice.pdf" } },
+        ]);
+        expect(emitted[0]).toMatchObject({ success: true, externalMessageId: "wamid.U2" });
+    });
+
+    it("holds a recipient with no generated PDF — never marked attempted, never sent", async () => {
+        const batch = {
+            _id: "batch-u" as any,
+            recipients: [rowRecipient("guid-1", { amount: "R9", invoice_date: "x", pay_token: "tok" })],
+        };
+        const markAttempted = vi.fn(async () => {});
+        const { emitted, emit } = collector();
+        const { ctx } = createUploadCtx({ pdfRefs: [] });
+
+        await whatsappSender.sendBatch(
+            ctx as any,
+            uploadCampaign,
+            batch,
+            emit,
+            batch.recipients,
+            markAttempted,
+        );
+
+        expect(boundary.uploadWhatsAppMedia).not.toHaveBeenCalled();
+        expect(boundary.sendTemplateWithRetry).not.toHaveBeenCalled();
+        expect(markAttempted).not.toHaveBeenCalled();
+        expect(emitted[0]).toMatchObject({ success: false });
+        expect(emitted[0].error).toContain("No generated invoice PDF");
+    });
+
+    it("sends only the eligible subset on the upload path (idempotency seam)", async () => {
+        const batch = {
+            _id: "batch-u" as any,
+            recipients: [
+                rowRecipient("guid-1", { amount: "R1", invoice_date: "a", pay_token: "t1" }, "+27821111111"),
+                rowRecipient("guid-2", { amount: "R2", invoice_date: "b", pay_token: "t2" }, "+27822222222"),
+            ],
+        };
+        // guid-2 already handled — not in the eligible set; only guid-1 sends.
+        const eligible = [batch.recipients[0]];
+        boundary.uploadWhatsAppMedia.mockResolvedValue({
+            mediaId: "m1",
+            mimeType: "application/pdf",
+            sizeBytes: 1,
+        });
+        boundary.sendTemplateWithRetry.mockResolvedValue({
+            status: "sent",
+            wamid: "wamid.only1",
+            attempts: 1,
+            latencyMs: 1,
+        });
+
+        const { emitted, emit } = collector();
+        const { ctx } = createUploadCtx({
+            pdfRefs: [
+                { recipientId: "guid-1", storageId: "s1" },
+                { recipientId: "guid-2", storageId: "s2" },
+            ],
+        });
+
+        await whatsappSender.sendBatch(ctx as any, uploadCampaign, batch, emit, eligible, async () => {});
+
+        expect(boundary.sendTemplateWithRetry).toHaveBeenCalledTimes(1);
+        expect(boundary.uploadWhatsAppMedia).toHaveBeenCalledTimes(1);
+        expect(emitted.map((e) => e.recipientId)).toEqual(["guid-1"]);
+    });
+});

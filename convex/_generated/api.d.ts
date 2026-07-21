@@ -30,6 +30,7 @@ import type * as files from "../files.js";
 import type * as http from "../http.js";
 import type * as invoicePdfs from "../invoicePdfs.js";
 import type * as lib_applyMerge from "../lib/applyMerge.js";
+import type * as lib_batchChunker from "../lib/batchChunker.js";
 import type * as lib_batchLease from "../lib/batchLease.js";
 import type * as lib_campaignTally from "../lib/campaignTally.js";
 import type * as lib_channelDispatch from "../lib/channelDispatch.js";
@@ -96,6 +97,7 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   invoicePdfs: typeof invoicePdfs;
   "lib/applyMerge": typeof lib_applyMerge;
+  "lib/batchChunker": typeof lib_batchChunker;
   "lib/batchLease": typeof lib_batchLease;
   "lib/campaignTally": typeof lib_campaignTally;
   "lib/channelDispatch": typeof lib_channelDispatch;

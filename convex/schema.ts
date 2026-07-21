@@ -60,6 +60,16 @@ export default defineSchema({
             trackingKey: v.string(),
             invoiceGuid: v.optional(v.string()),
         })),
+        // Per-campaign WhatsApp variable→column mapping for a source-of-truth
+        // uploaded-file campaign (PRD prd-bad-debt-excel-campaign.md, issue #70).
+        // JSON stringified map of the template's logical variable name (each
+        // positional body variable like "1"/"2", plus any dynamic button URL
+        // variable) → the Excel column header whose cell fills it. Reuses the
+        // `variableMappings` concept but points it at uploaded columns instead of
+        // Dynamics fields, and lives on the campaign (not the template) because the
+        // operator maps the chosen template's variables to columns once per
+        // campaign. Unset for non-uploaded / Dynamics-resolved campaigns.
+        whatsappVariableMappings: v.optional(v.string()),
     })
         .index("by_status", ["status"])
         .index("by_user", ["createdBy"])
@@ -134,6 +144,12 @@ export default defineSchema({
         storageId: v.optional(v.id("_storage")), // set only when generated; never bytes
         invoiceType: v.optional(v.string()), // Tax | Accounting, when designated
         errorMessage: v.optional(v.string()), // failure detail, drives the gate's missing-pdf hold
+        // WhatsApp document-header send (PRD prd-bad-debt-excel-campaign.md, issue
+        // #70). When this recipient's PDF is sent over WhatsApp, its bytes are
+        // uploaded to Meta once and only the returned media id is cached here —
+        // never bytes. Expires ~30 days after upload (Meta), refreshed at ~25.
+        whatsappMediaId: v.optional(v.string()),
+        whatsappMediaIdUploadedAt: v.optional(v.number()),
     })
         .index("by_campaign", ["campaignId"])
         .index("by_campaign_recipient", ["campaignId", "recipientId"])

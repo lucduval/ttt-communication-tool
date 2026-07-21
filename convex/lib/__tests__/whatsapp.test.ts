@@ -9,6 +9,8 @@ import {
     isMediaIdFresh,
     shouldRefreshMediaId,
     uploadWhatsAppMedia,
+    parseRowBag,
+    resolveRowVariables,
     META_MEDIA_ID_REFRESH_AFTER_MS,
     META_MEDIA_LIMITS,
     type MetaWhatsAppConfig,
@@ -197,6 +199,65 @@ describe('buildTemplateRequestBody', () => {
         });
     });
 
+    it('uses headerFilename for a document header when set (Excel-driven per-recipient PDF)', () => {
+        const template: TemplateLike = {
+            ...baseTemplate,
+            headerType: 'document',
+            headerMediaId: 'per-recipient-media-1',
+            headerFilename: 'invoice.pdf',
+        };
+        const body = buildTemplateRequestBody(template, '27821234567', { '1': 'A', '2': 'B' });
+        expect(body.template.components![0]).toEqual({
+            type: 'header',
+            parameters: [{ type: 'document', document: { id: 'per-recipient-media-1', filename: 'invoice.pdf' } }],
+        });
+    });
+
+    it('renders body params + button suffix + document header from a resolved row (Excel-driven WhatsApp)', () => {
+        // The Excel-driven path: body variables are pre-formatted cells, the button
+        // variable carries the payment token/suffix (not a full URL), and the header
+        // is this recipient's own invoice PDF (uploaded → per-recipient media id).
+        const template: TemplateLike = {
+            name: 'bad_debt_reminder',
+            language: 'en',
+            variables: ['1', '2', '3'],
+            headerType: 'document',
+            headerMediaId: 'media-for-alice',
+            headerFilename: 'invoice.pdf',
+            buttonType: 'url',
+            buttonText: 'Pay Now',
+            buttonUrl: 'https://pay.ttt.io/{{1}}',
+            buttonUrlVariable: 'pay_token',
+        };
+        const allVariables = {
+            '1': 'R1,234.56',
+            '2': 'INV-0042',
+            '3': '21 July 2026',
+            pay_token: 'xY9abc',
+        };
+        const body = buildTemplateRequestBody(template, '27821234567', allVariables);
+
+        expect(body.template.components!.map((c) => c.type)).toEqual(['header', 'body', 'button']);
+        const header = body.template.components!.find((c) => c.type === 'header');
+        expect(header!.parameters).toEqual([
+            { type: 'document', document: { id: 'media-for-alice', filename: 'invoice.pdf' } },
+        ]);
+        const bodyComp = body.template.components!.find((c) => c.type === 'body');
+        expect(bodyComp!.parameters).toEqual([
+            { type: 'text', text: 'R1,234.56' },
+            { type: 'text', text: 'INV-0042' },
+            { type: 'text', text: '21 July 2026' },
+        ]);
+        const button = body.template.components!.find((c) => c.type === 'button');
+        // The button carries only the suffix — Meta appends it to the approved prefix.
+        expect(button).toEqual({
+            type: 'button',
+            sub_type: 'url',
+            index: '0',
+            parameters: [{ type: 'text', text: 'xY9abc' }],
+        });
+    });
+
     it('skips header when headerType is "none"', () => {
         const template: TemplateLike = { ...baseTemplate, headerType: 'none' };
         const body = buildTemplateRequestBody(template, '27821234567', { '1': 'A', '2': 'B' });
@@ -381,6 +442,60 @@ describe('buildTemplateRequestBody', () => {
                 parameters: [{ type: 'text', text: 'solo' }],
             },
         ]);
+    });
+});
+
+describe('parseRowBag', () => {
+    it('parses a JSON row into a flat trimmed string map', () => {
+        const bag = parseRowBag(JSON.stringify({ ' amount ': 'R100', invoice: 'INV-1', empty: null }));
+        expect(bag).toEqual({ amount: 'R100', invoice: 'INV-1', empty: '' });
+    });
+
+    it('coerces non-string cell values to strings', () => {
+        expect(parseRowBag(JSON.stringify({ n: 42, b: true }))).toEqual({ n: '42', b: 'true' });
+    });
+
+    it('returns {} for missing, empty, or malformed bags', () => {
+        expect(parseRowBag(undefined)).toEqual({});
+        expect(parseRowBag(null)).toEqual({});
+        expect(parseRowBag('')).toEqual({});
+        expect(parseRowBag('not json')).toEqual({});
+        expect(parseRowBag(JSON.stringify(['a', 'b']))).not.toBeUndefined();
+    });
+});
+
+describe('resolveRowVariables', () => {
+    const rowBag = {
+        amount: 'R1,234.56',
+        invoice_no: 'INV-0042',
+        invoice_date: '21 July 2026',
+        pay_token: 'xY9abc',
+    };
+
+    it('maps positional body variables + the button variable to their columns', () => {
+        const mappings = {
+            '1': 'amount',
+            '2': 'invoice_no',
+            '3': 'invoice_date',
+            pay_token: 'pay_token',
+        };
+        expect(resolveRowVariables(['1', '2', '3', 'pay_token'], mappings, rowBag)).toEqual({
+            '1': 'R1,234.56',
+            '2': 'INV-0042',
+            '3': '21 July 2026',
+            pay_token: 'xY9abc',
+        });
+    });
+
+    it('falls back to a column named exactly like the variable when unmapped', () => {
+        expect(resolveRowVariables(['amount', 'pay_token'], {}, rowBag)).toEqual({
+            amount: 'R1,234.56',
+            pay_token: 'xY9abc',
+        });
+    });
+
+    it('resolves an absent column to an empty string (never a raw placeholder)', () => {
+        expect(resolveRowVariables(['1'], { '1': 'missing_col' }, rowBag)).toEqual({ '1': '' });
     });
 });
 

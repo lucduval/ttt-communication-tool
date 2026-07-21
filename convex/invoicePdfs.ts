@@ -228,6 +228,83 @@ export const getGeneratedPdfRefs = internalQuery({
 });
 
 /**
+ * Per-recipient invoice-PDF references for the WhatsApp document-header send (PRD
+ * `prd-bad-debt-excel-campaign.md`, issue #70). Returns one entry per recipient
+ * whose PDF is `generated` — the `storageId` to fetch bytes from at send, plus any
+ * cached Meta `whatsappMediaId` (and its upload time) so a re-run can skip the
+ * upload while the id is still fresh. Unlike the email refs this carries no byte
+ * `size`: WhatsApp uploads each document to Meta individually (no `$batch` byte
+ * budget to plan). Recipients not yet `generated` are omitted — the pre-send
+ * validation gate (#67) holds them — so a non-upload campaign returns `[]`.
+ */
+export const getWhatsAppPdfRefs = internalQuery({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (
+        ctx,
+        args,
+    ): Promise<
+        Array<{
+            recipientId: string;
+            storageId: Id<"_storage">;
+            whatsappMediaId?: string;
+            whatsappMediaIdUploadedAt?: number;
+        }>
+    > => {
+        const rows = await ctx.db
+            .query("invoicePdfs")
+            .withIndex("by_campaign_status", (q) =>
+                q.eq("campaignId", args.campaignId).eq("status", "generated"),
+            )
+            .collect();
+
+        const refs: Array<{
+            recipientId: string;
+            storageId: Id<"_storage">;
+            whatsappMediaId?: string;
+            whatsappMediaIdUploadedAt?: number;
+        }> = [];
+        for (const row of rows) {
+            if (!row.storageId) continue;
+            refs.push({
+                recipientId: row.recipientId,
+                storageId: row.storageId,
+                whatsappMediaId: row.whatsappMediaId,
+                whatsappMediaIdUploadedAt: row.whatsappMediaIdUploadedAt,
+            });
+        }
+        return refs;
+    },
+});
+
+/**
+ * Cache the Meta media id obtained from uploading one recipient's invoice PDF for
+ * the WhatsApp document header (PRD issue #70). Only the id reference is stored —
+ * never bytes — keyed by `(campaignId, recipientId)`. Idempotent: a recovery
+ * re-run overwrites with the latest id/timestamp.
+ */
+export const recordWhatsAppMediaId = internalMutation({
+    args: {
+        campaignId: v.id("campaigns"),
+        recipientId: v.string(),
+        whatsappMediaId: v.string(),
+        uploadedAt: v.number(),
+    },
+    handler: async (ctx, args) => {
+        const existing = await ctx.db
+            .query("invoicePdfs")
+            .withIndex("by_campaign_recipient", (q) =>
+                q.eq("campaignId", args.campaignId).eq("recipientId", args.recipientId),
+            )
+            .unique();
+        if (!existing) return;
+        await ctx.db.patch(existing._id, {
+            whatsappMediaId: args.whatsappMediaId,
+            whatsappMediaIdUploadedAt: args.uploadedAt,
+        });
+    },
+});
+
+/**
  * Pre-generation progress for the operator's indicator: how many recipients are
  * pending / generated / failed, and the total. Auth-checked so the UI can poll it.
  */
