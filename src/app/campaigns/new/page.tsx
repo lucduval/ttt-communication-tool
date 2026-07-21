@@ -22,8 +22,9 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, type Contact, type UploadRolesResult } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, UploadPreviewSample, type Contact, type UploadRolesResult } from "@/components/recipients";
 import type { PersistedColumnRoles } from "@/components/recipients/columnRoles";
+import type { ValidationReport } from "@/components/recipients/validationReport";
 import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
 import {
     getConvexSiteUrl,
@@ -179,6 +180,9 @@ export default function NewCampaignPage() {
     // `upload` shape); this holds only the roles to persist. Reset whenever the
     // audience changes (see the audience-change effect).
     const [columnRoles, setColumnRoles] = useState<PersistedColumnRoles | null>(null);
+    // The upload's consolidated validation report (#67). Its `sendable` rows are what the
+    // pre-send preview (#71) renders — the same rows that would actually be sent.
+    const [uploadReport, setUploadReport] = useState<ValidationReport | null>(null);
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
         status: "all",
@@ -313,6 +317,7 @@ export default function NewCampaignPage() {
     const fetchContactsWithITA34 = useAction(api.actions.dynamics.fetchContactsWithITA34);
     const fetchContactsByTaxReturn = useAction(api.actions.dynamics.fetchContactsByTaxReturn);
     const sendTestEmail = useAction(api.actions.email.sendTestEmail);
+    const previewInvoicePdf = useAction(api.invoicePdfs.previewInvoicePdf);
     const sendTestWhatsApp = useAction(api.actions.whatsapp.sendTestWhatsApp);
     const fetchEmployees = useAction(api.actions.dynamics.fetchUsers);
     const fetchLeads = useAction(api.actions.dynamics.fetchLeads);
@@ -1258,9 +1263,11 @@ export default function NewCampaignPage() {
             if (result) {
                 recipientSelection.activateUpload(result.recipients);
                 setColumnRoles(result.roles);
+                setUploadReport(result.report);
             } else {
                 recipientSelection.clear();
                 setColumnRoles(null);
+                setUploadReport(null);
             }
         },
         [recipientSelection],
@@ -1934,7 +1941,23 @@ export default function NewCampaignPage() {
                             ) : (
                                 <>
                                     <Card title="Final Preview">
-                                        {campaignChannel === "email" ? (
+                                        {campaignChannel === "email" && audience === "upload" ? (
+                                            // Bad-debt upload campaigns (#71): the preview draws from the
+                                            // validated uploaded rows (report.sendable) and the same merge +
+                                            // attachment path the real send uses — NO Dynamics re-fetch.
+                                            <UploadPreviewSample
+                                                subject={subject}
+                                                htmlContent={htmlContent}
+                                                senderEmail={selectedMailbox || undefined}
+                                                recipients={uploadReport?.sendable ?? []}
+                                                invoiceGuidDesignated={
+                                                    !!(columnRoles?.invoiceGuid && columnRoles.invoiceGuid.trim())
+                                                }
+                                                generatePdf={(invoiceGuid) =>
+                                                    previewInvoicePdf({ invoiceGuid })
+                                                }
+                                            />
+                                        ) : campaignChannel === "email" ? (
                                             <EmailPreview
                                                 subject={subject}
                                                 htmlContent={htmlContent}

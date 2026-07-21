@@ -5,6 +5,8 @@ export { useRecipientPagination } from "./useRecipientPagination";
 export { filterSignature } from "./filterSignature";
 export { materialiseExplicit } from "./materialiseExplicit";
 export { UploadListPanel, type UploadRolesResult } from "./UploadListPanel";
+export { UploadPreviewSample } from "./UploadPreviewSample";
+export { buildPreviewMessages, buildMergeContext, type PreviewMessage } from "./previewSample";
 export {
     extractContactIds,
     extractContactIdsForColumn,

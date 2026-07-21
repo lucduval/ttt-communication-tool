@@ -1,6 +1,6 @@
 import { v } from "convex/values";
-import { internal } from "./_generated/api";
-import { internalAction, internalMutation, internalQuery, query } from "./_generated/server";
+import { api, internal } from "./_generated/api";
+import { action, internalAction, internalMutation, internalQuery, query } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
 import { checkAccessHelper } from "./users";
 import { generateInvoicePdf } from "./lib/invoiceGenerator";
@@ -249,6 +249,47 @@ export const getPregenProgress = query({
             else progress.pending++;
         }
         return progress;
+    },
+});
+
+/**
+ * Generate ONE sample recipient's invoice PDF on demand for the pre-send preview
+ * (PRD `prd-bad-debt-excel-campaign.md`, issue #71, user story #29). This is the
+ * impure edge of the preview: it draws the PDF from the **same Azure boundary and
+ * the same store step the real send uses** (`generateInvoicePdf` → `ctx.storage.store`),
+ * so the operator sees a true picture of the attachment that would go out — not a mock.
+ *
+ * Called live from the campaign wizard for a handful of sample rows before the campaign
+ * exists, so it stores the bytes transiently and returns a viewable storage URL rather
+ * than recording anything in the `invoicePdfs` table (that table is keyed by a real
+ * campaign, populated by the pre-gen job). A missing/blank GUID or a generation failure
+ * returns `{ success: false }` with a message the preview surfaces inline.
+ */
+export const previewInvoicePdf = action({
+    args: { invoiceGuid: v.string(), invoiceType: v.optional(v.string()) },
+    handler: async (
+        ctx,
+        args,
+    ): Promise<{ success: true; url: string } | { success: false; error: string }> => {
+        const access = await ctx.runQuery(api.users.checkAccess);
+        if (!access.hasAccess) throw new Error("Unauthorized");
+
+        const guid = args.invoiceGuid.trim();
+        if (!guid) return { success: false, error: "This recipient has no invoice GUID to generate a PDF from." };
+
+        const type =
+            args.invoiceType === "Tax" || args.invoiceType === "Accounting"
+                ? args.invoiceType
+                : undefined;
+        const result = await generateInvoicePdf({ invoiceId: guid, type });
+        if (!result.success) return { success: false, error: result.error };
+
+        const storageId = await ctx.storage.store(
+            new Blob([result.bytes], { type: "application/pdf" }),
+        );
+        const url = await ctx.storage.getUrl(storageId);
+        if (!url) return { success: false, error: "Generated the PDF but could not resolve a preview URL." };
+        return { success: true, url };
     },
 });
 
