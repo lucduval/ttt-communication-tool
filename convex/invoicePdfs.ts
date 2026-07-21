@@ -193,6 +193,41 @@ export const getPdfStatusMap = internalQuery({
 });
 
 /**
+ * Per-recipient invoice-PDF attachment references for the email send (PRD
+ * `prd-bad-debt-excel-campaign.md`, issue #69). Returns one entry per recipient
+ * whose PDF is `generated` — the `storageId` to fetch bytes from at send, plus the
+ * stored file `size` so the payload-aware `$batch` chunker can plan chunks without
+ * downloading anything. Recipients not yet generated (still `pending`/`failed`) are
+ * omitted: the pre-send validation gate (#67) holds them, so they never reach the
+ * send path. A campaign with no invoice PDFs (any non-upload campaign) returns `[]`,
+ * and the email adapter simply attaches nothing — preserving prior behaviour.
+ */
+export const getGeneratedPdfRefs = internalQuery({
+    args: { campaignId: v.id("campaigns") },
+    handler: async (
+        ctx,
+        args,
+    ): Promise<Array<{ recipientId: string; storageId: Id<"_storage">; size: number }>> => {
+        const rows = await ctx.db
+            .query("invoicePdfs")
+            .withIndex("by_campaign_status", (q) =>
+                q.eq("campaignId", args.campaignId).eq("status", "generated"),
+            )
+            .collect();
+
+        const refs: Array<{ recipientId: string; storageId: Id<"_storage">; size: number }> = [];
+        for (const row of rows) {
+            if (!row.storageId) continue;
+            // `_storage` system metadata carries the byte size without downloading
+            // the file — exactly what the chunker's byte budget needs up front.
+            const meta = await ctx.db.system.get(row.storageId);
+            refs.push({ recipientId: row.recipientId, storageId: row.storageId, size: meta?.size ?? 0 });
+        }
+        return refs;
+    },
+});
+
+/**
  * Pre-generation progress for the operator's indicator: how many recipients are
  * pending / generated / failed, and the total. Auth-checked so the UI can poll it.
  */

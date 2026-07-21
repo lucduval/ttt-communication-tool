@@ -65,6 +65,7 @@ function makeHarness(now: () => number) {
         campaigns: [],
         campaignBatches: [],
         messages: [],
+        invoicePdfs: [],
     };
     let seq = 0;
 
@@ -138,6 +139,15 @@ function makeHarness(now: () => number) {
                         .first();
                 case "campaignBatches:getCampaignContent":
                     return { htmlBody: "<p>Hi {firstName}</p>", fontSize: "15px", attachments: [] };
+                case "invoicePdfs:getGeneratedPdfRefs":
+                    // Mirror the real query: one ref per `generated` row, with the
+                    // stored file size (fixed here) the chunker's byte budget needs.
+                    return tables.invoicePdfs
+                        .filter((r) => r.campaignId === args.campaignId && r.status === "generated")
+                        .map((r) => ({ recipientId: r.recipientId, storageId: r.storageId, size: 1024 }));
+                case "files:getDownloadUrlInternal":
+                    // A stable fake URL per storageId; the stubbed fetch serves bytes for it.
+                    return `https://storage.test/${args.storageId}`;
                 case "messages:getExistingMessageStatuses": {
                     const rows: Array<{ recipientId: string; status: string }> = [];
                     for (const recipientId of args.recipientIds) {
@@ -414,5 +424,79 @@ describe("send-path idempotency — headline regression (#62)", () => {
             .first();
         expect(row!.status).toBe("attempted");
         expect((await db.get(batchId))!.status).toBe("completed");
+    });
+
+    it("file-as-source + attachments: one message per (campaign, tracking key), each carrying its own PDF, seam intact", async () => {
+        // The bad-debt path (PRD bad-debt-excel-campaign, #69): the uploaded file is
+        // the source of truth (per-recipient `variables` bag) and each recipient's
+        // own invoice PDF is fetched from storage at send and inlined. This proves
+        // the idempotency seam still holds on that path: each tracking key is handed
+        // to Graph exactly once, `markAttempted` lands before the send, and the
+        // message that goes out carries THAT recipient's PDF (never a shared one).
+        const clock = 12_000_000;
+        const { ctx, db } = makeHarness(() => clock);
+
+        // Serve distinct PDF bytes per storageId so we can prove each recipient got
+        // their OWN invoice, not a shared attachment. Graph is the mocked boundary
+        // (not fetch), so only storage downloads hit this stub.
+        const fetchMock = vi.fn(async (url: unknown) => {
+            const u = String(url);
+            const bytes = new TextEncoder().encode(`PDF:${u}`);
+            return new Response(bytes, { status: 200 });
+        });
+        vi.stubGlobal("fetch", fetchMock);
+
+        try {
+            const campaignId = await db.insert("campaigns", {
+                ...campaignBase,
+                columnRoles: { trackingKey: "contactid", invoiceGuid: "invoiceid" },
+            });
+            await db.insert("campaignBatches", {
+                campaignId,
+                batchNumber: 0,
+                status: "pending",
+                recipients: [
+                    { id: "A", email: "a@x.test", name: "Alice", variables: JSON.stringify({ amount: "R10" }) },
+                    { id: "B", email: "b@x.test", name: "Bob", variables: JSON.stringify({ amount: "R20" }) },
+                ],
+            });
+            // Seed rows (#63) + a `generated` PDF per recipient (#68), each its own storageId.
+            await db.insert("messages", { campaignId, recipientId: "A", recipientName: "Alice", status: "pending", channel: "email" });
+            await db.insert("messages", { campaignId, recipientId: "B", recipientName: "Bob", status: "pending", channel: "email" });
+            await db.insert("invoicePdfs", { campaignId, recipientId: "A", invoiceGuid: "g-A", status: "generated", storageId: "store:A" });
+            await db.insert("invoicePdfs", { campaignId, recipientId: "B", invoiceGuid: "g-B", status: "generated", storageId: "store:B" });
+
+            const sends = scriptGraph(new Map());
+
+            await runChannelSend(ctx, { campaignId: campaignId as any, sender: emailSender, now: () => clock });
+
+            // Exactly one Graph handoff per tracking key — at-most-once holds.
+            expect(sends.get("A")).toBe(1);
+            expect(sends.get("B")).toBe(1);
+
+            // Each recipient's message carries its OWN invoice PDF (distinct bytes),
+            // proving the per-recipient fetch + inline, not a shared attachment.
+            const sentMsgs = boundary.sendEmailBatch.mock.calls[0][0] as any[];
+            const byRid = Object.fromEntries(
+                sentMsgs.map((m) => [m.headers["X-Recipient-ID"], m])
+            );
+            const pdfB64 = (rid: string) =>
+                byRid[rid].attachments.find((a: any) => a.contentType === "application/pdf")
+                    ?.contentBase64;
+            const expected = (storageId: string) =>
+                Buffer.from(`PDF:https://storage.test/${storageId}`).toString("base64");
+            expect(pdfB64("A")).toBe(expected("store:A"));
+            expect(pdfB64("B")).toBe(expected("store:B"));
+            expect(pdfB64("A")).not.toBe(pdfB64("B"));
+
+            // markAttempted-before-send seam intact: both settled `sent`, one row each.
+            const rowFor = (rid: string) => db.query("messages")
+                .withIndex("by_campaign_recipient", (q: any) => q.eq("campaignId", campaignId).eq("recipientId", rid))
+                .first();
+            expect((await rowFor("A"))!.status).toBe("sent");
+            expect((await rowFor("B"))!.status).toBe("sent");
+        } finally {
+            vi.unstubAllGlobals();
+        }
     });
 });

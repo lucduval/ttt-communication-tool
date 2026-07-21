@@ -19,6 +19,12 @@ import {
 import { logWhatsAppActivity } from "./lib/dynamics_logging";
 import { notifyTinaOfOutboundTemplate, substitutedBodyVariables } from "./lib/notifyTina";
 import { applyMerge } from "./lib/applyMerge";
+import {
+    chunkByPayload,
+    base64Size,
+    MAX_BATCH_PAYLOAD_BYTES,
+    MAX_BATCH_SUBREQUESTS,
+} from "./lib/batchChunker";
 
 /**
  * Channel Senders — the per-channel adapters behind the Channel Send seam. Each
@@ -67,6 +73,19 @@ async function sendEmailBatch_(
     const campaignContent = await ctx.runQuery(internal.campaignBatches.getCampaignContent, {
         campaignId,
     });
+
+    // Per-recipient invoice-PDF attachment references (PRD bad-debt-excel-campaign,
+    // #69). Each entry is a `generated` recipient's `storageId` + stored file size;
+    // the bytes are fetched from storage at send (per chunk) and base64-inlined as a
+    // Graph fileAttachment, so the file — not Dynamics — is the source of truth. The
+    // size lets the payload-aware chunker plan chunks without downloading anything.
+    // Empty for any non-upload campaign, so this path is inert there.
+    const pdfRefs = (await ctx.runQuery(internal.invoicePdfs.getGeneratedPdfRefs, {
+        campaignId,
+    })) as Array<{ recipientId: string; storageId: Id<"_storage">; size: number }> | null | undefined;
+    const pdfRefByRecipient = new Map(
+        (pdfRefs ?? []).map((ref) => [ref.recipientId, ref] as const),
+    );
 
     // `eligible` is the driver-provided set of recipients with no existing
     // `messages` row for this campaign, or a row still `pending` — the seed
@@ -124,12 +143,23 @@ async function sendEmailBatch_(
         }
     }
 
+    // Campaign-level attachments are shared by every message, so their base64
+    // payload is a constant contribution to each message's chunking size.
+    const campaignAttachmentsBytes = processedAttachments.reduce(
+        (sum, att) => sum + att.contentBase64.length,
+        0,
+    );
+
     // Phase 1: validate + render every eligible recipient. Invalid recipients
     // are recorded as failures up-front so they never reach the $batch call.
     const siteUrl = process.env.CONVEX_SITE_URL || "";
     type PreparedSend = {
         recipient: { id: string; email?: string; name: string };
         message: Parameters<typeof sendEmailBatch>[0][number];
+        /** This recipient's invoice-PDF reference, fetched + inlined per chunk at send. */
+        pdfRef?: { storageId: Id<"_storage">; size: number };
+        /** Estimated `$batch` payload bytes for this message — feeds the chunker's byte budget. */
+        payloadBytes: number;
     };
     const prepared: PreparedSend[] = [];
 
@@ -209,6 +239,16 @@ async function sendEmailBatch_(
                 emailBody = (await rewriteEmailLinks(emailBody, siteUrl, campaignId, recipient.id)) as string;
             }
 
+            const pdfRef = pdfRefByRecipient.get(recipient.id);
+            // Chunking size ≈ body + subject + shared campaign attachments + this
+            // recipient's own PDF (as base64). The PDF bytes aren't downloaded yet —
+            // only its size feeds the byte budget; the fetch happens per chunk below.
+            const payloadBytes =
+                Buffer.byteLength(emailBody, "utf8") +
+                Buffer.byteLength(mergedSubject, "utf8") +
+                campaignAttachmentsBytes +
+                (pdfRef ? base64Size(pdfRef.size) : 0);
+
             prepared.push({
                 recipient,
                 message: {
@@ -224,6 +264,8 @@ async function sendEmailBatch_(
                         "X-Recipient-ID": recipient.id,
                     },
                 },
+                pdfRef,
+                payloadBytes,
             });
         } catch (err) {
             await emit([
@@ -236,25 +278,87 @@ async function sendEmailBatch_(
         }
     }
 
-    // Phase 2: send in chunks of 20 via Microsoft Graph $batch. Graph caps $batch
-    // at 20 sub-requests per call; per-item 429/5xx retries are handled inside
-    // sendEmailBatch.
-    const SUB_BATCH = 20;
+    // Phase 2: send via Microsoft Graph $batch. The payload-aware chunker enforces
+    // BOTH Graph's ≤20 sub-request cap AND a ~3 MB cumulative-payload budget, so
+    // once each message carries its own invoice PDF, larger PDFs simply mean fewer
+    // messages per chunk (#69). Per-item 429/5xx retries are handled inside
+    // sendEmailBatch; IncomingBytes throttling is expected and accepted.
     const interBatchDelayMs = Math.max(
         0,
         parseInt(process.env.GRAPH_EMAIL_INTER_BATCH_DELAY_MS ?? "200", 10) || 0
     );
 
-    for (let i = 0; i < prepared.length; i += SUB_BATCH) {
-        const slice = prepared.slice(i, i + SUB_BATCH);
+    const chunks = chunkByPayload(prepared, (p) => p.payloadBytes, {
+        maxCount: MAX_BATCH_SUBREQUESTS,
+        maxBytes: MAX_BATCH_PAYLOAD_BYTES,
+    });
+
+    // Fetch one recipient's invoice-PDF bytes from Convex storage and base64-inline
+    // them onto its message as a Graph fileAttachment. Reverses the old
+    // "resolve attachments once per batch" optimisation deliberately: the file is
+    // now per-recipient. Returns false if the fetch fails so the caller can settle
+    // that recipient `failed` rather than send an attachment-less invoice email.
+    const attachRecipientPdf = async (item: PreparedSend): Promise<boolean> => {
+        if (!item.pdfRef) return true; // no PDF for this recipient (e.g. non-upload campaign)
+        try {
+            const fileUrl = await ctx.runQuery(internal.files.getDownloadUrlInternal, {
+                storageId: item.pdfRef.storageId,
+            });
+            if (!fileUrl) throw new Error("No download URL for stored invoice PDF");
+            const response = await fetch(fileUrl);
+            if (!response.ok) throw new Error(`Storage fetch ${response.status}`);
+            const arrayBuffer = await response.arrayBuffer();
+            const contentBase64 = Buffer.from(arrayBuffer).toString("base64");
+            item.message.attachments = [
+                ...(item.message.attachments ?? []),
+                {
+                    name: `invoice-${item.recipient.id}.pdf`,
+                    contentType: "application/pdf",
+                    contentBase64,
+                    isInline: false,
+                },
+            ];
+            return true;
+        } catch (err) {
+            console.error(`Failed to fetch invoice PDF for ${item.recipient.id}:`, err);
+            return false;
+        }
+    };
+
+    for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+        const chunk = chunks[chunkIdx];
+
+        // Per-recipient storage fetches are parallelised WITHIN the chunk (#69):
+        // resolve every recipient's PDF concurrently, then settle any fetch failure
+        // `failed` and drop it — it must never be handed to Graph without its
+        // invoice attached. Doing this before markAttempted keeps the durable
+        // marker landing immediately before the send, covering only recipients
+        // actually sent.
+        const attachResults = await Promise.all(chunk.map((item) => attachRecipientPdf(item)));
+        const slice: PreparedSend[] = [];
+        for (let k = 0; k < chunk.length; k++) {
+            if (attachResults[k]) {
+                slice.push(chunk[k]);
+            } else {
+                await emit([
+                    {
+                        recipientId: chunk[k].recipient.id,
+                        success: false,
+                        error: "Failed to fetch invoice PDF from storage",
+                    },
+                ]);
+            }
+        }
+        if (slice.length === 0) continue;
 
         // Durably mark this chunk `attempted` BEFORE handing it to Graph (PRD #55
         // / #58). A worker crash after this point but before the chunk's response
-        // is settled leaves at most these ≤20 recipients in `attempted` — the
+        // is settled leaves at most this chunk's recipients in `attempted` — the
         // eligibility rule (#56) then declines to auto-resend them, bounding the
         // blast radius of a crash to one chunk instead of a mass re-send. The
-        // chunk holds only validated recipients; pre-flight invalids were recorded
-        // `failed` in phase 1 and never reach here.
+        // chunk holds only validated recipients whose PDF fetched cleanly;
+        // pre-flight invalids and fetch failures were recorded `failed` and never
+        // reach here.
         await markAttempted(slice.map((p) => p.recipient.id));
 
         const sendResults = await sendEmailBatch(slice.map((p) => p.message));
@@ -302,7 +406,7 @@ async function sendEmailBatch_(
             }
         }
 
-        if (i + SUB_BATCH < prepared.length && interBatchDelayMs > 0) {
+        if (chunkIdx + 1 < chunks.length && interBatchDelayMs > 0) {
             await new Promise((resolve) => setTimeout(resolve, interBatchDelayMs));
         }
     }
