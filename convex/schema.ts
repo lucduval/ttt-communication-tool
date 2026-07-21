@@ -315,5 +315,20 @@ export default defineSchema({
     })
         .index("by_name", ["name"])
         .index("by_user", ["createdBy"]),
+
+    // Managed set of named legal disclaimers (PRD #74). Mirrors emailTemplates:
+    // named, org-shared, upsert-by-name seedable. Unlike templates, disclaimers
+    // are archived (a flag) rather than hard-deleted, so historical campaigns that
+    // referenced one stay meaningful — `archived` is optional (undefined = active),
+    // modelled on the shape of the existing `visibility` optional union above.
+    disclaimers: defineTable({
+        name: v.string(),
+        htmlContent: v.string(), // The disclaimer HTML, appended above the unsubscribe footer
+        isDefault: v.optional(v.boolean()), // Marks the suggested default in the picker
+        archived: v.optional(v.boolean()), // undefined treated as active; archived hides from the operator list
+        createdBy: v.string(), // Convex user _id
+        lastUpdatedAt: v.number(),
+    })
+        .index("by_name", ["name"]),
 });
 

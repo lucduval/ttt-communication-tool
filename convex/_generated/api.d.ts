@@ -24,6 +24,7 @@ import type * as channelSenders from "../channelSenders.js";
 import type * as crons from "../crons.js";
 import type * as dashboard from "../dashboard.js";
 import type * as debug_email from "../debug_email.js";
+import type * as disclaimers from "../disclaimers.js";
 import type * as emailTemplates from "../emailTemplates.js";
 import type * as engagementAudit from "../engagementAudit.js";
 import type * as files from "../files.js";
@@ -63,6 +64,7 @@ import type * as migrations_migrateCampaignContent from "../migrations/migrateCa
 import type * as notifications from "../notifications.js";
 import type * as opportunities from "../opportunities.js";
 import type * as personalisedHistory from "../personalisedHistory.js";
+import type * as seedDisclaimers from "../seedDisclaimers.js";
 import type * as seedTemplates from "../seedTemplates.js";
 import type * as test_graph_cid from "../test_graph_cid.js";
 import type * as test_graph_raw from "../test_graph_raw.js";
@@ -93,6 +95,7 @@ declare const fullApi: ApiFromModules<{
   crons: typeof crons;
   dashboard: typeof dashboard;
   debug_email: typeof debug_email;
+  disclaimers: typeof disclaimers;
   emailTemplates: typeof emailTemplates;
   engagementAudit: typeof engagementAudit;
   files: typeof files;
@@ -132,6 +135,7 @@ declare const fullApi: ApiFromModules<{
   notifications: typeof notifications;
   opportunities: typeof opportunities;
   personalisedHistory: typeof personalisedHistory;
+  seedDisclaimers: typeof seedDisclaimers;
   seedTemplates: typeof seedTemplates;
   test_graph_cid: typeof test_graph_cid;
   test_graph_raw: typeof test_graph_raw;
