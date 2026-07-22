@@ -61,6 +61,36 @@ describe("startCampaignImpl — email type persistence", () => {
     });
 });
 
+describe("startCampaignImpl — consultant CC column role (issue #83, PRD #78)", () => {
+    it("persists the ccAddress role on the campaign's columnRoles", async () => {
+        const { ctx, inserts } = createCtx();
+
+        await startCampaignImpl(ctx as any, {
+            ...baseArgs,
+            columnRoles: {
+                trackingKey: "Contact ID",
+                sendAddress: "Email",
+                ccAddress: "Consultant Email",
+            },
+        });
+
+        const campaign = inserts.find((i) => i.table === "campaigns");
+        expect(campaign?.doc.columnRoles?.ccAddress).toBe("Consultant Email");
+    });
+
+    it("stores no ccAddress when the operator does not designate a consultant column", async () => {
+        const { ctx, inserts } = createCtx();
+
+        await startCampaignImpl(ctx as any, {
+            ...baseArgs,
+            columnRoles: { trackingKey: "Contact ID", sendAddress: "Email" },
+        });
+
+        const campaign = inserts.find((i) => i.table === "campaigns");
+        expect(campaign?.doc.columnRoles?.ccAddress).toBeUndefined();
+    });
+});
+
 describe("startCampaignImpl — disclaimer snapshot (issue #77)", () => {
     it("snapshots the selected disclaimer's id and HTML onto the campaign content record", async () => {
         const { ctx, inserts } = createCtx({

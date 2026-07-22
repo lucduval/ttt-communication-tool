@@ -55,21 +55,36 @@ export interface UploadRolesResult {
 }
 
 /** Local role selection — header strings; `""` means "not yet designated". */
-type RoleSelection = { sendAddress: string; trackingKey: string; invoiceGuid: string };
+export type RoleSelection = {
+    sendAddress: string;
+    trackingKey: string;
+    invoiceGuid: string;
+    ccAddress: string;
+};
 
-const EMPTY_ROLES: RoleSelection = { sendAddress: "", trackingKey: "", invoiceGuid: "" };
+const EMPTY_ROLES: RoleSelection = {
+    sendAddress: "",
+    trackingKey: "",
+    invoiceGuid: "",
+    ccAddress: "",
+};
 
 /**
  * Best-effort initial guess for each role from the column headers, so a
  * conventional CRM export lands designated. The operator can always override.
  */
-function guessRoles(columns: DetectedColumn[]): RoleSelection {
+export function guessRoles(columns: DetectedColumn[]): RoleSelection {
     const find = (re: RegExp) => columns.find((c) => re.test(c.header))?.header ?? "";
     return {
         // "email" but not "emailoptin" etc. — a plain address column.
         sendAddress: find(/^e-?mail$|email address/i),
         trackingKey: find(/contact\s*id|tracking\s*key|contactid/i),
         invoiceGuid: find(/invoice.*(guid|id)/i),
+        // Prefer a consultant *email* header; fall back to a bare consultant/adviser
+        // column so a likely per-recipient CC is pre-filled for the operator (#83).
+        ccAddress:
+            find(/consultant.*e-?mail|e-?mail.*consultant/i) ||
+            find(/consultant|advis[eo]r/i),
     };
 }
 
@@ -117,6 +132,7 @@ export function UploadListPanel({
                 trackingKey: sel.trackingKey,
                 sendAddress: sel.sendAddress || undefined,
                 invoiceGuid: sel.invoiceGuid || undefined,
+                ccAddress: sel.ccAddress || undefined,
             };
             const prepared = prepareUploadForSend(cols, persisted, { placeholders });
             if (prepared.status !== "ok" || !prepared.report) {
@@ -217,7 +233,7 @@ export function UploadListPanel({
                 </p>
                 <p className="text-xs text-gray-500">
                     The tool reads back every column. Designate which columns are the send address,
-                    the tracking key, and the invoice below — the rest are available as{" "}
+                    the tracking key, the invoice, and the consultant CC below — the rest are available as{" "}
                     <span className="font-mono">{"{column}"}</span> merge variables.
                 </p>
             </div>
@@ -280,6 +296,7 @@ function RoleDesignation({
                       trackingKey: roles.trackingKey,
                       sendAddress: roles.sendAddress || undefined,
                       invoiceGuid: roles.invoiceGuid || undefined,
+                      ccAddress: roles.ccAddress || undefined,
                   },
                   { placeholders },
               )
@@ -314,6 +331,13 @@ function RoleDesignation({
                 value={roles.invoiceGuid}
                 columns={columns.columns}
                 onChange={(h) => onRole("invoiceGuid", h)}
+            />
+            <RoleSelect
+                label="Consultant CC (optional)"
+                required={false}
+                value={roles.ccAddress}
+                columns={columns.columns}
+                onChange={(h) => onRole("ccAddress", h)}
             />
 
             {requiredMissing && (

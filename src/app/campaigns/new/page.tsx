@@ -1033,6 +1033,7 @@ export default function NewCampaignPage() {
                               // stored shape is string | undefined, so coerce here.
                               sendAddress: columnRoles.sendAddress ?? undefined,
                               invoiceGuid: columnRoles.invoiceGuid ?? undefined,
+                              ccAddress: columnRoles.ccAddress ?? undefined,
                           }
                         : undefined,
                 createDynamicsActivity: audience === "clients",
