@@ -249,27 +249,30 @@ export const processEmailBatch = internalAction({
  */
 export const logEmailBatchToCRM = internalAction({
     args: {
-        entries: v.array(
-            v.object({
-                recipientId: v.string(),
-                subject: v.string(),
-                body: v.string(),
-            })
-        ),
+        // The subject and body are batch-wide constants (see channelSenders'
+        // sendEmailBatch_): the same email subject and stored html body for every
+        // recipient. Passing them once, plus a flat list of recipient ids, keeps
+        // this scheduled action's arguments small — the previous per-recipient
+        // {recipientId, subject, body} array scaled the (multi-KB) body by the
+        // batch size and overflowed the scheduler's 16 MiB / node action's 5 MiB
+        // argument limit on large batches.
+        recipientIds: v.array(v.string()),
+        subject: v.string(),
+        body: v.string(),
     },
     handler: async (_ctx, args) => {
         const { logEmailActivity } = await import("./lib/dynamics_logging");
 
-        for (const entry of args.entries) {
+        for (const recipientId of args.recipientIds) {
             const maxAttempts = 3;
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
                 try {
-                    await logEmailActivity(entry.recipientId, entry.subject, entry.body);
+                    await logEmailActivity(recipientId, args.subject, args.body);
                     break;
                 } catch (err) {
                     if (attempt === maxAttempts) {
                         console.error(
-                            `CRM log failed after ${maxAttempts} attempts for ${entry.recipientId}:`,
+                            `CRM log failed after ${maxAttempts} attempts for ${recipientId}:`,
                             err
                         );
                     } else {

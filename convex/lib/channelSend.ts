@@ -4,6 +4,11 @@ import type { Id } from "../_generated/dataModel";
 import { batchProcessorFor, handleBatchError, type Channel } from "./channelDispatch";
 import { shouldBeat } from "./batchLease";
 import { eligibleRecipients } from "./sendEligibility";
+import { isTooManyWrites, withWriteRetry } from "./writeRetry";
+
+// Re-exported for existing importers/tests that reach for the write-rate helpers
+// through the driver module.
+export { isTooManyWrites, withWriteRetry };
 
 /**
  * One per-recipient outcome streamed back to the Channel Send driver via `emit`.
@@ -85,23 +90,6 @@ export interface ChannelSender {
 export const FLUSH_INTERVAL = 25;
 
 /**
- * Backoff schedule for a flush that trips Convex's deployment-wide write-rate
- * ceiling (`TooManyWrites`, 4 MiB/s). Retrying the *same* buffer after a short,
- * growing pause both (a) lets a transient rate-limit window pass so the campaign
- * does not lose a batch, and (b) reactively paces aggregate write throughput:
- * when concurrent workers/webhooks have saturated the ceiling, each flusher backs
- * off, spreading writes out instead of all hammering the wall at once. Sized to
- * stay well inside Convex's ~10-min action limit even if every attempt is used.
- */
-export const FLUSH_MAX_RETRIES = 5;
-export const FLUSH_BACKOFF_BASE_MS = 250;
-
-/** Convex surfaces the deployment write-rate breach as a `TooManyWrites` error. */
-export function isTooManyWrites(err: unknown): boolean {
-    return err instanceof Error && /too\s*many\s*writes/i.test(err.message);
-}
-
-/**
  * The Channel Send driver. Owns the whole batch lifecycle independent of channel:
  * the paused-campaign short-circuit, fetching the next pending batch, claiming it
  * with the idempotency guard, buffering + flushing per-recipient results every
@@ -147,9 +135,13 @@ export async function runChannelSend(
         return;
     }
 
-    const { acquired } = await ctx.runMutation(internal.campaignBatches.markBatchProcessing, {
-        batchId: batch._id,
-    });
+    const { acquired } = await withWriteRetry(
+        () =>
+            ctx.runMutation(internal.campaignBatches.markBatchProcessing, {
+                batchId: batch._id,
+            }),
+        sleep
+    );
     if (!acquired) {
         // Another parallel worker claimed this batch. Reschedule self to pick up
         // the next available batch, keeping the worker pool stable. This is the
@@ -179,19 +171,23 @@ export async function runChannelSend(
     const recipientById = new Map(batch.recipients.map((r) => [r.id, r]));
     const markAttempted: MarkAttemptedFn = async (recipientIds) => {
         if (recipientIds.length === 0) return;
-        await ctx.runMutation(internal.messages.markAttemptedBatch, {
-            campaignId,
-            channel: sender.channel,
-            recipients: recipientIds.map((id) => {
-                const r = recipientById.get(id);
-                return {
-                    recipientId: id,
-                    recipientEmail: r?.email,
-                    recipientPhone: r?.phone,
-                    recipientName: r?.name ?? "",
-                };
-            }),
-        });
+        await withWriteRetry(
+            () =>
+                ctx.runMutation(internal.messages.markAttemptedBatch, {
+                    campaignId,
+                    channel: sender.channel,
+                    recipients: recipientIds.map((id) => {
+                        const r = recipientById.get(id);
+                        return {
+                            recipientId: id,
+                            recipientEmail: r?.email,
+                            recipientPhone: r?.phone,
+                            recipientName: r?.name ?? "",
+                        };
+                    }),
+                }),
+            sleep
+        );
     };
 
     let successCount = 0;
@@ -216,19 +212,11 @@ export async function runChannelSend(
         // clear the buffer once the write actually lands. A non-rate-limit error
         // (or an exhausted retry budget) propagates so the caller's catch can run
         // handleBatchError — the batch is never silently dropped.
-        for (let attempt = 0; ; attempt++) {
-            try {
-                await ctx.runMutation(internal.messages.updateStatusBatch, {
-                    campaignId,
-                    updates,
-                });
-                buffer.length = 0;
-                return;
-            } catch (err) {
-                if (!isTooManyWrites(err) || attempt >= FLUSH_MAX_RETRIES) throw err;
-                await sleep(FLUSH_BACKOFF_BASE_MS * 2 ** attempt);
-            }
-        }
+        await withWriteRetry(
+            () => ctx.runMutation(internal.messages.updateStatusBatch, { campaignId, updates }),
+            sleep
+        );
+        buffer.length = 0;
     };
 
     // Serialise emit so adapters that send concurrently (e.g. WhatsApp's
@@ -251,9 +239,13 @@ export async function runChannelSend(
             const t = now();
             if (shouldBeat(lastBeatAt, t)) {
                 lastBeatAt = t;
-                await ctx.runMutation(internal.campaignBatches.beatBatch, {
-                    batchId: batch._id,
-                });
+                await withWriteRetry(
+                    () =>
+                        ctx.runMutation(internal.campaignBatches.beatBatch, {
+                            batchId: batch._id,
+                        }),
+                    sleep
+                );
             }
         });
         return chain;
@@ -272,9 +264,14 @@ export async function runChannelSend(
         // Final flush of whatever is left in the buffer.
         await flush();
 
-        const { hasMoreBatches } = await ctx.runMutation(
-            internal.campaignBatches.markBatchComplete,
-            { batchId: batch._id, successCount, failedCount }
+        const { hasMoreBatches } = await withWriteRetry(
+            () =>
+                ctx.runMutation(internal.campaignBatches.markBatchComplete, {
+                    batchId: batch._id,
+                    successCount,
+                    failedCount,
+                }),
+            sleep
         );
 
         if (halt) {
@@ -302,6 +299,7 @@ export async function runChannelSend(
             batchId: batch._id,
             err,
             retryDelayMs: sender.errorRetryDelayMs,
+            sleep,
         });
     }
 }

@@ -1,6 +1,7 @@
 import { internal } from "../_generated/api";
 import type { ActionCtx } from "../_generated/server";
 import type { Id } from "../_generated/dataModel";
+import { withWriteRetry } from "./writeRetry";
 
 /** The three send channels a campaign can use. */
 export type Channel = "email" | "whatsapp" | "personalised";
@@ -39,15 +40,22 @@ export async function handleBatchError(
         batchId: Id<"campaignBatches">;
         err: unknown;
         retryDelayMs: number;
+        /** Injectable so tests exercise the write-rate backoff without real wall-clock. */
+        sleep?: (ms: number) => Promise<void>;
     }
 ): Promise<void> {
     console.error("Batch processing error:", args.err);
-    const { hasMoreBatches } = await ctx.runMutation(
-        internal.campaignBatches.markBatchFailed,
-        {
-            batchId: args.batchId,
-            errorMessage: args.err instanceof Error ? args.err.message : "Unknown error",
-        }
+    const sleep = args.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    // The error path itself must survive the write wall: if this mark-failed also
+    // trips `TooManyWrites` and throws, the batch is stranded in `processing` with
+    // no successor. Back off and retry it like every other driver write.
+    const { hasMoreBatches } = await withWriteRetry(
+        () =>
+            ctx.runMutation(internal.campaignBatches.markBatchFailed, {
+                batchId: args.batchId,
+                errorMessage: args.err instanceof Error ? args.err.message : "Unknown error",
+            }),
+        sleep
     );
 
     if (hasMoreBatches) {

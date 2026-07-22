@@ -158,6 +158,68 @@ describe("runChannelSend write-rate-limit resilience", () => {
         expect(scheduled).toEqual([{ ms: 10000, name: "campaignQueue:processEmailBatch" }]);
     });
 
+    it("retries a non-flush driver write (markBatchComplete) that trips TooManyWrites", async () => {
+        // Every driver write competes for the one 4 MiB/s ceiling, not just the
+        // flush. markBatchComplete tripping TooManyWrites must back off and retry —
+        // NOT abort the batch into the error path.
+        const scheduled: Array<{ ms: number; name: string }> = [];
+        const mutations: string[] = [];
+        let completeCalls = 0;
+        const slept: number[] = [];
+
+        const ctx = {
+            runQuery: vi.fn(async (ref: unknown) => {
+                switch (getFunctionName(ref as any)) {
+                    case "campaignBatches:getCampaign":
+                        return { _id: "c1", status: "active" };
+                    case "campaignBatches:getNextPendingBatchInternal":
+                        return { _id: "batch-1", recipients: [] };
+                    case "messages:getExistingMessageStatuses":
+                        return [];
+                    default:
+                        return undefined;
+                }
+            }),
+            runMutation: vi.fn(async (ref: unknown) => {
+                const name = getFunctionName(ref as any);
+                mutations.push(name);
+                if (name === "campaignBatches:markBatchProcessing") return { acquired: true };
+                if (name === "campaignBatches:markBatchComplete") {
+                    // Trip the write wall on the first attempt, land on the retry.
+                    if (completeCalls++ === 0) throw new TooManyWritesError();
+                    return { hasMoreBatches: false };
+                }
+                if (name === "campaignBatches:markBatchFailed") return { hasMoreBatches: false };
+                return undefined;
+            }),
+            runAction: vi.fn(async () => undefined),
+            scheduler: {
+                runAfter: vi.fn(async (ms: number, ref: unknown) => {
+                    scheduled.push({ ms, name: getFunctionName(ref as any) });
+                }),
+            },
+        };
+
+        const sender = fakeSender(async (_c, _camp, _b, emit: EmitFn) => {
+            await emit([{ recipientId: "a", success: true }]);
+            return {};
+        });
+
+        await runChannelSend(ctx as any, {
+            campaignId: "c1" as any,
+            sender,
+            sleep: async (ms) => {
+                slept.push(ms);
+            },
+        });
+
+        // markBatchComplete was retried (called twice) and eventually succeeded;
+        // the batch never fell into the mark-failed error path.
+        expect(completeCalls).toBe(2);
+        expect(slept.length).toBeGreaterThanOrEqual(1);
+        expect(mutations).not.toContain("campaignBatches:markBatchFailed");
+    });
+
     it("catch-path flush that re-throws TooManyWrites still reaches handleBatchError", async () => {
         // Adapter throws *after* emitting, so the catch path runs. Its
         // partial-progress flush also trips the write wall and exhausts retries —
