@@ -41,3 +41,24 @@ describe("guessRoles — consultant CC auto-detect", () => {
         expect(roles.trackingKey).toBe("Contact ID");
     });
 });
+
+describe("guessRoles — phone auto-detect (WhatsApp destination, issue #85)", () => {
+    it.each(["Phone", "Mobile", "Cell", "MSISDN", "WhatsApp", "Mobile Number", "Cell Phone"])(
+        "pre-fills a %s header as the phone role",
+        (header) => {
+            const roles = guessRoles(cols("Contact ID", header));
+            expect(roles.phone).toBe(header);
+        },
+    );
+
+    it("leaves the phone role blank when no mobile-number column is present", () => {
+        const roles = guessRoles(cols("Email", "Contact ID", "Invoice GUID"));
+        expect(roles.phone).toBe("");
+    });
+
+    it("does not populate the send address from a phone column, nor vice versa", () => {
+        const roles = guessRoles(cols("Contact ID", "Mobile"));
+        expect(roles.phone).toBe("Mobile");
+        expect(roles.sendAddress).toBe("");
+    });
+});

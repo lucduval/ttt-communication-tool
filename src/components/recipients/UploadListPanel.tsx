@@ -60,6 +60,7 @@ export type RoleSelection = {
     trackingKey: string;
     invoiceGuid: string;
     ccAddress: string;
+    phone: string;
 };
 
 const EMPTY_ROLES: RoleSelection = {
@@ -67,6 +68,7 @@ const EMPTY_ROLES: RoleSelection = {
     trackingKey: "",
     invoiceGuid: "",
     ccAddress: "",
+    phone: "",
 };
 
 /**
@@ -85,6 +87,9 @@ export function guessRoles(columns: DetectedColumn[]): RoleSelection {
         ccAddress:
             find(/consultant.*e-?mail|e-?mail.*consultant/i) ||
             find(/consultant|advis[eo]r/i),
+        // Common mobile-number headers — phone, mobile, cell, msisdn, whatsapp
+        // (#85). An absent phone column leaves this blank.
+        phone: find(/phone|mobile|cell|msisdn|whats\s*app/i),
     };
 }
 
@@ -133,6 +138,7 @@ export function UploadListPanel({
                 sendAddress: sel.sendAddress || undefined,
                 invoiceGuid: sel.invoiceGuid || undefined,
                 ccAddress: sel.ccAddress || undefined,
+                phone: sel.phone || undefined,
             };
             const prepared = prepareUploadForSend(cols, persisted, { placeholders });
             if (prepared.status !== "ok" || !prepared.report) {
@@ -297,6 +303,7 @@ function RoleDesignation({
                       sendAddress: roles.sendAddress || undefined,
                       invoiceGuid: roles.invoiceGuid || undefined,
                       ccAddress: roles.ccAddress || undefined,
+                      phone: roles.phone || undefined,
                   },
                   { placeholders },
               )
@@ -338,6 +345,13 @@ function RoleDesignation({
                 value={roles.ccAddress}
                 columns={columns.columns}
                 onChange={(h) => onRole("ccAddress", h)}
+            />
+            <RoleSelect
+                label="Phone (WhatsApp destination)"
+                required={false}
+                value={roles.phone}
+                columns={columns.columns}
+                onChange={(h) => onRole("phone", h)}
             />
 
             {requiredMissing && (

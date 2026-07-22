@@ -369,5 +369,21 @@ describe("recipientSelection — upload shape (#65)", () => {
                 toCampaignArgs(sel, { channel: "email" }),
             );
         });
+
+        it("carries a WhatsApp recipient's phone through to the send path unchanged (#85)", () => {
+            // An uploaded WhatsApp recipient materialises with a phone destination
+            // (no email); the projection must hand it straight through so the
+            // sender's phone lookup + E.164 normalisation resolve.
+            const wa: CampaignRecipient = {
+                id: "33333333-3333-3333-3333-333333333333",
+                name: "",
+                phone: "+27821234567",
+                variables: JSON.stringify({ "1": "Alice" }),
+            };
+            const args = toCampaignArgs(uploadSelection([wa]), { channel: "whatsapp" });
+            expect(args.recipients).toEqual([wa]);
+            expect(args.recipients![0].phone).toBe("+27821234567");
+            expect(args.recipients![0].email).toBeUndefined();
+        });
     });
 });

@@ -68,6 +68,10 @@ export default defineSchema({
             trackingKey: v.string(),
             invoiceGuid: v.optional(v.string()),
             ccAddress: v.optional(v.string()),
+            // The mobile-number column — the WhatsApp send destination for an
+            // uploaded recipient (PRD #84, issue #85). Additive and optional, so
+            // existing campaigns are unaffected.
+            phone: v.optional(v.string()),
         })),
         // Per-campaign WhatsApp variable→column mapping for a source-of-truth
         // uploaded-file campaign (PRD prd-bad-debt-excel-campaign.md, issue #70).

@@ -4,6 +4,7 @@ import {
     materialiseRecipients,
     resolveColumnRoles,
     prepareUploadForSend,
+    toUploadRecipient,
     type ColumnRoles,
 } from "./columnRoles";
 
@@ -74,7 +75,7 @@ describe("parseUploadedColumns (retain every column)", () => {
 describe("materialiseRecipients (tracking-key identity + variables bag)", () => {
     // A representative bad-debt export: name, email (send address), contact GUID
     // (tracking key), invoice GUID, and pre-formatted merge columns.
-    const roles: ColumnRoles = { sendAddress: 1, trackingKey: 2, invoiceGuid: 3, ccAddress: null };
+    const roles: ColumnRoles = { sendAddress: 1, trackingKey: 2, invoiceGuid: 3, ccAddress: null, phone: null };
     const uploaded = parseUploadedColumns([
         ["Full Name", "Email", "Contact", "InvoiceGuid", "Amount"],
         ["Alice", "alice@example.com", A, INV_A, "R1,200.00"],
@@ -96,6 +97,7 @@ describe("materialiseRecipients (tracking-key identity + variables bag)", () => 
             trackingKey: 1,
             invoiceGuid: null,
             ccAddress: null,
+            phone: null,
         });
         expect(recipients[0].recipientId).toBe(A);
     });
@@ -134,6 +136,7 @@ describe("materialiseRecipients (tracking-key identity + variables bag)", () => 
             trackingKey: 0,
             invoiceGuid: null,
             ccAddress: null,
+            phone: null,
         });
         expect(recipients[0].variables.Amount).toBe("  R1,200.00  ");
     });
@@ -144,9 +147,11 @@ describe("materialiseRecipients (tracking-key identity + variables bag)", () => 
             trackingKey: 2,
             invoiceGuid: null,
             ccAddress: null,
+            phone: null,
         });
         expect(recipients[0].sendAddress).toBeNull();
         expect(recipients[0].invoiceGuid).toBeNull();
+        expect(recipients[0].phone).toBeNull();
     });
 });
 
@@ -164,7 +169,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: 1, trackingKey: 2, invoiceGuid: 3, ccAddress: null },
+            roles: { sendAddress: 1, trackingKey: 2, invoiceGuid: 3, ccAddress: null, phone: null },
         });
     });
 
@@ -172,7 +177,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         const result = resolveColumnRoles(columns, { trackingKey: "Contact" });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null },
+            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null, phone: null },
         });
         expect(
             resolveColumnRoles(columns, {
@@ -183,7 +188,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
             }),
         ).toEqual({
             status: "ok",
-            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null },
+            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null, phone: null },
         });
     });
 
@@ -197,7 +202,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: 2, trackingKey: 1, invoiceGuid: null, ccAddress: null },
+            roles: { sendAddress: 2, trackingKey: 1, invoiceGuid: null, ccAddress: null, phone: null },
         });
     });
 
@@ -205,7 +210,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         const result = resolveColumnRoles(columns, { trackingKey: "  Contact  " });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null },
+            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null, phone: null },
         });
     });
 
@@ -237,7 +242,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         const result = resolveColumnRoles(dupes, { trackingKey: "Contact" });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: null, trackingKey: 0, invoiceGuid: null, ccAddress: null },
+            roles: { sendAddress: null, trackingKey: 0, invoiceGuid: null, ccAddress: null, phone: null },
         });
     });
 
@@ -252,7 +257,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: 0, trackingKey: 1, invoiceGuid: null, ccAddress: 2 },
+            roles: { sendAddress: 0, trackingKey: 1, invoiceGuid: null, ccAddress: 2, phone: null },
         });
     });
 
@@ -261,7 +266,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         for (const ccAddress of [undefined, null, "   "]) {
             expect(resolveColumnRoles(columns, { trackingKey: "Contact", ccAddress })).toEqual({
                 status: "ok",
-                roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null },
+                roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null, phone: null },
             });
         }
     });
@@ -317,7 +322,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
 });
 
 describe("materialiseRecipients (held rows — the single-invoice hard gate)", () => {
-    const roles: ColumnRoles = { sendAddress: 1, trackingKey: 2, invoiceGuid: null, ccAddress: null };
+    const roles: ColumnRoles = { sendAddress: 1, trackingKey: 2, invoiceGuid: null, ccAddress: null, phone: null };
 
     it("holds a row whose tracking-key cell is blank", () => {
         const uploaded = parseUploadedColumns([
@@ -492,5 +497,150 @@ describe("prepareUploadForSend (materialised rows → send payload — AC #5)", 
             "duplicate-tracking-key",
             "missing-tracking-key",
         ]);
+    });
+});
+
+describe("phone column role (WhatsApp destination — PRD #84, issue #85)", () => {
+    it("resolves a designated phone header to its column index", () => {
+        const columns = parseUploadedColumns([["Contact", "Mobile"]]).columns;
+        const result = resolveColumnRoles(columns, {
+            trackingKey: "Contact",
+            phone: "Mobile",
+        });
+        expect(result).toEqual({
+            status: "ok",
+            roles: { sendAddress: null, trackingKey: 0, invoiceGuid: null, ccAddress: null, phone: 1 },
+        });
+    });
+
+    it("leaves the phone role null when its header is unset (absent, null, or blank)", () => {
+        const columns = parseUploadedColumns([["Contact", "Mobile"]]).columns;
+        for (const phone of [undefined, null, "   "]) {
+            expect(resolveColumnRoles(columns, { trackingKey: "Contact", phone })).toEqual({
+                status: "ok",
+                roles: { sendAddress: null, trackingKey: 0, invoiceGuid: null, ccAddress: null, phone: null },
+            });
+        }
+    });
+
+    it("reports a designated-but-missing phone header as unresolved, last in role order", () => {
+        const columns = parseUploadedColumns([["Email", "Contact"]]).columns;
+        const result = resolveColumnRoles(columns, {
+            sendAddress: "EmailAddress",
+            trackingKey: "Contact",
+            phone: "Mobile",
+        });
+        expect(result).toEqual({
+            status: "unresolved",
+            unresolved: [
+                { role: "sendAddress", header: "EmailAddress" },
+                { role: "phone", header: "Mobile" },
+            ],
+        });
+    });
+
+    it("carries the trimmed phone cell onto the materialised recipient", () => {
+        const uploaded = parseUploadedColumns([
+            ["Contact", "Mobile"],
+            [A, "  +27 82 123 4567  "],
+        ]);
+        const resolved = resolveColumnRoles(uploaded.columns, {
+            trackingKey: "Contact",
+            phone: "Mobile",
+        });
+        expect(resolved.status).toBe("ok");
+        if (resolved.status !== "ok") return;
+        const { recipients } = materialiseRecipients(uploaded, resolved.roles);
+        expect(recipients[0].phone).toBe("+27 82 123 4567");
+    });
+
+    it("survives the persisted round-trip (index ↔ header) for the phone role", () => {
+        const uploaded = parseUploadedColumns([
+            ["Amount", "Mobile", "Contact"], // re-exported in a different order
+            ["R1,200.00", "+27821234567", A],
+        ]);
+        const resolved = resolveColumnRoles(uploaded.columns, {
+            trackingKey: "Contact",
+            phone: "Mobile",
+        });
+        expect(resolved.status).toBe("ok");
+        if (resolved.status !== "ok") return;
+        expect(resolved.roles.phone).toBe(1);
+        const { recipients } = materialiseRecipients(uploaded, resolved.roles);
+        expect(recipients[0].phone).toBe("+27821234567");
+    });
+
+    it("projects the phone cell into the send-payload recipient's phone field", () => {
+        const uploaded = parseUploadedColumns([
+            ["Contact", "Mobile"],
+            [A, "+27821234567"],
+        ]);
+        const resolved = resolveColumnRoles(uploaded.columns, {
+            trackingKey: "Contact",
+            phone: "Mobile",
+        });
+        if (resolved.status !== "ok") throw new Error("expected ok");
+        const { recipients } = materialiseRecipients(uploaded, resolved.roles);
+        expect(toUploadRecipient(recipients[0]).phone).toBe("+27821234567");
+    });
+
+    it("omits the phone slot when no phone role is designated", () => {
+        const uploaded = parseUploadedColumns([
+            ["Email", "Contact"],
+            ["alice@example.com", A],
+        ]);
+        const resolved = resolveColumnRoles(uploaded.columns, {
+            sendAddress: "Email",
+            trackingKey: "Contact",
+        });
+        if (resolved.status !== "ok") throw new Error("expected ok");
+        const { recipients } = materialiseRecipients(uploaded, resolved.roles);
+        expect(toUploadRecipient(recipients[0]).phone).toBeUndefined();
+    });
+
+    it("resolves each recipient's number through prepareUploadForSend for a WhatsApp upload (AC #8)", () => {
+        // A WhatsApp export: identity + phone, no email/send-address role.
+        const uploaded = parseUploadedColumns([
+            ["Contact", "Mobile", "Amount"],
+            [A, "+27821234567", "R1,200.00"],
+            [B, "+27829876543", "R980.00"],
+        ]);
+        const result = prepareUploadForSend(uploaded, {
+            trackingKey: "Contact",
+            phone: "Mobile",
+        });
+        if (result.status !== "ok") throw new Error("expected ok");
+        expect(result.recipients.map((r) => r.phone)).toEqual([
+            "+27821234567",
+            "+27829876543",
+        ]);
+        // No send-address role → no email slot; the phone is the destination.
+        expect(result.recipients.every((r) => r.email === undefined)).toBe(true);
+    });
+
+    it("keeps sendAddress (email) and phone distinct — designating one never populates the other", () => {
+        const uploaded = parseUploadedColumns([
+            ["Email", "Contact", "Mobile"],
+            ["alice@example.com", A, "+27821234567"],
+        ]);
+        // Email designated, phone not.
+        const emailOnly = resolveColumnRoles(uploaded.columns, {
+            sendAddress: "Email",
+            trackingKey: "Contact",
+        });
+        if (emailOnly.status !== "ok") throw new Error("expected ok");
+        const emailRecipient = toUploadRecipient(materialiseRecipients(uploaded, emailOnly.roles).recipients[0]);
+        expect(emailRecipient.email).toBe("alice@example.com");
+        expect(emailRecipient.phone).toBeUndefined();
+
+        // Phone designated, email not.
+        const phoneOnly = resolveColumnRoles(uploaded.columns, {
+            trackingKey: "Contact",
+            phone: "Mobile",
+        });
+        if (phoneOnly.status !== "ok") throw new Error("expected ok");
+        const phoneRecipient = toUploadRecipient(materialiseRecipients(uploaded, phoneOnly.roles).recipients[0]);
+        expect(phoneRecipient.phone).toBe("+27821234567");
+        expect(phoneRecipient.email).toBeUndefined();
     });
 });

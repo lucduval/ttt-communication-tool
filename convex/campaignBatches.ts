@@ -416,6 +416,9 @@ export const startCampaign = mutation({
                 invoiceGuid: v.optional(v.string()),
                 // Per-recipient consultant CC column (PRD #78, issues #79/#83).
                 ccAddress: v.optional(v.string()),
+                // Mobile-number column — the WhatsApp send destination (PRD #84,
+                // issue #85).
+                phone: v.optional(v.string()),
             }),
         ),
         // Per-campaign WhatsApp variable→column mapping for an uploaded-file

@@ -91,6 +91,36 @@ describe("startCampaignImpl — consultant CC column role (issue #83, PRD #78)",
     });
 });
 
+describe("startCampaignImpl — phone column role (issue #85, PRD #84)", () => {
+    it("persists the phone role on the campaign's columnRoles", async () => {
+        const { ctx, inserts } = createCtx();
+
+        await startCampaignImpl(ctx as any, {
+            ...baseArgs,
+            channel: "whatsapp",
+            columnRoles: {
+                trackingKey: "Contact ID",
+                phone: "Mobile",
+            },
+        });
+
+        const campaign = inserts.find((i) => i.table === "campaigns");
+        expect(campaign?.doc.columnRoles?.phone).toBe("Mobile");
+    });
+
+    it("stores no phone when the operator does not designate a mobile-number column", async () => {
+        const { ctx, inserts } = createCtx();
+
+        await startCampaignImpl(ctx as any, {
+            ...baseArgs,
+            columnRoles: { trackingKey: "Contact ID", sendAddress: "Email" },
+        });
+
+        const campaign = inserts.find((i) => i.table === "campaigns");
+        expect(campaign?.doc.columnRoles?.phone).toBeUndefined();
+    });
+});
+
 describe("startCampaignImpl — disclaimer snapshot (issue #77)", () => {
     it("snapshots the selected disclaimer's id and HTML onto the campaign content record", async () => {
         const { ctx, inserts } = createCtx({

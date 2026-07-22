@@ -18,6 +18,7 @@ function recipient(overrides: Partial<MaterialisedRecipient> = {}): Materialised
         recipientId: A,
         sendAddress: "alice@example.com",
         invoiceGuid: null,
+        phone: null,
         variables: { Amount: "R1,200.00", Email: "alice@example.com" },
         ...overrides,
     };

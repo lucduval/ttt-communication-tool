@@ -1034,6 +1034,7 @@ export default function NewCampaignPage() {
                               sendAddress: columnRoles.sendAddress ?? undefined,
                               invoiceGuid: columnRoles.invoiceGuid ?? undefined,
                               ccAddress: columnRoles.ccAddress ?? undefined,
+                              phone: columnRoles.phone ?? undefined,
                           }
                         : undefined,
                 createDynamicsActivity: audience === "clients",
