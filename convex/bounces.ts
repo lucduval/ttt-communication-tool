@@ -4,8 +4,24 @@ import { v } from "convex/values";
 import { action, internalMutation, internalAction } from "./_generated/server";
 import { internal, api } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
-import { getGraphAccessToken } from "./lib/graph_client";
+import { getGraphAccessToken, parseRetryAfter } from "./lib/graph_client";
 import { recomputeCampaignStats } from "./campaignBatches";
+
+/**
+ * Marking bounce NDRs as read is a per-message Graph PATCH. Firing them back to
+ * back with no backoff is what tripped Graph's mailbox throttle (HTTP 429) — the
+ * "Failed to mark message … as read: 429" flood. `MARK_READ_PACING_MS` spaces the
+ * sequential marks so we stay under the throttle in the first place; the
+ * per-request retry below then absorbs any 429 that still slips through by
+ * honouring the server's `Retry-After`. The honoured wait is capped so a single
+ * message can never stall the whole action past Convex's ~10-min limit.
+ */
+const MARK_READ_PACING_MS = 100;
+const MARK_READ_MAX_ATTEMPTS = 5;
+const MARK_READ_BACKOFF_BASE_MS = 500;
+const MARK_READ_MAX_RETRY_AFTER_MS = 30_000;
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * Process bounced emails (NDRs) from the shared mailbox.
@@ -145,10 +161,14 @@ export const processBounces = internalAction({
                 bounces: bouncesForMutation,
             });
 
-            // Mark processed messages as read
-            // We need to use the correct mailbox for each message
-            for (const bounce of allBouncedRecipients) {
+            // Mark processed messages as read, pacing the marks so we don't trip
+            // Graph's mailbox throttle. We need the correct mailbox for each message.
+            for (let i = 0; i < allBouncedRecipients.length; i++) {
+                const bounce = allBouncedRecipients[i];
                 await markMessageAsRead(token, bounce.mailbox, bounce.messageId);
+                if (i + 1 < allBouncedRecipients.length) {
+                    await defaultSleep(MARK_READ_PACING_MS);
+                }
             }
         }
 
@@ -159,24 +179,59 @@ export const processBounces = internalAction({
     },
 });
 
-async function markMessageAsRead(token: string, mailbox: string, messageId: string) {
-    try {
-        const url = `https://graph.microsoft.com/v1.0/users/${mailbox}/messages/${messageId}`;
-        const response = await fetch(url, {
-            method: "PATCH",
-            headers: {
-                Authorization: `Bearer ${token}`,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ isRead: true }),
-        });
+/**
+ * Mark one bounce NDR as read, retrying on Graph throttling (429) and transient
+ * 5xx with exponential backoff that honours the server's `Retry-After`. Never
+ * throws — a message that still can't be marked after the retry budget is logged
+ * and skipped (it will simply be re-seen next run), so it can't abort the action.
+ * `sleep` is injectable so tests exercise the backoff without real wall-clock.
+ */
+export async function markMessageAsRead(
+    token: string,
+    mailbox: string,
+    messageId: string,
+    sleep: (ms: number) => Promise<void> = defaultSleep
+): Promise<boolean> {
+    const url = `https://graph.microsoft.com/v1.0/users/${mailbox}/messages/${messageId}`;
 
-        if (!response.ok) {
-            console.error(`Failed to mark message ${messageId} as read in ${mailbox}: ${response.status}`);
+    for (let attempt = 1; attempt <= MARK_READ_MAX_ATTEMPTS; attempt++) {
+        try {
+            const response = await fetch(url, {
+                method: "PATCH",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ isRead: true }),
+            });
+
+            if (response.ok) return true;
+
+            const retryable = response.status === 429 || response.status >= 500;
+            if (retryable && attempt < MARK_READ_MAX_ATTEMPTS) {
+                const retryAfterSec = parseRetryAfter(response.headers.get("Retry-After"));
+                const backoffMs =
+                    retryAfterSec != null
+                        ? Math.min(retryAfterSec * 1000, MARK_READ_MAX_RETRY_AFTER_MS)
+                        : MARK_READ_BACKOFF_BASE_MS * 2 ** (attempt - 1);
+                await sleep(backoffMs);
+                continue;
+            }
+
+            console.error(
+                `Failed to mark message ${messageId} as read in ${mailbox}: ${response.status}`
+            );
+            return false;
+        } catch (error) {
+            if (attempt < MARK_READ_MAX_ATTEMPTS) {
+                await sleep(MARK_READ_BACKOFF_BASE_MS * 2 ** (attempt - 1));
+                continue;
+            }
+            console.error(`Error marking message ${messageId} as read in ${mailbox}:`, error);
+            return false;
         }
-    } catch (error) {
-        console.error(`Error marking message ${messageId} as read in ${mailbox}:`, error);
     }
+    return false;
 }
 
 /**

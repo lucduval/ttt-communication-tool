@@ -4,6 +4,7 @@ import { httpAction } from "./_generated/server";
 import { unsubscribeContact } from "./lib/dynamics_logging";
 import { isBot, verifyUrlSignature } from "./lib/tracking_utils";
 import { TTT_LOGO_PNG_BASE64 } from "./lib/logoData";
+import { withWriteRetry } from "./lib/writeRetry";
 
 
 
@@ -12,6 +13,12 @@ import { internal } from "./_generated/api";
 import { Id } from "./_generated/dataModel";
 
 const http = httpRouter();
+
+// Tracking writes (open/click) are best-effort and run inside the HTTP request
+// that serves the pixel/redirect, so their write-rate backoff is kept short — a
+// few quick retries to ride out a transient spike without holding the response.
+const TRACKING_WRITE_RETRIES = 4;
+const trackingSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
  * GET /image?id=<storageId>
@@ -29,7 +36,18 @@ http.route({
             return new Response("Missing id parameter", { status: 400 });
         }
 
-        const fileUrl = await ctx.storage.getUrl(storageId as Id<"_storage">);
+        // A malformed `id` (e.g. a stale or hand-edited link) makes
+        // `storage.getUrl` THROW an "Invalid storage ID" error, which surfaces as
+        // an uncaught 500. Guard it so a bad id returns a clean 400 instead of a
+        // server error — this endpoint is hit directly by email clients loading
+        // hosted campaign images, so it must degrade gracefully.
+        let fileUrl: string | null;
+        try {
+            fileUrl = await ctx.storage.getUrl(storageId as Id<"_storage">);
+        } catch {
+            console.warn(`Invalid storage id requested at /image: "${storageId}"`);
+            return new Response("Invalid image id", { status: 400 });
+        }
         if (!fileUrl) {
             return new Response("Image not found", { status: 404 });
         }
@@ -102,12 +120,21 @@ http.route({
         // Filter out bots and email security scanners to prevent inflated click counts
         if (!isBot(userAgent)) {
             try {
-                await ctx.runMutation(internal.tracking.logClick, {
-                    campaignId: campaignId as Id<"campaigns">,
-                    recipientId: recipientId,
-                    url: targetUrl,
-                    userAgent: userAgent || undefined,
-                });
+                // logClick patches the (potentially large) campaign doc to bump its
+                // unique-click counter, so a burst of clicks during an active send can
+                // trip Convex's write-rate ceiling. Back off and retry rather than drop
+                // the click; the redirect below still happens either way.
+                await withWriteRetry(
+                    () =>
+                        ctx.runMutation(internal.tracking.logClick, {
+                            campaignId: campaignId as Id<"campaigns">,
+                            recipientId: recipientId,
+                            url: targetUrl,
+                            userAgent: userAgent || undefined,
+                        }),
+                    trackingSleep,
+                    TRACKING_WRITE_RETRIES
+                );
             } catch (error) {
                 console.error("Failed to log click:", error);
             }
@@ -140,11 +167,20 @@ http.route({
             // Ignore bots and scanners to prevent premature opens
             if (!isBot(userAgent)) {
                 try {
-                    await ctx.runMutation(internal.tracking.logOpen, {
-                        campaignId: campaignId as Id<"campaigns">,
-                        recipientId: recipientId,
-                        userAgent: userAgent || undefined,
-                    });
+                    // logOpen patches the (potentially large) campaign doc to bump its
+                    // unique-open counter; a burst of opens during an active send can
+                    // trip Convex's write-rate ceiling ("Too many writes per second").
+                    // Back off and retry rather than dropping the open.
+                    await withWriteRetry(
+                        () =>
+                            ctx.runMutation(internal.tracking.logOpen, {
+                                campaignId: campaignId as Id<"campaigns">,
+                                recipientId: recipientId,
+                                userAgent: userAgent || undefined,
+                            }),
+                        trackingSleep,
+                        TRACKING_WRITE_RETRIES
+                    );
                 } catch (error) {
                     console.error("Failed to log open:", error);
                 }

@@ -96,7 +96,13 @@ async function sendEmailBatch_(
     // (`attempted`/`sent`/`delivered`/`failed`) is never here, so it is never
     // re-sent, while a fresh campaign's all-`pending` recipients all send.
 
-    const crmQueue: Array<{ recipientId: string; subject: string; body: string }> = [];
+    // The CRM activity subject/body are identical for every recipient in the
+    // batch (the campaign subject + stored html body — neither is merged per
+    // recipient for the CRM record), so we collect only the recipient ids here
+    // and hand the shared subject/body to the logging job ONCE. Duplicating the
+    // (multi-KB) body per recipient is what previously overflowed the scheduler's
+    // 16 MiB / node action's 5 MiB argument limit on large batches.
+    const crmRecipientIds: string[] = [];
 
     const { sendEmailBatch } = await import("./lib/graph_client");
     const { wrapEmail } = await import("./lib/emailLayout");
@@ -400,11 +406,7 @@ async function sendEmailBatch_(
                 await emit([{ recipientId: recipient.id, success: true }]);
 
                 if (campaign.createDynamicsActivity) {
-                    crmQueue.push({
-                        recipientId: recipient.id,
-                        subject: campaign.subject || "",
-                        body: campaignContent?.htmlBody || "",
-                    });
+                    crmRecipientIds.push(recipient.id);
                 }
 
                 if (campaign.createOpportunities) {
@@ -441,9 +443,13 @@ async function sendEmailBatch_(
     }
 
     // Fire CRM logging as a background job so it never blocks the send loop.
-    if (crmQueue.length > 0) {
+    // The subject/body are batch-wide constants, sent once alongside the list of
+    // recipient ids (see crmRecipientIds above).
+    if (crmRecipientIds.length > 0) {
         await ctx.scheduler.runAfter(0, internal.campaignQueue.logEmailBatchToCRM, {
-            entries: crmQueue,
+            recipientIds: crmRecipientIds,
+            subject: campaign.subject || "",
+            body: campaignContent?.htmlBody || "",
         });
     }
 

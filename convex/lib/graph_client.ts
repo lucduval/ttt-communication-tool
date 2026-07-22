@@ -76,7 +76,7 @@ export interface EmailAttachment {
 /**
  * Parse Retry-After header (seconds or HTTP-date). Returns null if unparseable.
  */
-function parseRetryAfter(value: string | null): number | null {
+export function parseRetryAfter(value: string | null): number | null {
     if (!value?.trim()) return null;
     const n = parseInt(value, 10);
     if (!Number.isNaN(n) && n >= 0) return n;
