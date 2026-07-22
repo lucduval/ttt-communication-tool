@@ -9,6 +9,14 @@ import {
     type PersistedColumnRoles,
 } from "./columnRoles";
 import { extractPlaceholders, type ValidationReport, type ValidationHoldReason } from "./validationReport";
+import {
+    templateVariableFields,
+    guessVariableMapping,
+    validateVariableMapping,
+    serialiseVariableMapping,
+    type WhatsAppTemplateShape,
+    type TemplateVariableField,
+} from "./whatsappVariableMapping";
 import type { DetectedColumn } from "./extractContactIds";
 import type { CampaignRecipient } from "@/../convex/lib/recipientSelection";
 
@@ -51,6 +59,13 @@ export interface UploadRolesResult {
     roles: PersistedColumnRoles;
     /** The consolidated pre-send validation report — held rows and why (#67). */
     report: ValidationReport;
+    /**
+     * The WhatsApp variable→column mapping as the JSON string persisted on the
+     * campaign (`whatsappVariableMappings`) and read unchanged by the send path.
+     * Present only for a WhatsApp upload (a template was supplied); `undefined`
+     * for email/personalised uploads, which have no positional variables (#86).
+     */
+    whatsappVariableMappings?: string;
     fileName: string;
 }
 
@@ -96,6 +111,7 @@ export function guessRoles(columns: DetectedColumn[]): RoleSelection {
 export function UploadListPanel({
     requireSendAddress,
     templateText,
+    whatsappTemplate,
     onResult,
 }: {
     /** Email/personalised campaigns must designate a send address; WhatsApp need not. */
@@ -106,6 +122,14 @@ export function UploadListPanel({
      * — and memoises — the placeholder list itself (stable identity, no render loop).
      */
     templateText?: string;
+    /**
+     * The selected WhatsApp template, for a WhatsApp upload only. Its positional
+     * body variables + button variable become the variable→column mapping the
+     * operator authors here (pre-filled from the headers, always editable); the
+     * result carries the mapping as the campaign's `whatsappVariableMappings` JSON.
+     * `undefined` for email/personalised uploads, which show no mapping (#86).
+     */
+    whatsappTemplate?: WhatsAppTemplateShape | null;
     /** Fires with the materialised result, or `null` while the designation is incomplete. */
     onResult: (result: UploadRolesResult | null) => void;
 }) {
@@ -114,17 +138,40 @@ export function UploadListPanel({
     const [columns, setColumns] = useState<UploadedColumns | null>(null);
     const [fileName, setFileName] = useState<string | null>(null);
     const [roles, setRoles] = useState<RoleSelection>(EMPTY_ROLES);
+    // The WhatsApp variable→column mapping: logical variable name → column header.
+    // Pre-filled from a guess when a file lands (and re-guessed if the template
+    // changes), then freely edited via the mapping dropdowns.
+    const [varMapping, setVarMapping] = useState<Record<string, string>>({});
     const inputRef = useRef<HTMLInputElement>(null);
 
     // Derive the referenced placeholders once per template change (stable identity
     // so the effect below does not re-fire every parent render).
     const placeholders = useMemo(() => extractPlaceholders(templateText ?? ""), [templateText]);
 
+    // The template's variables the operator must map (empty for a non-WhatsApp
+    // upload). Memoised so downstream memo/effects have a stable identity.
+    const varFields = useMemo<TemplateVariableField[]>(
+        () => (whatsappTemplate ? templateVariableFields(whatsappTemplate) : []),
+        [whatsappTemplate],
+    );
+
+    // The mapping serialised to the campaign JSON, or undefined when there are no
+    // variables to map (email/personalised uploads carry no `whatsappVariableMappings`).
+    const whatsappVariableMappings = useMemo(
+        () => (varFields.length > 0 ? serialiseVariableMapping(varFields, varMapping) : undefined),
+        [varFields, varMapping],
+    );
+
     // Re-run the pure gate whenever the designation changes and push the result (or
     // null) up. Kept in one place so every dropdown change and the initial guess
     // funnel through the same seam.
     const recompute = useCallback(
-        (cols: UploadedColumns | null, sel: RoleSelection, name: string | null) => {
+        (
+            cols: UploadedColumns | null,
+            sel: RoleSelection,
+            name: string | null,
+            mappingsJson: string | undefined,
+        ) => {
             if (!cols || cols.status === "empty" || !name) {
                 onResult(null);
                 return;
@@ -149,17 +196,20 @@ export function UploadListPanel({
                 recipients: prepared.recipients,
                 roles: persisted,
                 report: prepared.report,
+                whatsappVariableMappings: mappingsJson,
                 fileName: name,
             });
         },
         [onResult, requireSendAddress, placeholders],
     );
 
-    // Re-run the gate when the template's placeholders change after an upload, so a
-    // newly-added `{column}` (or a fix) re-holds/re-clears rows without a re-upload.
+    // Re-run the gate when the template's placeholders — or the variable mapping —
+    // change after an upload, so a newly-added `{column}` (or a mapping edit)
+    // re-pushes the result without a re-upload. `whatsappVariableMappings` is passed
+    // as an argument (not closed over) so `recompute` keeps a stable identity.
     useEffect(() => {
-        recompute(columns, roles, fileName);
-    }, [placeholders, columns, roles, fileName, recompute]);
+        recompute(columns, roles, fileName, whatsappVariableMappings);
+    }, [placeholders, columns, roles, fileName, whatsappVariableMappings, recompute]);
 
     const handleFile = useCallback(
         async (file: File) => {
@@ -170,14 +220,38 @@ export function UploadListPanel({
                 setColumns(cols);
                 setFileName(file.name);
                 setRoles(guessed);
+                // Pre-fill the WhatsApp variable→column mapping from the headers too
+                // (empty for a non-WhatsApp upload). Always editable below.
+                setVarMapping(guessVariableMapping(varFields, cols.columns));
                 // The effect re-runs the gate once these state updates commit —
                 // no imperative recompute needed (and it double-fires `onResult`).
             } finally {
                 setIsParsing(false);
             }
         },
-        [],
+        [varFields],
     );
+
+    // Re-guess the mapping if the template's variables arrive/change after a file is
+    // already loaded (e.g. the operator picks the template after uploading), so the
+    // mapping section lands pre-filled rather than blank. Existing operator edits for
+    // still-present variables are preserved; only newly-seen variables are guessed.
+    const guessedFor = useRef<TemplateVariableField[] | null>(null);
+    useEffect(() => {
+        if (guessedFor.current === varFields) return;
+        guessedFor.current = varFields;
+        if (varFields.length === 0 || !columns || columns.status === "empty") return;
+        const guess = guessVariableMapping(varFields, columns.columns);
+        setVarMapping((prev) => {
+            const next: Record<string, string> = {};
+            for (const f of varFields) next[f.name] = prev[f.name] || guess[f.name] || "";
+            return next;
+        });
+    }, [varFields, columns]);
+
+    const setVar = useCallback((name: string, header: string) => {
+        setVarMapping((prev) => ({ ...prev, [name]: header }));
+    }, []);
 
     const setRole = useCallback((role: keyof RoleSelection, header: string) => {
         // Just update the designation; the effect above re-runs the gate. Calling
@@ -262,6 +336,9 @@ export function UploadListPanel({
                     placeholders={placeholders}
                     fileName={fileName}
                     onRole={setRole}
+                    varFields={varFields}
+                    varMapping={varMapping}
+                    onVar={setVar}
                 />
             )}
         </div>
@@ -281,6 +358,9 @@ function RoleDesignation({
     placeholders,
     fileName,
     onRole,
+    varFields,
+    varMapping,
+    onVar,
 }: {
     columns: UploadedColumns;
     roles: RoleSelection;
@@ -288,6 +368,11 @@ function RoleDesignation({
     placeholders: readonly string[];
     fileName: string | null;
     onRole: (role: keyof RoleSelection, header: string) => void;
+    /** WhatsApp template variables to map (empty for a non-WhatsApp upload). */
+    varFields: TemplateVariableField[];
+    /** Current variable→header mapping. */
+    varMapping: Record<string, string>;
+    onVar: (name: string, header: string) => void;
 }) {
     const requiredMissing =
         roles.trackingKey === "" || (requireSendAddress && roles.sendAddress === "");
@@ -354,6 +439,15 @@ function RoleDesignation({
                 onChange={(h) => onRole("phone", h)}
             />
 
+            {varFields.length > 0 && (
+                <VariableMapping
+                    fields={varFields}
+                    mapping={varMapping}
+                    columns={columns.columns}
+                    onVar={onVar}
+                />
+            )}
+
             {requiredMissing && (
                 <p className="text-xs text-amber-700">
                     Designate the {requireSendAddress ? "send address and " : ""}tracking key to
@@ -406,6 +500,54 @@ function RoleSelect({
                 ))}
             </select>
         </label>
+    );
+}
+
+/**
+ * The WhatsApp variable→column mapping section (#86). Rendered only for a WhatsApp
+ * upload (the panel passes a non-empty `fields`). Each template variable shows its
+ * human-readable label — `{{1}}` — First name, "Payment link" — and a column
+ * dropdown, pre-filled from the guess and always editable. A warning names any
+ * variable still unmapped so the operator never unknowingly sends blank `{{n}}`.
+ */
+function VariableMapping({
+    fields,
+    mapping,
+    columns,
+    onVar,
+}: {
+    fields: TemplateVariableField[];
+    mapping: Record<string, string>;
+    columns: DetectedColumn[];
+    onVar: (name: string, header: string) => void;
+}) {
+    const { unmapped } = validateVariableMapping(fields, mapping, columns);
+
+    return (
+        <div className="space-y-3 rounded-lg border border-gray-200 bg-white p-3">
+            <p className="text-sm font-medium text-gray-700">
+                Map each WhatsApp template variable to a column:
+            </p>
+            {fields.map((f) => (
+                <RoleSelect
+                    key={f.name}
+                    label={f.position ? `{{${f.position}}} — ${f.label}` : f.label}
+                    required
+                    value={mapping[f.name] ?? ""}
+                    columns={columns}
+                    onChange={(h) => onVar(f.name, h)}
+                />
+            ))}
+            {unmapped.length > 0 && (
+                <p className="text-xs text-amber-700">
+                    Map{" "}
+                    {unmapped
+                        .map((f) => (f.position ? `{{${f.position}}} (${f.label})` : f.label))
+                        .join(", ")}{" "}
+                    to a column — unmapped variables send blank.
+                </p>
+            )}
+        </div>
     );
 }
 

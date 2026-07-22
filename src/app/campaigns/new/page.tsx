@@ -183,6 +183,10 @@ export default function NewCampaignPage() {
     // The upload's consolidated validation report (#67). Its `sendable` rows are what the
     // pre-send preview (#71) renders — the same rows that would actually be sent.
     const [uploadReport, setUploadReport] = useState<ValidationReport | null>(null);
+    // The WhatsApp variable→column mapping authored on an uploaded-file WhatsApp
+    // campaign (issue #86), as the JSON persisted into `whatsappVariableMappings`.
+    // `null` for email/personalised uploads and non-upload audiences.
+    const [whatsappVariableMappings, setWhatsappVariableMappings] = useState<string | null>(null);
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
         status: "all",
@@ -1037,6 +1041,12 @@ export default function NewCampaignPage() {
                               phone: columnRoles.phone ?? undefined,
                           }
                         : undefined,
+                // The operator-authored variable→column mapping for an uploaded-file
+                // WhatsApp campaign (issue #86), consumed unchanged by the send path.
+                whatsappVariableMappings:
+                    campaignChannel === "whatsapp" && audience === "upload"
+                        ? whatsappVariableMappings ?? undefined
+                        : undefined,
                 createDynamicsActivity: audience === "clients",
                 fromMailbox: (campaignChannel === "email" || campaignChannel === "personalised") ? selectedMailbox || undefined : undefined,
                 aiPrompt: campaignChannel === "personalised" ? aiUserPrompt : undefined,
@@ -1292,10 +1302,12 @@ export default function NewCampaignPage() {
                 activateUploadSelection(result.recipients);
                 setColumnRoles(result.roles);
                 setUploadReport(result.report);
+                setWhatsappVariableMappings(result.whatsappVariableMappings ?? null);
             } else {
                 clearSelection();
                 setColumnRoles(null);
                 setUploadReport(null);
+                setWhatsappVariableMappings(null);
             }
         },
         [activateUploadSelection, clearSelection],
@@ -1703,6 +1715,11 @@ export default function NewCampaignPage() {
                                                 campaignChannel === "personalised"
                                             }
                                             templateText={`${subject}\n${htmlContent}`}
+                                            whatsappTemplate={
+                                                campaignChannel === "whatsapp"
+                                                    ? selectedTemplate
+                                                    : undefined
+                                            }
                                             onResult={handleUploadResult}
                                         />
                                     )}

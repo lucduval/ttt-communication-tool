@@ -52,6 +52,11 @@ vi.mock("../lib/dynamics_logging", () => ({
 }));
 
 import { whatsappSender } from "../channelSenders";
+import {
+    templateVariableFields,
+    guessVariableMapping,
+    serialiseVariableMapping,
+} from "../../src/components/recipients/whatsappVariableMapping";
 
 const template = {
     _id: "t1",
@@ -480,5 +485,156 @@ describe("whatsappSender.sendBatch — Excel-driven upload path (#70)", () => {
         expect(boundary.sendTemplateWithRetry).toHaveBeenCalledTimes(1);
         expect(boundary.uploadWhatsAppMedia).toHaveBeenCalledTimes(1);
         expect(emitted.map((e) => e.recipientId)).toEqual(["guid-1"]);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Authoring → send seam (issue #86, PRD #84). The operator-authored variable→
+// column mapping (produced by the pure `whatsappVariableMapping` core the
+// recipients-step UI is a shell over) is persisted as `whatsappVariableMappings`
+// and consumed unchanged by the send path: each recipient's positional body
+// params and button suffix resolve from their own row, to the mapped number.
+// A regression guards that a *missing* mapping no longer silently sends blank.
+// ---------------------------------------------------------------------------
+
+// A seed-shaped bad-debt template: positional body {{1}}{{2}}{{3}} + a "Pay now"
+// URL button, with the seed's default logical names documenting each variable.
+const seedShapedTemplate = {
+    _id: "t-seed",
+    name: "bad_debt_reminder",
+    language: "en",
+    body: "Hi {{1}}, invoice {{2}} · {{3}}.",
+    variables: ["1", "2", "3"],
+    variableMappings: JSON.stringify({
+        "1": "first_name",
+        "2": "invoice_number",
+        "3": "amount_formatted",
+        payment_link: "payment_link",
+    }),
+    headerType: undefined, // no document header — this test isolates variable resolution
+    buttonType: "url",
+    buttonText: "Pay now",
+    buttonUrl: "https://payment-link-ttt.azurewebsites.net/p/{{1}}",
+    buttonUrlVariable: "payment_link",
+};
+
+function createSeedCtx() {
+    const ctx = {
+        runQuery: vi.fn(async (ref: unknown) => {
+            switch (getFunctionName(ref as any)) {
+                case "campaignBatches:getWhatsAppTemplate":
+                    return seedShapedTemplate;
+                case "invoicePdfs:getWhatsAppPdfRefs":
+                    return [];
+                default:
+                    return undefined;
+            }
+        }),
+        runMutation: vi.fn(async () => undefined),
+        runAction: vi.fn(async () => undefined),
+        scheduler: { runAfter: vi.fn(async () => undefined) },
+    };
+    return { ctx };
+}
+
+describe("whatsappSender.sendBatch — authored variable→column mapping (#86)", () => {
+    // A conventionally-headed export; the authoring core guesses a complete mapping.
+    const columns = [
+        { index: 0, header: "contactid" },
+        { index: 1, header: "First Name" },
+        { index: 2, header: "Invoice Number" },
+        { index: 3, header: "Amount Formatted" },
+        { index: 4, header: "Payment Link" },
+    ];
+    const fields = templateVariableFields(seedShapedTemplate);
+    const authoredMapping = serialiseVariableMapping(fields, guessVariableMapping(fields, columns));
+
+    const row = {
+        id: "guid-1",
+        phone: "+27 82 555 0100",
+        name: "",
+        variables: JSON.stringify({
+            contactid: "guid-1",
+            "First Name": "Thandi",
+            "Invoice Number": "INV-2048",
+            "Amount Formatted": "R1,234.56",
+            "Payment Link": "xY9abc",
+        }),
+    };
+
+    it("resolves each positional body param + button suffix from the row and sends to the mapped number", async () => {
+        const campaign = {
+            _id: "c-seed",
+            status: "active",
+            whatsappTemplateId: "t-seed",
+            createDynamicsActivity: false,
+            columnRoles: { trackingKey: "contactid", phone: "First Name" },
+            whatsappVariableMappings: authoredMapping,
+        };
+        const batch = { _id: "batch-s" as any, recipients: [row] };
+        boundary.sendTemplateWithRetry.mockResolvedValue({
+            status: "sent",
+            wamid: "wamid.S1",
+            attempts: 1,
+            latencyMs: 5,
+        });
+
+        const { emitted, emit } = collector();
+        const { ctx } = createSeedCtx();
+        await whatsappSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients, async () => {});
+
+        expect(boundary.sendTemplateWithRetry).toHaveBeenCalledTimes(1);
+        const sentBody = boundary.sendTemplateWithRetry.mock.calls[0][1];
+        // Sent to the recipient's own (normalised) number.
+        expect(sentBody.to).toBe("27825550100");
+        const comps = sentBody.template.components;
+        // Body params render the row's real values, in positional order.
+        expect(comps.find((c: any) => c.type === "body").parameters).toEqual([
+            { type: "text", text: "Thandi" },
+            { type: "text", text: "INV-2048" },
+            { type: "text", text: "R1,234.56" },
+        ]);
+        // Button carries the per-recipient payment token/suffix (not a full URL).
+        expect(comps.find((c: any) => c.type === "button").parameters).toEqual([
+            { type: "text", text: "xY9abc" },
+        ]);
+        expect(emitted[0]).toMatchObject({ success: true, externalMessageId: "wamid.S1" });
+    });
+
+    it("regression: with no mapping the positional body params send blank (the bug the authoring closes)", async () => {
+        // A campaign the wizard never populated a mapping for — the pre-#86 state.
+        const campaign = {
+            _id: "c-nomap",
+            status: "active",
+            whatsappTemplateId: "t-seed",
+            createDynamicsActivity: false,
+            columnRoles: { trackingKey: "contactid", phone: "First Name" },
+            // whatsappVariableMappings intentionally absent.
+        };
+        const batch = { _id: "batch-n" as any, recipients: [row] };
+        boundary.sendTemplateWithRetry.mockResolvedValue({
+            status: "sent",
+            wamid: "wamid.N1",
+            attempts: 1,
+            latencyMs: 5,
+        });
+
+        const { emit } = collector();
+        const { ctx } = createSeedCtx();
+        await whatsappSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients, async () => {});
+
+        const sentBody = boundary.sendTemplateWithRetry.mock.calls[0][1];
+        const bodyParams = sentBody.template.components.find((c: any) => c.type === "body").parameters;
+        // Positional variables "1"/"2"/"3" fall back to columns literally named
+        // "1"/"2"/"3", which do not exist — so every param is blank. The authoring
+        // core's validation is what stops the operator ever reaching this state
+        // (see whatsappVariableMapping.test.ts), which is exactly what #86 adds.
+        expect(bodyParams).toEqual([
+            { type: "text", text: "" },
+            { type: "text", text: "" },
+            { type: "text", text: "" },
+        ]);
+        // And the authored mapping — from the same row's headers — would not be blank.
+        expect(authoredMapping).not.toBe("{}");
     });
 });

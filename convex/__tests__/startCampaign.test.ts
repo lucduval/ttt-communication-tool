@@ -121,6 +121,37 @@ describe("startCampaignImpl — phone column role (issue #85, PRD #84)", () => {
     });
 });
 
+describe("startCampaignImpl — WhatsApp variable→column mapping (issue #86, PRD #84)", () => {
+    it("round-trips the authored variable→column mapping onto the campaign record", async () => {
+        const { ctx, inserts } = createCtx();
+
+        const mapping = JSON.stringify({
+            "1": "First Name",
+            "2": "Invoice Number",
+            "3": "Amount",
+            payment_link: "Payment Token",
+        });
+        await startCampaignImpl(ctx as any, {
+            ...baseArgs,
+            channel: "whatsapp",
+            columnRoles: { trackingKey: "Contact ID", phone: "Mobile" },
+            whatsappVariableMappings: mapping,
+        });
+
+        const campaign = inserts.find((i) => i.table === "campaigns");
+        expect(campaign?.doc.whatsappVariableMappings).toBe(mapping);
+    });
+
+    it("stores no mapping when the operator authored none (Dynamics-resolved / non-upload)", async () => {
+        const { ctx, inserts } = createCtx();
+
+        await startCampaignImpl(ctx as any, { ...baseArgs, channel: "whatsapp" });
+
+        const campaign = inserts.find((i) => i.table === "campaigns");
+        expect(campaign?.doc.whatsappVariableMappings).toBeUndefined();
+    });
+});
+
 describe("startCampaignImpl — disclaimer snapshot (issue #77)", () => {
     it("snapshots the selected disclaimer's id and HTML onto the campaign content record", async () => {
         const { ctx, inserts } = createCtx({

@@ -41,6 +41,15 @@ export {
     type HeldReason,
 } from "./columnRoles";
 export {
+    templateVariableFields,
+    guessVariableMapping,
+    validateVariableMapping,
+    serialiseVariableMapping,
+    type WhatsAppTemplateShape,
+    type TemplateVariableField,
+    type VariableMappingValidation,
+} from "./whatsappVariableMapping";
+export {
     buildValidationReport,
     extractPlaceholders,
     isValidSendAddress,
