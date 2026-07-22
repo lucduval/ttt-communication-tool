@@ -426,3 +426,117 @@ describe("emailSender.sendBatch — per-recipient invoice-PDF hold (PRD #69)", (
         expect(emitted.every((r) => r.success)).toBe(true);
     });
 });
+
+describe("emailSender.sendBatch — per-recipient consultant CC (PRD #78, issue #81)", () => {
+    // The `ccAddress` column role names the uploaded header holding each client's
+    // consultant email; the cell already travels in the recipient's variables bag.
+    // The adapter merges that per-recipient cell with any static campaign CC, so
+    // both are copied on every one of the four spaced touches.
+    const ccCampaign = {
+        ...campaign,
+        subject: "Overdue",
+        columnRoles: { trackingKey: "Ref", ccAddress: "Consultant" },
+    };
+
+    /** The CC email list on the message the faked $batch boundary received. */
+    const ccOf = (sent: any[], idx: number): string[] =>
+        (sent[idx].ccRecipients ?? []).map((r: any) => r.email);
+
+    const runSend = async (campaignArg: any, recipients: any[]) => {
+        boundary.sendEmailBatch.mockImplementation(async (msgs: any[]) =>
+            msgs.map(() => ({ success: true }))
+        );
+        const emitted: SendResult[] = [];
+        const emit = async (results: SendResult[]) => {
+            emitted.push(...results);
+        };
+        const { ctx } = createCtx({ campaignContent });
+        await emailSender.sendBatch(
+            ctx as any,
+            campaignArg,
+            { _id: "batch-1" as any, recipients },
+            emit,
+            recipients,
+            async () => {}
+        );
+        return { sent: boundary.sendEmailBatch.mock.calls[0]?.[0] ?? [], emitted };
+    };
+
+    it("merges the recipient's consultant cell with the static campaign CC (both set)", async () => {
+        const { sent } = await runSend({ ...ccCampaign, ccEmail: "audit@ttt.test" }, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "cons1@ttt.test" }),
+            },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["audit@ttt.test", "cons1@ttt.test"]);
+    });
+
+    it("CCs the consultant only when the campaign has no static CC", async () => {
+        const { sent } = await runSend(ccCampaign, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "cons1@ttt.test" }),
+            },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["cons1@ttt.test"]);
+    });
+
+    it("CCs the static CC only when no ccAddress role is designated (unchanged behaviour)", async () => {
+        // Plain campaign with a static CC and no columnRoles — the per-recipient
+        // input is absent, so behaviour collapses to today's static-only CC.
+        const { sent } = await runSend({ ...campaign, ccEmail: "audit@ttt.test" }, [
+            { id: "r1", email: "alice@example.com", name: "Alice" },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["audit@ttt.test"]);
+    });
+
+    it("sends with no CC when the recipient's consultant cell is blank (row still sends)", async () => {
+        const { sent, emitted } = await runSend(ccCampaign, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "   " }),
+            },
+        ]);
+        expect(sent).toHaveLength(1);
+        expect(sent[0].ccRecipients).toBeUndefined();
+        expect(emitted).toEqual([{ recipientId: "r1", success: true }]);
+    });
+
+    it("splits a multi-address consultant cell into separate CC recipients", async () => {
+        const { sent } = await runSend(ccCampaign, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "a@ttt.test; b@ttt.test" }),
+            },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["a@ttt.test", "b@ttt.test"]);
+    });
+
+    it("resolves the consultant CC per recipient across the batch", async () => {
+        const { sent } = await runSend({ ...ccCampaign, ccEmail: "audit@ttt.test" }, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "cons1@ttt.test" }),
+            },
+            {
+                id: "r2",
+                email: "bob@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "cons2@ttt.test" }),
+            },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["audit@ttt.test", "cons1@ttt.test"]);
+        expect(ccOf(sent, 1)).toEqual(["audit@ttt.test", "cons2@ttt.test"]);
+    });
+});
