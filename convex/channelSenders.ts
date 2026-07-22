@@ -30,6 +30,11 @@ import {
     MAX_BATCH_PAYLOAD_BYTES,
     MAX_BATCH_SUBREQUESTS,
 } from "./lib/batchChunker";
+import {
+    computeSendPaceMs,
+    DEFAULT_MAX_PACE_MS,
+    DEFAULT_TARGET_BYTES_PER_SEC,
+} from "./lib/sendPacing";
 
 /**
  * Channel Senders — the per-channel adapters behind the Channel Send seam. Each
@@ -318,9 +323,25 @@ async function sendEmailBatch_(
     // once each message carries its own invoice PDF, larger PDFs simply mean fewer
     // messages per chunk (#69). Per-item 429/5xx retries are handled inside
     // sendEmailBatch; IncomingBytes throttling is expected and accepted.
-    const interBatchDelayMs = Math.max(
+    // Byte-aware pacing to stay under Microsoft Graph's IncomingBytes throttle
+    // (the "ApplicationThrottled — Application is over its IncomingBytes limit"
+    // 429). That ceiling is measured in BYTES sent per rolling window, not in
+    // message count, so a fixed per-batch delay is wrong for both ends: it either
+    // crawls for tiny text emails or still overruns for heavy HTML/attachment
+    // ones. Instead we pace on each chunk's actual payload size — the same
+    // `payloadBytes` estimate the chunker already budgets — so a small email
+    // waits milliseconds and a big one waits proportionally longer.
+    //
+    // `targetBytesPerSec` is deliberately set below Graph's ceiling to leave
+    // headroom (the limit is app-wide and shared with any concurrent send).
+    // Tune via GRAPH_EMAIL_TARGET_BYTES_PER_SEC; GRAPH_EMAIL_MAX_PACE_MS caps a
+    // single pause so one very large chunk can't stall the action.
+    const targetBytesPerSec =
+        parseInt(process.env.GRAPH_EMAIL_TARGET_BYTES_PER_SEC ?? "", 10) ||
+        DEFAULT_TARGET_BYTES_PER_SEC;
+    const maxPaceMs = Math.max(
         0,
-        parseInt(process.env.GRAPH_EMAIL_INTER_BATCH_DELAY_MS ?? "200", 10) || 0
+        parseInt(process.env.GRAPH_EMAIL_MAX_PACE_MS ?? "", 10) || DEFAULT_MAX_PACE_MS
     );
 
     const chunks = chunkByPayload(prepared, (p) => p.payloadBytes, {
@@ -437,8 +458,15 @@ async function sendEmailBatch_(
             }
         }
 
-        if (chunkIdx + 1 < chunks.length && interBatchDelayMs > 0) {
-            await new Promise((resolve) => setTimeout(resolve, interBatchDelayMs));
+        // Pace on the bytes this chunk actually put on the wire, keeping the
+        // rolling send rate under `targetBytesPerSec`. Pacing after every chunk
+        // (including the last) means the throttle holds across batch boundaries
+        // too, since the next batch is a fresh action scheduled right after this
+        // one returns.
+        const chunkBytes = slice.reduce((sum, p) => sum + p.payloadBytes, 0);
+        const paceMs = computeSendPaceMs(chunkBytes, targetBytesPerSec, maxPaceMs);
+        if (paceMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, paceMs));
         }
     }
 
