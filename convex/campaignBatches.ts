@@ -416,6 +416,10 @@ export const startCampaign = mutation({
                 invoiceGuid: v.optional(v.string()),
             }),
         ),
+        // Per-campaign WhatsApp variable→column mapping for an uploaded-file
+        // campaign (issue #70). JSON: logical template variable/button variable →
+        // Excel column header. Unset for non-uploaded / Dynamics-resolved campaigns.
+        whatsappVariableMappings: v.optional(v.string()),
         createDynamicsActivity: v.optional(v.boolean()),
         fromMailbox: v.optional(v.string()),
         ccEmail: v.optional(v.string()),
@@ -424,9 +428,23 @@ export const startCampaign = mutation({
         aiSystemPrompt: v.optional(v.string()),
         createOpportunities: v.optional(v.boolean()),
         fontSize: v.optional(v.string()),
+        // Per-campaign email type governing unsubscribe gating (PRD #74, issue #75).
+        // Unset is treated as Marketing (today's unsubscribe-present behaviour).
+        emailType: v.optional(v.union(v.literal("marketing"), v.literal("utility"))),
+        // Selected managed disclaimer to attach (PRD #74, issue #77). Unset = "None".
+        // Its wording is snapshotted onto campaignContent at send time.
+        disclaimerId: v.optional(v.id("disclaimers")),
         scheduledAt: v.optional(v.number()),
     },
-    handler: async (ctx, args) => {
+    handler: startCampaignImpl,
+});
+
+/**
+ * Plain handler for {@link startCampaign}, extracted so the campaign-start contract
+ * (which selections are persisted where) is provable against a faked Convex `ctx`
+ * without the mutation wrapper — the same seam the `markAttempted`/`sendGate` tests use.
+ */
+export async function startCampaignImpl(ctx: any, args: any) {
         const identity = await ctx.auth.getUserIdentity();
         if (!identity) {
             throw new Error("Unauthenticated");
@@ -436,7 +454,7 @@ export const startCampaign = mutation({
         if (args.fromMailbox) {
             const user = await ctx.db
                 .query("users")
-                .withIndex("by_clerk_id", (q) => q.eq("clerkId", identity.subject))
+                .withIndex("by_clerk_id", (q: any) => q.eq("clerkId", identity.subject))
                 .first();
 
             if (!user) {
@@ -470,13 +488,26 @@ export const startCampaign = mutation({
             subject: args.subject,
             whatsappTemplateId: args.whatsappTemplateId,
             columnRoles: args.columnRoles,
+            whatsappVariableMappings: args.whatsappVariableMappings,
             createDynamicsActivity: args.createDynamicsActivity,
             fromMailbox: args.fromMailbox,
             ccEmail: args.ccEmail,
             bccEmail: args.bccEmail,
             createOpportunities: args.createOpportunities,
             scheduledAt: args.scheduledAt,
+            emailType: args.emailType,
         });
+
+        // Snapshot the selected disclaimer's wording at send time (issue #77):
+        // resolve the source disclaimer once here and freeze its HTML onto the content
+        // record, so the send loop reads the snapshot (no per-batch lookup) and a later
+        // edit/archive of the disclaimer never rewrites this campaign. "None" (no
+        // disclaimerId) leaves both fields unset.
+        let disclaimerHtml: string | undefined;
+        if (args.disclaimerId) {
+            const disclaimer = await ctx.db.get(args.disclaimerId);
+            disclaimerHtml = disclaimer?.htmlContent;
+        }
 
         // Store large content fields separately to keep campaign docs lightweight
         // for list/dashboard queries.
@@ -489,13 +520,14 @@ export const startCampaign = mutation({
             aiPrompt: args.aiPrompt,
             aiSystemPrompt: args.aiSystemPrompt,
             fontSize: args.fontSize,
+            disclaimerId: args.disclaimerId,
+            disclaimerHtml,
         });
 
         // Messages are now created downstream in createBatches for both direct and filtered campaigns.
 
         return campaignId;
-    },
-});
+}
 
 // Internal queries for actions to use
 export const getCampaign = internalQuery({
@@ -533,6 +565,8 @@ export const getCampaignContent = internalQuery({
             aiPrompt: (campaign as any).aiPrompt as string | undefined,
             aiSystemPrompt: (campaign as any).aiSystemPrompt as string | undefined,
             fontSize: (campaign as any).fontSize as string | undefined,
+            disclaimerId: (campaign as any).disclaimerId as Id<"disclaimers"> | undefined,
+            disclaimerHtml: (campaign as any).disclaimerHtml as string | undefined,
         };
     },
 });

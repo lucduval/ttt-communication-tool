@@ -11,11 +11,22 @@
  *
  * Definitions:
  *   sent      – "sent" plus "delivered" (successfully handed to the provider)
- *   delivered – "delivered" only (confirmed delivery)
+ *   delivered – sent minus bounces. Microsoft Graph cannot confirm true
+ *               delivery for external recipients (delivery receipts are opt-in
+ *               and most recipient orgs suppress them — see Microsoft KB
+ *               3184617), so we adopt the ESP-standard definition: a message is
+ *               "delivered" if it was handed to the provider and no bounce/NDR
+ *               came back. A bounce flips the message's status "sent" → "failed"
+ *               (see bounces.recordBouncesImpl), so the "sent"+"delivered"
+ *               buckets already exclude bounces — delivered equals that count.
  *   failed    – "failed" (send error or bounce)
  *   pending   – "pending" (not yet attempted) plus "attempted" (handed to the
  *               provider but not yet settled to sent/delivered/failed) — an
  *               in-flight recipient counts as pending, never as sent/failed.
+ *
+ * Because there is no post-handoff delivery signal distinct from bounces, the
+ * `sent` and `delivered` counts are necessarily equal; both are surfaced so
+ * callers keep a stable shape.
  *
  * Statuses outside these buckets (e.g. engagement states like "opened") are
  * ignored — they contribute to no count.
@@ -55,5 +66,8 @@ export function tallyCampaign(statuses: Iterable<string>): CampaignTally {
         }
     }
 
-    return { sent: sent + delivered, delivered, failed, pending };
+    // A bounce demotes "sent" → "failed", so the success buckets already net
+    // out bounces. delivered = sent − bounces collapses to the same count.
+    const succeeded = sent + delivered;
+    return { sent: succeeded, delivered: succeeded, failed, pending };
 }

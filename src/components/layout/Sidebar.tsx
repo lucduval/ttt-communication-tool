@@ -9,6 +9,7 @@ import {
     FileText,
     Settings,
     Send,
+    ScrollText,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -20,6 +21,7 @@ const navItems = [
     { id: "monitoring", label: "Campaigns", icon: BarChart3, href: "/campaigns" },
     { id: "email-templates", label: "Email Templates", icon: FileText, href: "/templates/email" },
     { id: "whatsapp-templates", label: "WhatsApp Templates", icon: FileText, href: "/templates/whatsapp" },
+    { id: "disclaimers", label: "Disclaimers", icon: ScrollText, href: "/disclaimers" },
 ];
 
 import { useQuery } from "convex/react";

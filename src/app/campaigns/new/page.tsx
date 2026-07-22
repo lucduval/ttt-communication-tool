@@ -6,7 +6,7 @@ import { ConvexError } from "convex/values";
 import { api } from "@/../convex/_generated/api";
 import { Header } from "@/components/layout";
 import { Button, Card, Badge, ConfirmationModal, LoadingScreen } from "@/components/ui";
-import { EmailComposer, EmailPreview, TestEmailModal, MailboxSelector, LivePreviewModal, PersonalisedComposer, PersonalisedPreview } from "@/components/email";
+import { EmailComposer, EmailPreview, TestEmailModal, MailboxSelector, LivePreviewModal, PersonalisedComposer, PersonalisedPreview, type MergeField } from "@/components/email";
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT, DEFAULT_SUBJECT as DEFAULT_PERSONALISED_SUBJECT } from "@/components/email/PersonalisedComposer";
 import {
     ChannelSelector,
@@ -22,8 +22,9 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, type Contact, type UploadRolesResult } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, UploadPreviewSample, type Contact, type UploadRolesResult } from "@/components/recipients";
 import type { PersistedColumnRoles } from "@/components/recipients/columnRoles";
+import type { ValidationReport } from "@/components/recipients/validationReport";
 import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
 import {
     getConvexSiteUrl,
@@ -179,6 +180,9 @@ export default function NewCampaignPage() {
     // `upload` shape); this holds only the roles to persist. Reset whenever the
     // audience changes (see the audience-change effect).
     const [columnRoles, setColumnRoles] = useState<PersistedColumnRoles | null>(null);
+    // The upload's consolidated validation report (#67). Its `sendable` rows are what the
+    // pre-send preview (#71) renders — the same rows that would actually be sent.
+    const [uploadReport, setUploadReport] = useState<ValidationReport | null>(null);
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
         status: "all",
@@ -199,6 +203,12 @@ export default function NewCampaignPage() {
     const [subject, setSubject] = useState("");
     const [htmlContent, setHtmlContent] = useState("");
     const [fontSize, setFontSize] = useState("18px");
+    // Per-campaign email type (PRD #74, issue #75). Marketing (default) appends the
+    // unsubscribe footer as today; Utility suppresses it for transactional sends.
+    const [emailType, setEmailType] = useState<"marketing" | "utility">("marketing");
+    // Selected managed disclaimer to attach (PRD #74, issue #77). Empty string = "None".
+    // Its wording is snapshotted onto the campaign at send time.
+    const [disclaimerId, setDisclaimerId] = useState<string>("");
     // Count of `<img>` tags in the current email body — derived from htmlContent.
     // We no longer track uploaded images in a separate state because each
     // insertion uploads to Convex storage immediately and embeds the URL into
@@ -276,8 +286,17 @@ export default function NewCampaignPage() {
 
     // Queries
     const whatsappTemplates = useQuery(api.whatsappTemplates.list, {});
+    // Non-archived managed disclaimers for the compose-step picker (issue #77).
+    const disclaimers = useQuery(api.disclaimers.list, {});
     const access = useQuery(api.users.checkAccess);
     const canAccessPersonalised = access?.user?.canAccessPersonalised === true;
+
+    // The disclaimer the operator has picked (or undefined for "None") — drives the
+    // inline compose-step preview and the disclaimer merged into the final preview.
+    const selectedDisclaimer = useMemo(
+        () => disclaimers?.find((d: Doc<"disclaimers">) => d._id === disclaimerId),
+        [disclaimers, disclaimerId],
+    );
 
     // Personalised campaign history — only fetched when building a personalised campaign
     const visibleContactIds = useMemo(() => contacts.map((c) => c.id), [contacts]);
@@ -313,6 +332,7 @@ export default function NewCampaignPage() {
     const fetchContactsWithITA34 = useAction(api.actions.dynamics.fetchContactsWithITA34);
     const fetchContactsByTaxReturn = useAction(api.actions.dynamics.fetchContactsByTaxReturn);
     const sendTestEmail = useAction(api.actions.email.sendTestEmail);
+    const previewInvoicePdf = useAction(api.invoicePdfs.previewInvoicePdf);
     const sendTestWhatsApp = useAction(api.actions.whatsapp.sendTestWhatsApp);
     const fetchEmployees = useAction(api.actions.dynamics.fetchUsers);
     const fetchLeads = useAction(api.actions.dynamics.fetchLeads);
@@ -1026,6 +1046,11 @@ export default function NewCampaignPage() {
                 ccEmail: (campaignChannel === "personalised" || campaignChannel === "email") ? ccEmail || undefined : undefined,
                 bccEmail: (campaignChannel === "personalised" || campaignChannel === "email") ? bccEmail || undefined : undefined,
                 fontSize: (campaignChannel === "email" || campaignChannel === "personalised") ? fontSize : undefined,
+                emailType: campaignChannel === "email" ? emailType : undefined,
+                disclaimerId:
+                    campaignChannel === "email" && disclaimerId
+                        ? (disclaimerId as Id<"disclaimers">)
+                        : undefined,
                 scheduledAt: scheduledAtMs,
             });
 
@@ -1252,19 +1277,54 @@ export default function NewCampaignPage() {
     // selection shape, whose recipients flow straight to the send path with NO
     // Dynamics re-resolution — the file is the source of truth. A `null` result
     // (designation incomplete/invalid) clears the selection.
+    // Destructure the individually-stable transitions so this callback keeps a
+    // stable identity. Keying it on the whole `recipientSelection` object would
+    // re-create it on every selection change (the object is re-memoised each
+    // time `selection` changes), which chains through UploadListPanel's
+    // `recompute`/effect back into `clear()` — an infinite update loop.
+    const { activateUpload: activateUploadSelection, clear: clearSelection } = recipientSelection;
     const handleUploadResult = useCallback(
         (result: UploadRolesResult | null) => {
             setSelectedIds(new Set());
             if (result) {
-                recipientSelection.activateUpload(result.recipients);
+                activateUploadSelection(result.recipients);
                 setColumnRoles(result.roles);
+                setUploadReport(result.report);
             } else {
-                recipientSelection.clear();
+                clearSelection();
                 setColumnRoles(null);
+                setUploadReport(null);
             }
         },
-        [recipientSelection],
+        [activateUploadSelection, clearSelection],
     );
+
+    // Upload audience (#65): the email composer's merge-field chips are the
+    // uploaded file's columns, not the CRM fields — there is no CRM to source
+    // {firstName}/{email} from. Each content column becomes a `{Header}` chip the
+    // operator clicks to insert into the subject or body; the identifier roles
+    // (tracking key, invoice GUID) are excluded — raw GUIDs are never email
+    // content. The send-address column is kept (operators sometimes echo it).
+    // Column headers + a live example value come from the first sendable row's
+    // merge bag (there is always ≥1, since the recipients step gates progress on
+    // a non-zero sendable count). `undefined` for every non-upload audience, so
+    // the composer falls back to its default CRM chips.
+    const uploadMergeFields = useMemo((): MergeField[] | undefined => {
+        if (audience !== "upload" || !uploadReport || !columnRoles) return undefined;
+        const sample = uploadReport.sendable[0]?.variables ?? {};
+        const excluded = new Set(
+            [columnRoles.trackingKey, columnRoles.invoiceGuid].filter(
+                (h): h is string => typeof h === "string" && h.trim() !== "",
+            ),
+        );
+        return Object.keys(sample)
+            .filter((header) => header.trim() !== "" && !excluded.has(header))
+            .map((header) => ({
+                label: `{${header}}`,
+                description: `Column "${header}" from your file`,
+                example: sample[header] || undefined,
+            }));
+    }, [audience, uploadReport, columnRoles]);
 
     const handleLoadMore = () => {
         loadContacts(true);
@@ -1487,27 +1547,32 @@ export default function NewCampaignPage() {
                                             )}
                                             {contacts.length > 0 && (
                                                 <div className="flex gap-2">
-                                                    <Button
-                                                        variant="secondary"
-                                                        onClick={handleSelectAll}
-                                                        disabled={
-                                                            (isSelectAllActive && filters.personalisedCampaignFilter === "all") ||
-                                                            (selectedIds.size === displayedContacts.length && displayedContacts.length > 0) ||
-                                                            isSelectingAll ||
-                                                            displayedContacts.length === 0
-                                                        }
-                                                    >
-                                                        {isSelectingAll ? (
-                                                            <>
-                                                                <Loader2 size={16} className="animate-spin" />
-                                                                Selecting...
-                                                            </>
-                                                        ) : (
-                                                            filters.personalisedCampaignFilter !== "all"
-                                                                ? `Select All (${displayedContacts.length})`
-                                                                : `Select All (${totalCount ?? contacts.length})`
-                                                        )}
-                                                    </Button>
+                                                    {/* Upload List sources its recipients from the file
+                                                        (and shows its own "N ready to send" count), so no
+                                                        Select All here. The plain "Select All" label — no
+                                                        running total — keeps this button steady while the
+                                                        server count settles. */}
+                                                    {audience !== "upload" && (
+                                                        <Button
+                                                            variant="secondary"
+                                                            onClick={handleSelectAll}
+                                                            disabled={
+                                                                (isSelectAllActive && filters.personalisedCampaignFilter === "all") ||
+                                                                (selectedIds.size === displayedContacts.length && displayedContacts.length > 0) ||
+                                                                isSelectingAll ||
+                                                                displayedContacts.length === 0
+                                                            }
+                                                        >
+                                                            {isSelectingAll ? (
+                                                                <>
+                                                                    <Loader2 size={16} className="animate-spin" />
+                                                                    Selecting...
+                                                                </>
+                                                            ) : (
+                                                                "Select All"
+                                                            )}
+                                                        </Button>
+                                                    )}
                                                     {(selectedIds.size > 0 || isSelectAllActive) && (
                                                         <Button
                                                             variant="secondary"
@@ -1759,7 +1824,73 @@ export default function NewCampaignPage() {
                                             attachments={attachments}
                                             onAttachmentsChange={setAttachments}
                                             onPreview={() => setShowLivePreview(true)}
+                                            mergeFields={uploadMergeFields}
                                         />
+                                    </Card>
+
+                                    <Card title="Email Type">
+                                        <div className="space-y-3">
+                                            <div className="flex gap-3">
+                                                {([
+                                                    { value: "marketing", label: "Marketing" },
+                                                    { value: "utility", label: "Utility" },
+                                                ] as const).map((opt) => (
+                                                    <button
+                                                        key={opt.value}
+                                                        type="button"
+                                                        aria-pressed={emailType === opt.value}
+                                                        onClick={() => setEmailType(opt.value)}
+                                                        className={`flex-1 rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
+                                                            emailType === opt.value
+                                                                ? "border-[#1E3A5F] bg-[#1E3A5F] text-white"
+                                                                : "border-gray-200 bg-white text-gray-700 hover:border-gray-300"
+                                                        }`}
+                                                    >
+                                                        {opt.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                            <p className="text-xs text-gray-500">
+                                                {emailType === "utility"
+                                                    ? "Utility (transactional) emails omit the unsubscribe link — recipients cannot opt out of a communication about a live obligation."
+                                                    : "Marketing emails append the unsubscribe link (when a public site URL is configured). Choose Utility to omit it for transactional sends."}
+                                            </p>
+                                        </div>
+                                    </Card>
+
+                                    <Card title="Disclaimer">
+                                        <div className="space-y-3">
+                                            <select
+                                                value={disclaimerId}
+                                                onChange={(e) => setDisclaimerId(e.target.value)}
+                                                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 focus:border-[#1E3A5F] focus:outline-none focus:ring-1 focus:ring-[#1E3A5F]"
+                                            >
+                                                <option value="">None</option>
+                                                {(disclaimers ?? []).map((d: Doc<"disclaimers">) => (
+                                                    <option key={d._id} value={d._id}>
+                                                        {d.name}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            <p className="text-xs text-gray-500">
+                                                The selected disclaimer is appended to the foot of every email, above
+                                                the unsubscribe footer. Its wording is frozen when the campaign is
+                                                sent, so later edits never rewrite an already-sent campaign.
+                                            </p>
+                                            {selectedDisclaimer && (
+                                                <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                                                    <p className="mb-2 text-xs font-medium text-gray-500">
+                                                        Preview — {selectedDisclaimer.name}
+                                                    </p>
+                                                    <div
+                                                        className="text-sm text-gray-700"
+                                                        dangerouslySetInnerHTML={{
+                                                            __html: selectedDisclaimer.htmlContent,
+                                                        }}
+                                                    />
+                                                </div>
+                                            )}
+                                        </div>
                                     </Card>
 
                                     <Card>
@@ -1934,7 +2065,28 @@ export default function NewCampaignPage() {
                             ) : (
                                 <>
                                     <Card title="Final Preview">
-                                        {campaignChannel === "email" ? (
+                                        {campaignChannel === "email" && audience === "upload" ? (
+                                            // Bad-debt upload campaigns (#71): the preview draws from the
+                                            // validated uploaded rows (report.sendable) and the same merge +
+                                            // attachment path the real send uses — NO Dynamics re-fetch.
+                                            <UploadPreviewSample
+                                                subject={subject}
+                                                htmlContent={htmlContent}
+                                                senderEmail={selectedMailbox || undefined}
+                                                recipients={uploadReport?.sendable ?? []}
+                                                invoiceGuidDesignated={
+                                                    !!(columnRoles?.invoiceGuid && columnRoles.invoiceGuid.trim())
+                                                }
+                                                emailType={emailType}
+                                                unsubscribeUrl={
+                                                    getConvexSiteUrl() ? `${getConvexSiteUrl()}/unsubscribe` : ""
+                                                }
+                                                disclaimerHtml={selectedDisclaimer?.htmlContent}
+                                                generatePdf={(invoiceGuid) =>
+                                                    previewInvoicePdf({ invoiceGuid })
+                                                }
+                                            />
+                                        ) : campaignChannel === "email" ? (
                                             <EmailPreview
                                                 subject={subject}
                                                 htmlContent={htmlContent}
