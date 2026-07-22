@@ -1,5 +1,38 @@
 import { describe, test, expect } from "vitest";
-import { mergeCcRecipients } from "../ccMerge";
+import { consultantCellFromBag, mergeCcRecipients } from "../ccMerge";
+
+describe("consultantCellFromBag", () => {
+    const bag = JSON.stringify({ Email: "pat@x.co", Consultant: "cons@firm.co", Blank: "" });
+
+    test("reads the designated header's cell", () => {
+        expect(consultantCellFromBag(bag, "Consultant")).toBe("cons@firm.co");
+    });
+
+    test("trims the header and the bag keys before matching", () => {
+        const spaced = JSON.stringify({ "  Consultant  ": "cons@firm.co" });
+        expect(consultantCellFromBag(spaced, "Consultant")).toBe("cons@firm.co");
+        expect(consultantCellFromBag(bag, "  Consultant  ")).toBe("cons@firm.co");
+    });
+
+    test("no header designated → undefined (static-only behaviour)", () => {
+        expect(consultantCellFromBag(bag, undefined)).toBeUndefined();
+        expect(consultantCellFromBag(bag, "   ")).toBeUndefined();
+    });
+
+    test("absent or malformed bag → undefined", () => {
+        expect(consultantCellFromBag(undefined, "Consultant")).toBeUndefined();
+        expect(consultantCellFromBag("not json", "Consultant")).toBeUndefined();
+        expect(consultantCellFromBag("null", "Consultant")).toBeUndefined();
+    });
+
+    test("designated header absent from the bag → undefined", () => {
+        expect(consultantCellFromBag(bag, "Missing")).toBeUndefined();
+    });
+
+    test("blank cell is returned verbatim (mergeCcRecipients treats it as absent)", () => {
+        expect(consultantCellFromBag(bag, "Blank")).toBe("");
+    });
+});
 
 describe("mergeCcRecipients", () => {
     test("static CC only, no consultant cell → returns the static CC", () => {

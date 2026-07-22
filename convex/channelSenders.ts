@@ -23,6 +23,7 @@ import {
 import { logWhatsAppActivity } from "./lib/dynamics_logging";
 import { notifyTinaOfOutboundTemplate, substitutedBodyVariables } from "./lib/notifyTina";
 import { applyMerge } from "./lib/applyMerge";
+import { mergeCcRecipients, consultantCellFromBag } from "./lib/ccMerge";
 import { composeEmailContent } from "./lib/composeEmailContent";
 import {
     chunkByPayload,
@@ -295,7 +296,16 @@ async function sendEmailBatch_(
                     subject: mergedSubject,
                     body: emailBody,
                     toRecipients: emailAddresses.map((email) => ({ email, name: recipient.name })),
-                    ccRecipients: campaign.ccEmail ? [{ email: campaign.ccEmail }] : undefined,
+                    // Per-recipient consultant CC (PRD #78, issue #81). The static
+                    // campaign CC is merged (de-duplicated) with this recipient's own
+                    // consultant cell, read from the uploaded-row variables bag by the
+                    // campaign's designated `ccAddress` header. When no `ccAddress`
+                    // role is designated the cell is absent and this collapses to the
+                    // prior static-only CC; a blank cell simply yields no consultant CC.
+                    ccRecipients: mergeCcRecipients(
+                        campaign.ccEmail,
+                        consultantCellFromBag(recipient.variables, campaign.columnRoles?.ccAddress),
+                    ),
                     bccRecipients: campaign.bccEmail ? [{ email: campaign.bccEmail }] : undefined,
                     attachments: processedAttachments,
                     fromMailbox: campaign.fromMailbox,
@@ -982,12 +992,25 @@ async function sendPersonalisedBatch_(
             // one recipient in `attempted`, which the eligibility rule (#56)
             // declines to auto-resend — the same crash-blast-radius guarantee the
             // email seam gives, one recipient at a time for this sequential path.
+            // Per-recipient consultant CC (PRD #78, #82): merge the static
+            // campaign CC with this recipient's consultant cell, read from the
+            // uploaded-row variables bag via the campaign's `columnRoles.ccAddress`
+            // header, through the same helper the batch path uses so the two
+            // cannot diverge. With no `ccAddress` role designated the cell is
+            // absent and this collapses to today's static-only CC; a blank cell
+            // adds no consultant (the recipient still sends).
+            const consultantCell = consultantCellFromBag(
+                recipient.variables,
+                campaign.columnRoles?.ccAddress
+            );
+            const ccRecipients = mergeCcRecipients(campaign.ccEmail, consultantCell);
+
             await markAttempted([recipient.id]);
             const result = await sendEmail({
                 subject: emailSubject,
                 body: emailBody,
                 toRecipients: [{ email: recipient.email!, name: recipient.name }],
-                ccRecipients: campaign.ccEmail ? [{ email: campaign.ccEmail }] : undefined,
+                ccRecipients,
                 bccRecipients: campaign.bccEmail ? [{ email: campaign.bccEmail }] : undefined,
                 attachments: [],
                 fromMailbox: campaign.fromMailbox,

@@ -32,6 +32,39 @@ function splitAddresses(value: string | undefined | null): string[] {
 }
 
 /**
+ * Read a recipient's consultant-CC cell from its uploaded-row variables bag
+ * (PRD #78). The bag is the JSON string each recipient carries, keyed by column
+ * header; `header` is the campaign's designated `columnRoles.ccAddress`. Both
+ * email send paths call this so they read the cell identically and cannot
+ * diverge.
+ *
+ * Returns `undefined` — indistinguishable from a blank cell to
+ * `mergeCcRecipients` — when no header is designated, the bag is absent or
+ * malformed, or the designated header has no cell. Header and key matching trim
+ * whitespace, mirroring the batch path's own bag parse.
+ */
+export function consultantCellFromBag(
+    variables: string | undefined | null,
+    header: string | undefined | null
+): string | undefined {
+    const wanted = header?.trim();
+    if (!wanted || !variables) return undefined;
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(variables);
+    } catch {
+        return undefined;
+    }
+    if (!parsed || typeof parsed !== "object") return undefined;
+    for (const [k, val] of Object.entries(parsed as Record<string, unknown>)) {
+        if (k.trim() === wanted) {
+            return val == null ? undefined : String(val);
+        }
+    }
+    return undefined;
+}
+
+/**
  * Merge the static campaign CC with a recipient's consultant-column cell into a
  * de-duplicated CC recipient list, or `undefined` when neither yields an
  * address.
