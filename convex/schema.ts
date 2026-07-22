@@ -60,11 +60,14 @@ export default defineSchema({
         // (PRD prd-bad-debt-excel-campaign.md, issue #65). Persisted by column
         // header (durable across re-exports that share headers) — the send
         // address (email), the tracking key (contact GUID = recipient identity),
-        // and the invoice GUID. Unset for non-uploaded campaigns.
+        // the invoice GUID, and an optional consultant-CC column (PRD #78,
+        // issue #79). Unset for non-uploaded campaigns; `ccAddress` is additive
+        // and optional, so existing campaigns are unaffected.
         columnRoles: v.optional(v.object({
             sendAddress: v.optional(v.string()),
             trackingKey: v.string(),
             invoiceGuid: v.optional(v.string()),
+            ccAddress: v.optional(v.string()),
         })),
         // Per-campaign WhatsApp variable→column mapping for a source-of-truth
         // uploaded-file campaign (PRD prd-bad-debt-excel-campaign.md, issue #70).

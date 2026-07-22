@@ -60,11 +60,16 @@ export interface UploadedColumns {
  *   Required: identity is the whole point of the seam.
  * - `invoiceGuid` — the column holding the invoice GUID used to fetch each
  *   recipient's PDF (null until the PDF slice; not every campaign attaches one).
+ * - `ccAddress` — the column naming a per-recipient consultant email to CC
+ *   (null when not designated). No dedicated per-recipient field: the cell
+ *   already travels in the variables bag; this role only records *which header*
+ *   is the CC (PRD #78, issue #79).
  */
 export interface ColumnRoles {
     sendAddress: number | null;
     trackingKey: number;
     invoiceGuid: number | null;
+    ccAddress: number | null;
 }
 
 /**
@@ -79,6 +84,7 @@ export interface PersistedColumnRoles {
     sendAddress?: string | null;
     trackingKey: string;
     invoiceGuid?: string | null;
+    ccAddress?: string | null;
 }
 
 /** One designated role whose persisted header is not among the uploaded columns. */
@@ -171,8 +177,8 @@ export function parseUploadedColumns(rows: string[][]): UploadedColumns {
  * Optional roles left unset (absent / null / blank) resolve to `null`. If the
  * required `trackingKey` header — or any designated optional header — is not
  * present among the columns, the result is `unresolved`, listing each missing
- * role in `sendAddress, trackingKey, invoiceGuid` order, so the caller can hold
- * the upload rather than materialise against the wrong columns.
+ * role in `sendAddress, trackingKey, invoiceGuid, ccAddress` order, so the caller
+ * can hold the upload rather than materialise against the wrong columns.
  */
 export function resolveColumnRoles(
     columns: DetectedColumn[],
@@ -198,16 +204,18 @@ export function resolveColumnRoles(
         return resolve(role, header);
     };
 
-    // Resolve in role order so `unresolved` reads sendAddress → trackingKey → invoiceGuid.
+    // Resolve in role order so `unresolved` reads
+    // sendAddress → trackingKey → invoiceGuid → ccAddress.
     const sendAddress = resolveOptional("sendAddress", persisted.sendAddress);
     const trackingKey = resolve("trackingKey", persisted.trackingKey);
     const invoiceGuid = resolveOptional("invoiceGuid", persisted.invoiceGuid);
+    const ccAddress = resolveOptional("ccAddress", persisted.ccAddress);
 
     if (unresolved.length > 0 || trackingKey === null) {
         return { status: "unresolved", unresolved };
     }
 
-    return { status: "ok", roles: { sendAddress, trackingKey, invoiceGuid } };
+    return { status: "ok", roles: { sendAddress, trackingKey, invoiceGuid, ccAddress } };
 }
 
 /**

@@ -74,7 +74,7 @@ describe("parseUploadedColumns (retain every column)", () => {
 describe("materialiseRecipients (tracking-key identity + variables bag)", () => {
     // A representative bad-debt export: name, email (send address), contact GUID
     // (tracking key), invoice GUID, and pre-formatted merge columns.
-    const roles: ColumnRoles = { sendAddress: 1, trackingKey: 2, invoiceGuid: 3 };
+    const roles: ColumnRoles = { sendAddress: 1, trackingKey: 2, invoiceGuid: 3, ccAddress: null };
     const uploaded = parseUploadedColumns([
         ["Full Name", "Email", "Contact", "InvoiceGuid", "Amount"],
         ["Alice", "alice@example.com", A, INV_A, "R1,200.00"],
@@ -95,6 +95,7 @@ describe("materialiseRecipients (tracking-key identity + variables bag)", () => 
             sendAddress: 0,
             trackingKey: 1,
             invoiceGuid: null,
+            ccAddress: null,
         });
         expect(recipients[0].recipientId).toBe(A);
     });
@@ -132,6 +133,7 @@ describe("materialiseRecipients (tracking-key identity + variables bag)", () => 
             sendAddress: null,
             trackingKey: 0,
             invoiceGuid: null,
+            ccAddress: null,
         });
         expect(recipients[0].variables.Amount).toBe("  R1,200.00  ");
     });
@@ -141,6 +143,7 @@ describe("materialiseRecipients (tracking-key identity + variables bag)", () => 
             sendAddress: null,
             trackingKey: 2,
             invoiceGuid: null,
+            ccAddress: null,
         });
         expect(recipients[0].sendAddress).toBeNull();
         expect(recipients[0].invoiceGuid).toBeNull();
@@ -161,7 +164,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: 1, trackingKey: 2, invoiceGuid: 3 },
+            roles: { sendAddress: 1, trackingKey: 2, invoiceGuid: 3, ccAddress: null },
         });
     });
 
@@ -169,15 +172,19 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         const result = resolveColumnRoles(columns, { trackingKey: "Contact" });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null },
+            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null },
         });
         expect(
             resolveColumnRoles(columns, {
                 sendAddress: null,
                 trackingKey: "Contact",
                 invoiceGuid: "  ",
+                ccAddress: "  ",
             }),
-        ).toEqual({ status: "ok", roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null } });
+        ).toEqual({
+            status: "ok",
+            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null },
+        });
     });
 
     it("resolves against columns reordered by a re-export, as long as headers match (durability)", () => {
@@ -190,7 +197,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: 2, trackingKey: 1, invoiceGuid: null },
+            roles: { sendAddress: 2, trackingKey: 1, invoiceGuid: null, ccAddress: null },
         });
     });
 
@@ -198,7 +205,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         const result = resolveColumnRoles(columns, { trackingKey: "  Contact  " });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null },
+            roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null },
         });
     });
 
@@ -230,8 +237,64 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
         const result = resolveColumnRoles(dupes, { trackingKey: "Contact" });
         expect(result).toEqual({
             status: "ok",
-            roles: { sendAddress: null, trackingKey: 0, invoiceGuid: null },
+            roles: { sendAddress: null, trackingKey: 0, invoiceGuid: null, ccAddress: null },
         });
+    });
+
+    it("resolves a designated consultant-CC header to its column index (#79)", () => {
+        const withCc = parseUploadedColumns([
+            ["Email", "Contact", "Consultant"],
+        ]).columns;
+        const result = resolveColumnRoles(withCc, {
+            sendAddress: "Email",
+            trackingKey: "Contact",
+            ccAddress: "Consultant",
+        });
+        expect(result).toEqual({
+            status: "ok",
+            roles: { sendAddress: 0, trackingKey: 1, invoiceGuid: null, ccAddress: 2 },
+        });
+    });
+
+    it("leaves the consultant-CC role null when its header is unset (absent, null, or blank) (#79)", () => {
+        expect(resolveColumnRoles(columns, { trackingKey: "Contact" }).status).toBe("ok");
+        for (const ccAddress of [undefined, null, "   "]) {
+            expect(resolveColumnRoles(columns, { trackingKey: "Contact", ccAddress })).toEqual({
+                status: "ok",
+                roles: { sendAddress: null, trackingKey: 2, invoiceGuid: null, ccAddress: null },
+            });
+        }
+    });
+
+    it("reports a designated-but-missing consultant-CC header as unresolved, in role order (#79)", () => {
+        const result = resolveColumnRoles(columns, {
+            sendAddress: "EmailAddress",
+            trackingKey: "Contact",
+            ccAddress: "Consultant",
+        });
+        expect(result).toEqual({
+            status: "unresolved",
+            unresolved: [
+                { role: "sendAddress", header: "EmailAddress" },
+                { role: "ccAddress", header: "Consultant" },
+            ],
+        });
+    });
+
+    it("carries the consultant-CC cell into the materialised variables bag (existing every-column rule) (#79)", () => {
+        const uploaded = parseUploadedColumns([
+            ["Email", "Contact", "Consultant"],
+            ["alice@example.com", A, "consultant@firm.com"],
+        ]);
+        const resolved = resolveColumnRoles(uploaded.columns, {
+            sendAddress: "Email",
+            trackingKey: "Contact",
+            ccAddress: "Consultant",
+        });
+        expect(resolved.status).toBe("ok");
+        if (resolved.status !== "ok") return;
+        const { recipients } = materialiseRecipients(uploaded, resolved.roles);
+        expect(recipients[0].variables.Consultant).toBe("consultant@firm.com");
     });
 
     it("feeds straight into materialiseRecipients (the AC #4 → #5 bridge)", () => {
@@ -254,7 +317,7 @@ describe("resolveColumnRoles (persisted-by-header → index designation)", () =>
 });
 
 describe("materialiseRecipients (held rows — the single-invoice hard gate)", () => {
-    const roles: ColumnRoles = { sendAddress: 1, trackingKey: 2, invoiceGuid: null };
+    const roles: ColumnRoles = { sendAddress: 1, trackingKey: 2, invoiceGuid: null, ccAddress: null };
 
     it("holds a row whose tracking-key cell is blank", () => {
         const uploaded = parseUploadedColumns([
