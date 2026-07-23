@@ -8,6 +8,14 @@ interface WhatsAppPreviewProps {
     variableValues: Record<string, string>;
     recipientName?: string;
     recipientPhone?: string;
+    /**
+     * When the `variableValues` are resolved from a real uploaded row via the
+     * authored mapping (issue #88), an absent/empty value means the variable is
+     * unmapped — render it **visibly blank** so the operator sees the problem
+     * pre-send. When false (the compose-step preview, where the operator is still
+     * typing test values) an empty value renders as a `[name]` placeholder hint.
+     */
+    resolveEmptyAsBlank?: boolean;
 }
 
 export function WhatsAppPreview({
@@ -15,6 +23,7 @@ export function WhatsAppPreview({
     variableValues,
     recipientName = "John Doe",
     recipientPhone = "+27 82 123 4567",
+    resolveEmptyAsBlank = false,
 }: WhatsAppPreviewProps) {
     // Replace variables in template body with actual values
     const renderMessage = () => {
@@ -22,9 +31,12 @@ export function WhatsAppPreview({
 
         let message = template.body;
 
-        // Replace each variable with its value or placeholder
+        // Replace each variable with its value. In real-row mode an empty value
+        // renders blank (an unmapped variable is a problem the operator must see);
+        // otherwise it renders as a `[name]` placeholder hint while values are typed.
         template.variables.forEach((variable) => {
-            const value = variableValues[variable] || `[${variable}]`;
+            const raw = variableValues[variable];
+            const value = raw ? raw : resolveEmptyAsBlank ? "" : `[${variable}]`;
             message = message.replace(new RegExp(`\\{\\{${variable}\\}\\}`, "g"), value);
         });
 
@@ -44,7 +56,7 @@ export function WhatsAppPreview({
         if (!url.includes("{{1}}")) return url;
         if (!varName) return url;
         const value = variableValues[varName];
-        if (!value) return url.replace("{{1}}", `[${varName}]`);
+        if (!value) return url.replace("{{1}}", resolveEmptyAsBlank ? "" : `[${varName}]`);
         return url.replace("{{1}}", value);
     };
 

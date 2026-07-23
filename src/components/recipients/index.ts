@@ -45,6 +45,7 @@ export {
     guessVariableMapping,
     validateVariableMapping,
     serialiseVariableMapping,
+    resolvePreviewVariableValues,
     type WhatsAppTemplateShape,
     type TemplateVariableField,
     type VariableMappingValidation,

@@ -22,7 +22,7 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, UploadPreviewSample, type Contact, type UploadRolesResult } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, UploadPreviewSample, resolvePreviewVariableValues, type Contact, type UploadRolesResult } from "@/components/recipients";
 import type { PersistedColumnRoles } from "@/components/recipients/columnRoles";
 import type { ValidationReport } from "@/components/recipients/validationReport";
 import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
@@ -1378,6 +1378,23 @@ export default function NewCampaignPage() {
         fetchSampleContacts,
     );
 
+    // WhatsApp upload final preview (issue #88): render the message against a real
+    // uploaded row via the authored variable→column mapping, so the operator confirms
+    // this recipient's own first name, invoice, amount and payment link — and sees any
+    // unmapped variable render blank — before sending. Draws from the first validated
+    // row (report.sendable), the same set the send path is allowed to send, for parity
+    // with the email upload preview. Falls back to the typed `variableValues` when there
+    // is no template or no uploaded row yet.
+    const whatsappUploadPreviewRow = uploadReport?.sendable[0] ?? null;
+    const whatsappUploadPreviewValues = useMemo(() => {
+        if (!selectedTemplate || !whatsappUploadPreviewRow) return null;
+        return resolvePreviewVariableValues(
+            selectedTemplate,
+            whatsappVariableMappings,
+            whatsappUploadPreviewRow.variables,
+        );
+    }, [selectedTemplate, whatsappVariableMappings, whatsappUploadPreviewRow]);
+
     // Reachable-recipient counts for the explicit (hand-picked) shape, derived from
     // the same value the send path uses so the displayed count matches exactly what
     // gets sent: email/personalised → contacts with an email; WhatsApp → contacts
@@ -2113,6 +2130,17 @@ export default function NewCampaignPage() {
                                                 recipientName={previewSample[0]?.fullName}
                                                 recipientEmail={previewSample[0]?.email || undefined}
                                                 attachments={attachments}
+                                            />
+                                        ) : audience === "upload" && whatsappUploadPreviewValues ? (
+                                            // WhatsApp upload (#88): render against a real uploaded row
+                                            // via the authored mapping — unmapped variables show blank so
+                                            // the empty-variable problem is visible before send.
+                                            <WhatsAppPreview
+                                                template={selectedTemplate}
+                                                variableValues={whatsappUploadPreviewValues}
+                                                recipientName={whatsappUploadPreviewRow?.recipientId}
+                                                recipientPhone={whatsappUploadPreviewRow?.phone || undefined}
+                                                resolveEmptyAsBlank
                                             />
                                         ) : (
                                             <WhatsAppPreview

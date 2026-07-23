@@ -28,6 +28,7 @@
  */
 
 import type { DetectedColumn } from "./extractContactIds";
+import { resolveRowVariables } from "../../../convex/lib/whatsapp";
 
 /**
  * The subset of a WhatsApp template record this core reads. Kept structural (not
@@ -216,4 +217,30 @@ export function serialiseVariableMapping(
         if (header !== "") out[f.name] = header;
     }
     return JSON.stringify(out);
+}
+
+/**
+ * Resolve every template variable's value from a **real uploaded row** via the
+ * authored mapping, for the WhatsApp final preview (issue #88). Given the template,
+ * the persisted `whatsappVariableMappings` JSON, and one materialised recipient's
+ * cell bag (`{ header: cell }`), it returns the `{ variableName: value }` map the
+ * {@link WhatsAppPreview} renders — so the operator sees this recipient's own first
+ * name, invoice number, amount and payment link before sending, not static
+ * placeholders (parity with the email upload preview's real-row approach).
+ *
+ * Fidelity is the point: it resolves through {@link resolveRowVariables} — the exact
+ * core the send path uses — so the preview mirrors what will actually be sent. A
+ * variable with no authored column (and no column literally named after it) resolves
+ * to an empty string, making the empty-variable problem visible pre-send. A
+ * null/blank/garbage mapping is tolerated (every variable resolves blank), never
+ * throwing.
+ */
+export function resolvePreviewVariableValues(
+    template: WhatsAppTemplateShape,
+    mappingJson: string | null | undefined,
+    rowBag: Readonly<Record<string, string>>,
+): Record<string, string> {
+    const names = templateVariableFields(template).map((f) => f.name);
+    const mappings = parseDefaultMappings(mappingJson);
+    return resolveRowVariables(names, mappings, rowBag);
 }

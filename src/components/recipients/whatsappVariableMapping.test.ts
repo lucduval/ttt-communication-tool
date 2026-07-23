@@ -4,6 +4,7 @@ import {
     guessVariableMapping,
     validateVariableMapping,
     serialiseVariableMapping,
+    resolvePreviewVariableValues,
     type WhatsAppTemplateShape,
 } from "./whatsappVariableMapping";
 import type { DetectedColumn } from "./extractContactIds";
@@ -167,5 +168,52 @@ describe("serialiseVariableMapping — the campaign's whatsappVariableMappings J
 
     it("serialises an all-blank mapping to {} so the field still round-trips", () => {
         expect(serialiseVariableMapping(fields, {})).toBe("{}");
+    });
+});
+
+describe("resolvePreviewVariableValues — render the final preview against a real uploaded row (issue #88)", () => {
+    // The authored mapping the operator persisted onto the campaign
+    // (whatsappVariableMappings) — logical variable name → uploaded column header.
+    const mapping = JSON.stringify({
+        "1": "First Name",
+        "2": "Invoice No",
+        "3": "Amount Due",
+        payment_link: "Pay Token",
+    });
+
+    // A real uploaded row's cell bag (header → cell), as materialiseRecipients emits.
+    const row = {
+        "First Name": "Thabo",
+        "Invoice No": "INV-1024",
+        "Amount Due": "R 4 500.00",
+        "Pay Token": "abc123",
+    };
+
+    it("resolves each template variable (body + button) from the row via the authored mapping", () => {
+        const values = resolvePreviewVariableValues(seedTemplate, mapping, row);
+        expect(values).toEqual({
+            "1": "Thabo",
+            "2": "INV-1024",
+            "3": "R 4 500.00",
+            payment_link: "abc123",
+        });
+    });
+
+    it("renders an unmapped variable as a blank string, so the empty-variable problem is visible pre-send", () => {
+        // Payment link left unmapped, and no column literally named after it either.
+        const partial = JSON.stringify({ "1": "First Name", "2": "Invoice No", "3": "Amount Due" });
+        const values = resolvePreviewVariableValues(seedTemplate, partial, row);
+        expect(values.payment_link).toBe("");
+    });
+
+    it("renders a mapped-but-missing column as blank (the cell is absent from this row)", () => {
+        const mismatched = JSON.stringify({ "1": "First Name", "2": "Invoice No", "3": "Gone", payment_link: "Pay Token" });
+        const values = resolvePreviewVariableValues(seedTemplate, mismatched, row);
+        expect(values["3"]).toBe("");
+    });
+
+    it("tolerates a null/absent mapping — every variable resolves blank rather than throwing", () => {
+        const values = resolvePreviewVariableValues(seedTemplate, null, row);
+        expect(values).toEqual({ "1": "", "2": "", "3": "", payment_link: "" });
     });
 });
