@@ -28,6 +28,11 @@
  */
 
 import type { HeldReason, MaterialiseResult, MaterialisedRecipient } from "./columnRoles";
+import type { DetectedColumn } from "./extractContactIds";
+import {
+    validateVariableMapping,
+    type TemplateVariableField,
+} from "./whatsappVariableMapping";
 
 /** Per-recipient PDF generation state (drives the `missing-pdf` hold). */
 export type PdfStatus = "pending" | "generated" | "failed";
@@ -38,7 +43,9 @@ export type ValidationHoldReason =
     | "unmatched-placeholder"
     | "empty-referenced-cell"
     | "invalid-send-address"
-    | "missing-pdf";
+    | "missing-pdf"
+    | "unmapped-variable" // a WhatsApp template variable has no mapped column (campaign-level)
+    | "missing-phone"; // no usable phone destination (no column, or a blank/malformed cell)
 
 /** One held row, with every reason it was held (a row can fail several checks). */
 export interface ValidationHold {
@@ -59,10 +66,42 @@ export interface ValidationReport {
      * names once rather than repeated on every row.
      */
     unmatchedPlaceholders: string[];
+    /**
+     * WhatsApp template variables the operator left unmapped (PRD #84, issue #87).
+     * Empty for an email upload or a fully-mapped WhatsApp upload. Campaign-level,
+     * like {@link unmatchedPlaceholders}: while non-empty the message renders blank
+     * variables for everyone, so every recipient is held with `unmapped-variable`.
+     * Carries the full field (name + label) so the operator sees *which* to map.
+     */
+    unmappedVariables: TemplateVariableField[];
+    /**
+     * True when this is a WhatsApp upload with no phone column designated (PRD #84,
+     * issue #87). Campaign-level: with no destination for anyone, every recipient is
+     * held with `missing-phone`. Always false for an email upload.
+     */
+    phoneColumnMissing: boolean;
     /** Every held row (tracking-key holds + content holds), in row order. */
     held: ValidationHold[];
     /** Recipients cleared to send — exactly what the send path may send. */
     sendable: MaterialisedRecipient[];
+}
+
+/**
+ * The resolved WhatsApp authoring inputs the pre-send report validates (PRD #84,
+ * issue #87). Present only for a WhatsApp upload — an email upload passes none, so
+ * the variable/phone warnings never fire. Built by {@link prepareUploadForSend}
+ * from the selected template's fields, the operator's mapping, the uploaded
+ * columns, and whether a phone column role was designated.
+ */
+export interface WhatsAppReportContext {
+    /** The template's variables to map (body positions + button variables). */
+    fields: readonly TemplateVariableField[];
+    /** The operator's current variable→column mapping (logical name → header). */
+    mapping: Readonly<Record<string, string>>;
+    /** The uploaded columns, so a mapped-but-absent header still reads as unmapped. */
+    columns: readonly DetectedColumn[];
+    /** Whether a phone column role has been designated for this upload. */
+    phoneDesignated: boolean;
 }
 
 /**
@@ -110,6 +149,21 @@ export function isValidSendAddress(address: string): boolean {
 }
 
 /**
+ * Whether a raw phone cell is a plausible WhatsApp destination (PRD #84, issue
+ * #87). Mirrors the sender's `normalizeToE164Digits` (`convex/lib/whatsapp.ts`):
+ * strip non-digits, treat a leading `0` as the SA national prefix (→ `27`), and
+ * require 9–15 digits. Kept as a pure local check (not an import of the Convex
+ * sender) so this authoring module stays free of network/Convex code — the goal
+ * is only to warn the operator, matching what the sender will actually accept.
+ */
+export function isPlausiblePhone(raw: string | null | undefined): boolean {
+    if (!raw) return false;
+    let digits = raw.replace(/\D/g, "");
+    if (digits.startsWith("0")) digits = "27" + digits.slice(1);
+    return digits.length >= 9 && digits.length <= 15;
+}
+
+/**
  * Build the consolidated pre-send validation report from the template's referenced
  * placeholders, the materialised rows, and per-recipient PDF status.
  *
@@ -126,6 +180,7 @@ export function buildValidationReport(
     placeholders: readonly string[],
     rows: MaterialiseResult,
     pdfStatus: Readonly<Record<string, PdfStatus>> = {},
+    whatsapp?: WhatsAppReportContext,
 ): ValidationReport {
     const { recipients, held: trackingKeyHeld } = rows;
 
@@ -142,6 +197,17 @@ export function buildValidationReport(
     const wanted = extractDistinct(placeholders);
     const unmatchedPlaceholders = wanted.filter((p) => !columns.has(p));
     const referencedColumns = wanted.filter((p) => columns.has(p));
+
+    // WhatsApp authoring warnings (PRD #84, issue #87) — computed only for a
+    // WhatsApp upload (a supplied `whatsapp` context); an email upload leaves both
+    // empty/false so nothing new fires. Unmapped variables (validated against the
+    // real uploaded columns, so a mapped-but-absent header still counts) and a
+    // missing phone column are both campaign-level: while either holds, no row can
+    // produce a usable message, so every recipient is held below.
+    const unmappedVariables = whatsapp
+        ? validateVariableMapping(whatsapp.fields, whatsapp.mapping, whatsapp.columns).unmapped
+        : [];
+    const phoneColumnMissing = whatsapp ? !whatsapp.phoneDesignated : false;
 
     // Tracking-key holds carry through as-is, one reason each.
     const held: ValidationHold[] = trackingKeyHeld.map((h) => ({
@@ -175,6 +241,15 @@ export function buildValidationReport(
             reasons.push("missing-pdf");
         }
 
+        // WhatsApp holds (only when a WhatsApp context is supplied):
+        //  - an unmapped variable renders blank for everyone → hold every recipient;
+        //  - no usable phone (no column at all, or this row's cell blank/malformed)
+        //    means the recipient has no destination → hold this recipient.
+        if (whatsapp) {
+            if (unmappedVariables.length > 0) reasons.push("unmapped-variable");
+            if (!isPlausiblePhone(recipient.phone)) reasons.push("missing-phone");
+        }
+
         if (reasons.length > 0) {
             held.push({ rowIndex: recipient.rowIndex, trackingKey: recipient.recipientId, reasons });
         } else {
@@ -185,7 +260,7 @@ export function buildValidationReport(
     // One report, in row order, so the operator reads holds top-to-bottom.
     held.sort((a, b) => a.rowIndex - b.rowIndex);
 
-    return { unmatchedPlaceholders, held, sendable };
+    return { unmatchedPlaceholders, unmappedVariables, phoneColumnMissing, held, sendable };
 }
 
 /** Trim, drop blanks, de-duplicate in first-seen order. */

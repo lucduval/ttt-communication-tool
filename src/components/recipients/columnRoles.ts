@@ -37,6 +37,7 @@ import {
     type PdfStatus,
     type ValidationReport,
 } from "./validationReport";
+import type { TemplateVariableField } from "./whatsappVariableMapping";
 
 export type UploadedColumnsStatus =
     | "ok" // the file had a header row (dataRows may still be empty)
@@ -356,6 +357,18 @@ export interface ValidationContext {
     placeholders: readonly string[];
     /** Per-recipient PDF status, keyed by `recipientId`; absent = passing sentinel. */
     pdfStatus?: Readonly<Record<string, PdfStatus>>;
+    /**
+     * WhatsApp authoring inputs (PRD #84, issue #87) — present only for a WhatsApp
+     * upload. When supplied, the report warns about unmapped template variables and
+     * a missing phone column, and holds recipients with a blank/malformed phone. An
+     * email upload omits this, so those warnings never fire.
+     */
+    whatsapp?: {
+        /** The template's variables to map (body positions + button variables). */
+        fields: readonly TemplateVariableField[];
+        /** The operator's current variable→column mapping (logical name → header). */
+        mapping: Readonly<Record<string, string>>;
+    };
 }
 
 /** Project one materialised recipient into the send-path payload shape. */
@@ -412,11 +425,21 @@ export function prepareUploadForSend(
         };
     }
 
-    // Full pre-send gate: only rows the report clears reach the send path.
+    // Full pre-send gate: only rows the report clears reach the send path. A
+    // WhatsApp upload also carries the authored variable mapping and whether a
+    // phone column was designated, so the report can warn on both (#87).
     const report = buildValidationReport(
         validation.placeholders,
         materialised,
         validation.pdfStatus,
+        validation.whatsapp
+            ? {
+                  fields: validation.whatsapp.fields,
+                  mapping: validation.whatsapp.mapping,
+                  columns: uploaded.columns,
+                  phoneDesignated: resolved.roles.phone !== null,
+              }
+            : undefined,
     );
     return {
         status: "ok",

@@ -171,6 +171,7 @@ export function UploadListPanel({
             sel: RoleSelection,
             name: string | null,
             mappingsJson: string | undefined,
+            whatsapp: { fields: TemplateVariableField[]; mapping: Record<string, string> } | undefined,
         ) => {
             if (!cols || cols.status === "empty" || !name) {
                 onResult(null);
@@ -187,7 +188,7 @@ export function UploadListPanel({
                 ccAddress: sel.ccAddress || undefined,
                 phone: sel.phone || undefined,
             };
-            const prepared = prepareUploadForSend(cols, persisted, { placeholders });
+            const prepared = prepareUploadForSend(cols, persisted, { placeholders, whatsapp });
             if (prepared.status !== "ok" || !prepared.report) {
                 onResult(null); // a designated header vanished — hold the upload
                 return;
@@ -208,8 +209,19 @@ export function UploadListPanel({
     // re-pushes the result without a re-upload. `whatsappVariableMappings` is passed
     // as an argument (not closed over) so `recompute` keeps a stable identity.
     useEffect(() => {
-        recompute(columns, roles, fileName, whatsappVariableMappings);
-    }, [placeholders, columns, roles, fileName, whatsappVariableMappings, recompute]);
+        const whatsapp =
+            varFields.length > 0 ? { fields: varFields, mapping: varMapping } : undefined;
+        recompute(columns, roles, fileName, whatsappVariableMappings, whatsapp);
+    }, [
+        placeholders,
+        columns,
+        roles,
+        fileName,
+        whatsappVariableMappings,
+        varFields,
+        varMapping,
+        recompute,
+    ]);
 
     const handleFile = useCallback(
         async (file: File) => {
@@ -390,7 +402,13 @@ function RoleDesignation({
                       ccAddress: roles.ccAddress || undefined,
                       phone: roles.phone || undefined,
                   },
-                  { placeholders },
+                  {
+                      placeholders,
+                      whatsapp:
+                          varFields.length > 0
+                              ? { fields: varFields, mapping: varMapping }
+                              : undefined,
+                  },
               )
             : null;
 
@@ -559,6 +577,8 @@ const REASON_LABEL: Record<ValidationHoldReason, string> = {
     "empty-referenced-cell": "an empty cell in a referenced column",
     "invalid-send-address": "an invalid/missing send address",
     "missing-pdf": "no generated invoice PDF",
+    "unmapped-variable": "an unmapped WhatsApp template variable",
+    "missing-phone": "a blank/malformed phone number",
 };
 
 /**
@@ -607,6 +627,23 @@ function UploadReport({ report }: { report: ValidationReport }) {
                         </span>
                         . Add the column{report.unmatchedPlaceholders.length === 1 ? "" : "s"} or
                         remove the placeholder{report.unmatchedPlaceholders.length === 1 ? "" : "s"}.
+                    </p>
+                )}
+                {report.unmappedVariables.length > 0 && (
+                    <p>
+                        WhatsApp template variable
+                        {report.unmappedVariables.length === 1 ? "" : "s"} with no mapped column:{" "}
+                        {report.unmappedVariables
+                            .map((f) => (f.position ? `{{${f.position}}} (${f.label})` : f.label))
+                            .join(", ")}
+                        . Map {report.unmappedVariables.length === 1 ? "it" : "them"} to a column —
+                        unmapped variables send blank.
+                    </p>
+                )}
+                {report.phoneColumnMissing && (
+                    <p>
+                        No phone column is designated — a WhatsApp campaign has no destination for
+                        any recipient. Designate the phone column above.
                     </p>
                 )}
                 {held.length > 0 && (
