@@ -13,6 +13,13 @@ interface TemplateSelectorProps {
     onSelectTemplate: (template: Doc<"whatsappTemplates">) => void;
     variableValues: Record<string, string>;
     onVariableChange: (variable: string, value: string) => void;
+    /**
+     * Hide the generic free-text variable inputs (PRD #90, issue #93). Set for an
+     * uploaded-list WhatsApp campaign, where the variable→column mapping editor is
+     * the single, correct variable UI — a manual per-variable value makes no sense
+     * for a bulk upload. Defaults to `false`, so the non-upload flow is unchanged.
+     */
+    suppressVariableInputs?: boolean;
 }
 
 export function TemplateSelector({
@@ -21,6 +28,7 @@ export function TemplateSelector({
     onSelectTemplate,
     variableValues,
     onVariableChange,
+    suppressVariableInputs = false,
 }: TemplateSelectorProps) {
     const [searchQuery, setSearchQuery] = useState("");
     const [showCreateForm, setShowCreateForm] = useState(false);
@@ -134,8 +142,9 @@ export function TemplateSelector({
                 </div>
             )}
 
-            {/* Variable Inputs */}
-            {selectedTemplate && (
+            {/* Variable Inputs — suppressed for an uploaded-list campaign, whose
+                variable UI is the column-mapping editor rendered alongside (#93). */}
+            {!suppressVariableInputs && selectedTemplate && (
                 selectedTemplate.variables.length > 0 ||
                 (selectedTemplate.buttonUrl?.includes("{{1}}") && selectedTemplate.buttonUrlVariable) ||
                 (selectedTemplate.button2Url?.includes("{{1}}") && selectedTemplate.button2UrlVariable)

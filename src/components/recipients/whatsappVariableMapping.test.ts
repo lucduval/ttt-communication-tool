@@ -6,6 +6,7 @@ import {
     validateVariableMapping,
     serialiseVariableMapping,
     resolvePreviewVariableValues,
+    shouldRenderComposeVariableMapping,
     type WhatsAppTemplateShape,
 } from "./whatsappVariableMapping";
 import type { DetectedColumn } from "./extractContactIds";
@@ -279,6 +280,35 @@ describe("page-owned mapping flow — derived whatsappVariableMappings is unchan
             "4": "Due Date",
             payment_link: "payment_link",
         });
+    });
+});
+
+describe("shouldRenderComposeVariableMapping — compose-step render guard (PRD #90, issue #93)", () => {
+    const base = {
+        channel: "whatsapp" as const,
+        audience: "upload" as const,
+        fieldCount: 4,
+        columnCount: 5,
+    };
+
+    it("renders for WhatsApp + upload once a template is selected and a file uploaded", () => {
+        expect(shouldRenderComposeVariableMapping(base)).toBe(true);
+    });
+
+    it("does not render before a template is selected (no variable fields yet)", () => {
+        expect(shouldRenderComposeVariableMapping({ ...base, fieldCount: 0 })).toBe(false);
+    });
+
+    it("does not render before a file is uploaded (no columns yet)", () => {
+        expect(shouldRenderComposeVariableMapping({ ...base, columnCount: 0 })).toBe(false);
+    });
+
+    it("does not render for an email upload", () => {
+        expect(shouldRenderComposeVariableMapping({ ...base, channel: "email" })).toBe(false);
+    });
+
+    it("does not render for a non-upload WhatsApp campaign", () => {
+        expect(shouldRenderComposeVariableMapping({ ...base, audience: "clients" })).toBe(false);
     });
 });
 

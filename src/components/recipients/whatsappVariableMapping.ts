@@ -220,6 +220,31 @@ export function mergeGuessedMapping(
 }
 
 /**
+ * Whether the compose-step WhatsApp variable→column mapping editor should render
+ * (PRD #90, issue #93). It surfaces only for the WhatsApp + uploaded-list branch,
+ * and only once BOTH a template is selected (so there are variable `fields` to map)
+ * AND a file has been uploaded (so there are `columns` to map them to) — the
+ * "nothing appears before both are known" guard the PRD requires. Email uploads and
+ * campaigns with no file uploaded never show it; the non-upload WhatsApp flow keeps
+ * its own free-text variable inputs instead.
+ */
+export function shouldRenderComposeVariableMapping(input: {
+    channel: "email" | "whatsapp" | "personalised";
+    audience: "clients" | "employees" | "leads" | "upload";
+    /** Number of template variable fields (0 until a template is selected). */
+    fieldCount: number;
+    /** Number of detected upload columns (0 until a file is uploaded). */
+    columnCount: number;
+}): boolean {
+    return (
+        input.channel === "whatsapp" &&
+        input.audience === "upload" &&
+        input.fieldCount > 0 &&
+        input.columnCount > 0
+    );
+}
+
+/**
  * Validate that every template variable — body positions **and** the
  * button/payment-link variable — is bound to a column, so a send never silently
  * renders blank variables. A field is unmapped when its mapping value is

@@ -22,7 +22,7 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, UploadPreviewSample, resolvePreviewVariableValues, templateVariableFields, serialiseVariableMapping, type Contact, type UploadRolesResult, type DetectedColumn } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, UploadPreviewSample, WhatsAppVariableMapping, resolvePreviewVariableValues, templateVariableFields, serialiseVariableMapping, mergeGuessedMapping, shouldRenderComposeVariableMapping, type Contact, type UploadRolesResult, type DetectedColumn } from "@/components/recipients";
 import type { PersistedColumnRoles } from "@/components/recipients/columnRoles";
 import type { ValidationReport } from "@/components/recipients/validationReport";
 import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
@@ -259,6 +259,23 @@ export default function NewCampaignPage() {
                 : null,
         [whatsappVarFields, whatsappVarMapping],
     );
+
+    // Re-guess the variable→column mapping when the selected template's variables
+    // change for an uploaded WhatsApp campaign (PRD #90, issue #93) — chiefly when
+    // the operator picks (or switches) the template on the compose step, where the
+    // template is chosen. Existing selections for variables the new template still
+    // has are preserved; newly-appeared variables are seeded from the headers (the
+    // pure `mergeGuessedMapping` seam, #91). Keyed on the fields' identity (which
+    // only changes when the template changes) and the columns; `whatsappVarMapping`
+    // is read via the functional updater, not a dependency, so an operator clearing
+    // a mapping is never re-seeded by this effect. Idempotent with the recipients-
+    // step panel's own re-guess when both are mounted (back-navigation).
+    useEffect(() => {
+        if (audience !== "upload" || whatsappVarFields.length === 0 || uploadColumns.length === 0) {
+            return;
+        }
+        setWhatsappVarMapping((prev) => mergeGuessedMapping(whatsappVarFields, uploadColumns, prev));
+    }, [whatsappVarFields, uploadColumns, audience]);
 
     // Personalised campaign state
     const [aiSystemPrompt, setAiSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
@@ -1177,6 +1194,13 @@ export default function NewCampaignPage() {
         setVariableValues((prev) => ({ ...prev, [variable]: value }));
     };
 
+    // The compose-step WhatsApp mapping editor (#93) writes one variable at a time
+    // into the page-owned mapping — the single source of truth the recipients-step
+    // panel is also controlled for (#92), so the two surfaces can never drift.
+    const handleWhatsappVarMappingChange = useCallback((name: string, header: string) => {
+        setWhatsappVarMapping((prev) => ({ ...prev, [name]: header }));
+    }, []);
+
     const handleSelectAll = async () => {
         try {
             setIsSelectingAll(true);
@@ -2009,23 +2033,64 @@ export default function NewCampaignPage() {
                                 </div>
                             ) : (
                                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                                    <Card title="Select Template">
-                                        <TemplateSelector
-                                            templates={whatsappTemplates || []}
-                                            selectedTemplateId={selectedTemplate?._id || null}
-                                            onSelectTemplate={setSelectedTemplate}
-                                            variableValues={variableValues}
-                                            onVariableChange={handleVariableChange}
-                                        />
-                                    </Card>
+                                    <div className="space-y-6">
+                                        <Card title="Select Template">
+                                            <TemplateSelector
+                                                templates={whatsappTemplates || []}
+                                                selectedTemplateId={selectedTemplate?._id || null}
+                                                onSelectTemplate={setSelectedTemplate}
+                                                variableValues={variableValues}
+                                                onVariableChange={handleVariableChange}
+                                                // Uploaded lists map columns to variables (below); the
+                                                // generic free-text inputs make no sense there (#93).
+                                                suppressVariableInputs={audience === "upload"}
+                                            />
+                                        </Card>
+
+                                        {/* Variable→column mapping editor for an uploaded WhatsApp
+                                            campaign (#93). Renders only once a template is selected
+                                            AND a file is uploaded — the operator maps each variable
+                                            right where the template is chosen, and the preview beside
+                                            it confirms a real row before sending. */}
+                                        {shouldRenderComposeVariableMapping({
+                                            channel: campaignChannel,
+                                            audience,
+                                            fieldCount: whatsappVarFields.length,
+                                            columnCount: uploadColumns.length,
+                                        }) && (
+                                            <Card title="Map Columns to Template Variables">
+                                                <WhatsAppVariableMapping
+                                                    fields={whatsappVarFields}
+                                                    columns={uploadColumns}
+                                                    mapping={whatsappVarMapping}
+                                                    onChange={handleWhatsappVarMappingChange}
+                                                />
+                                            </Card>
+                                        )}
+                                    </div>
 
                                     <Card title="Message Preview">
-                                        <WhatsAppPreview
-                                            template={selectedTemplate}
-                                            variableValues={variableValues}
-                                            recipientName={previewSample[0]?.fullName}
-                                            recipientPhone={previewSample[0]?.phone || undefined}
-                                        />
+                                        {audience === "upload" && whatsappUploadPreviewValues ? (
+                                            // Render against a real uploaded row via the authored
+                                            // mapping (#93), so the preview shows this recipient's own
+                                            // first name, amount and payment link and updates live as
+                                            // the operator maps — unmapped variables show blank. Same
+                                            // resolution the final preview step uses (#88).
+                                            <WhatsAppPreview
+                                                template={selectedTemplate}
+                                                variableValues={whatsappUploadPreviewValues}
+                                                recipientName={whatsappUploadPreviewRow?.recipientId}
+                                                recipientPhone={whatsappUploadPreviewRow?.phone || undefined}
+                                                resolveEmptyAsBlank
+                                            />
+                                        ) : (
+                                            <WhatsAppPreview
+                                                template={selectedTemplate}
+                                                variableValues={variableValues}
+                                                recipientName={previewSample[0]?.fullName}
+                                                recipientPhone={previewSample[0]?.phone || undefined}
+                                            />
+                                        )}
                                     </Card>
                                 </div>
                             )}
