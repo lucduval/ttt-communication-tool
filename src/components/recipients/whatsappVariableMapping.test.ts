@@ -221,6 +221,67 @@ describe("serialiseVariableMapping — the campaign's whatsappVariableMappings J
     });
 });
 
+// Characterisation of the page-owned mapping flow (PRD #90, issue #92). The wizard
+// page is now the single source of truth for the WhatsApp variable→column mapping:
+// the upload panel is controlled for it, and the persisted `whatsappVariableMappings`
+// JSON is *derived* from the one mapping object via `serialiseVariableMapping`. These
+// pin that composing the same pure seams the refactored page/panel use — guess on
+// upload → operator edit → reconcile on a template switch → serialise — yields the
+// exact send-path JSON, so the refactor stays behaviour-preserving.
+describe("page-owned mapping flow — derived whatsappVariableMappings is unchanged (issue #92)", () => {
+    const fields = templateVariableFields(seedTemplate);
+    const uploaded = cols("First Name", "Invoice Number", "Amount Formatted", "payment_link");
+
+    it("guess-on-upload then serialise yields the fully-mapped send-path JSON", () => {
+        // The panel's file-drop path: guess from headers, page owns the object.
+        const mapping = guessVariableMapping(fields, uploaded);
+        expect(JSON.parse(serialiseVariableMapping(fields, mapping))).toEqual({
+            "1": "First Name",
+            "2": "Invoice Number",
+            "3": "Amount Formatted",
+            payment_link: "payment_link",
+        });
+    });
+
+    it("an operator dropdown edit flows through to the derived JSON verbatim", () => {
+        // The controlled `onChange` merges one variable into the page-owned object.
+        const guessed = guessVariableMapping(fields, uploaded);
+        const edited = { ...guessed, "2": "Amount Formatted" };
+        expect(JSON.parse(serialiseVariableMapping(fields, edited))["2"]).toBe("Amount Formatted");
+    });
+
+    it("reconciling on a template switch preserves operator edits in the derived JSON", () => {
+        // Operator mapped {{1}} by hand, then switched to a template adding {{4}}.
+        const previous = { "1": "First Name", "2": "Invoice Number", "3": "Amount Formatted" };
+        const nextFields = templateVariableFields({
+            variables: ["1", "2", "3", "4"],
+            variableMappings: JSON.stringify({
+                "1": "first_name",
+                "2": "invoice_number",
+                "3": "amount_formatted",
+                "4": "due_date",
+                payment_link: "payment_link",
+            }),
+            buttonUrlVariable: "payment_link",
+        });
+        const withDueDate = cols(
+            "First Name",
+            "Invoice Number",
+            "Amount Formatted",
+            "Due Date",
+            "payment_link",
+        );
+        const reconciled = mergeGuessedMapping(nextFields, withDueDate, previous);
+        expect(JSON.parse(serialiseVariableMapping(nextFields, reconciled))).toEqual({
+            "1": "First Name",
+            "2": "Invoice Number",
+            "3": "Amount Formatted",
+            "4": "Due Date",
+            payment_link: "payment_link",
+        });
+    });
+});
+
 describe("resolvePreviewVariableValues — render the final preview against a real uploaded row (issue #88)", () => {
     // The authored mapping the operator persisted onto the campaign
     // (whatsappVariableMappings) — logical variable name → uploaded column header.

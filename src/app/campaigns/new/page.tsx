@@ -22,7 +22,7 @@ import {
     LeadFilters,
     type LeadFilterState,
 } from "@/components/filters";
-import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, UploadPreviewSample, resolvePreviewVariableValues, type Contact, type UploadRolesResult } from "@/components/recipients";
+import { ContactList, useRecipientSelection, useRecipientSample, useRecipientPagination, filterSignature, materialiseExplicit, UploadListPanel, UploadPreviewSample, resolvePreviewVariableValues, templateVariableFields, serialiseVariableMapping, type Contact, type UploadRolesResult, type DetectedColumn } from "@/components/recipients";
 import type { PersistedColumnRoles } from "@/components/recipients/columnRoles";
 import type { ValidationReport } from "@/components/recipients/validationReport";
 import type { FilterPayload, SelectableContact } from "@/../convex/lib/recipientSelection";
@@ -184,9 +184,17 @@ export default function NewCampaignPage() {
     // pre-send preview (#71) renders — the same rows that would actually be sent.
     const [uploadReport, setUploadReport] = useState<ValidationReport | null>(null);
     // The WhatsApp variable→column mapping authored on an uploaded-file WhatsApp
-    // campaign (issue #86), as the JSON persisted into `whatsappVariableMappings`.
-    // `null` for email/personalised uploads and non-upload audiences.
-    const [whatsappVariableMappings, setWhatsappVariableMappings] = useState<string | null>(null);
+    // campaign (issue #86), held here as the single source of truth — a
+    // variable-name→column-header object owned by the wizard page (issue #92). The
+    // recipients-step upload panel is controlled for it (reads + reports changes),
+    // and the follow-on compose-step editor will read/write the same value, so the
+    // two surfaces can never drift. The persisted `whatsappVariableMappings` JSON and
+    // the final preview are both *derived* from it below — never a second copy.
+    const [whatsappVarMapping, setWhatsappVarMapping] = useState<Record<string, string>>({});
+    // The uploaded file's detected columns, lifted out of the panel (issue #92) so
+    // the page — and the follow-on compose-step mapping editor — can render the
+    // mapping controls against them. Empty until a file is parsed.
+    const [uploadColumns, setUploadColumns] = useState<DetectedColumn[]>([]);
     const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
         emailDomains: [],
         status: "all",
@@ -227,6 +235,30 @@ export default function NewCampaignPage() {
     // WhatsApp state
     const [selectedTemplate, setSelectedTemplate] = useState<Doc<"whatsappTemplates"> | null>(null);
     const [variableValues, setVariableValues] = useState<Record<string, string>>({});
+
+    // The selected WhatsApp template's variable fields (body positions + button
+    // variables), for a WhatsApp campaign only. The mapping the page owns
+    // (`whatsappVarMapping`) is keyed by these; both the persisted JSON and the
+    // preview derive from them (issue #92).
+    const whatsappVarFields = useMemo(
+        () =>
+            campaignChannel === "whatsapp" && selectedTemplate
+                ? templateVariableFields(selectedTemplate)
+                : [],
+        [campaignChannel, selectedTemplate],
+    );
+
+    // The mapping serialised to the campaign JSON persisted on the campaign
+    // (`whatsappVariableMappings`) and read unchanged by the send path — derived from
+    // the page-owned mapping object, never held as a separate copy (issue #92). `null`
+    // when there are no variables to map (email/personalised uploads, non-WhatsApp).
+    const whatsappVariableMappings = useMemo(
+        () =>
+            whatsappVarFields.length > 0
+                ? serialiseVariableMapping(whatsappVarFields, whatsappVarMapping)
+                : null,
+        [whatsappVarFields, whatsappVarMapping],
+    );
 
     // Personalised campaign state
     const [aiSystemPrompt, setAiSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
@@ -1302,12 +1334,12 @@ export default function NewCampaignPage() {
                 activateUploadSelection(result.recipients);
                 setColumnRoles(result.roles);
                 setUploadReport(result.report);
-                setWhatsappVariableMappings(result.whatsappVariableMappings ?? null);
+                setUploadColumns(result.columns);
             } else {
                 clearSelection();
                 setColumnRoles(null);
                 setUploadReport(null);
-                setWhatsappVariableMappings(null);
+                setUploadColumns([]);
             }
         },
         [activateUploadSelection, clearSelection],
@@ -1737,6 +1769,8 @@ export default function NewCampaignPage() {
                                                     ? selectedTemplate
                                                     : undefined
                                             }
+                                            mapping={whatsappVarMapping}
+                                            onMappingChange={setWhatsappVarMapping}
                                             onResult={handleUploadResult}
                                         />
                                     )}
