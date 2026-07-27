@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
     templateVariableFields,
     guessVariableMapping,
+    mergeGuessedMapping,
     validateVariableMapping,
     serialiseVariableMapping,
     resolvePreviewVariableValues,
@@ -106,6 +107,55 @@ describe("guessVariableMapping — pre-fill from conventional headers", () => {
         const guess = guessVariableMapping(fields, cols("first_name", "amount_formatted"));
         // invoice number and the payment link have no column → absent from the guess.
         expect(guess).toEqual({ "1": "first_name", "3": "amount_formatted" });
+    });
+});
+
+describe("mergeGuessedMapping — re-guess on template switch, preserving edits (PRD #90)", () => {
+    // The template the operator switches TO: body {{1}}{{2}} carry over from the
+    // seed template, {{4}} is genuinely new, the old {{3}} is gone, and the
+    // payment-link button carries over.
+    const newTemplate: WhatsAppTemplateShape = {
+        variables: ["1", "2", "4"],
+        variableMappings: JSON.stringify({
+            "1": "first_name",
+            "2": "invoice_number",
+            "4": "due_date",
+            payment_link: "payment_link",
+        }),
+        buttonUrlVariable: "payment_link",
+    };
+    const fields = templateVariableFields(newTemplate);
+    // "nickname" is a column the guess would never pick for {{1}} (first_name) —
+    // it can only appear because the operator chose it by hand.
+    const columns = cols("first_name", "invoice_number", "due_date", "payment_link", "nickname");
+
+    it("preserves the operator's existing selection for a variable the new template still has", () => {
+        const previous = { "1": "nickname", "2": "invoice_number", payment_link: "payment_link" };
+        expect(mergeGuessedMapping(fields, columns, previous)["1"]).toBe("nickname");
+    });
+
+    it("seeds a newly-appeared variable from the header guess", () => {
+        const previous = { "1": "nickname", "2": "invoice_number", payment_link: "payment_link" };
+        // {{4}} was absent from the previous mapping → filled from the matching header.
+        expect(mergeGuessedMapping(fields, columns, previous)["4"]).toBe("due_date");
+    });
+
+    it("drops a variable that no longer exists on the new template", () => {
+        const previous = { "1": "nickname", "3": "amount_formatted", payment_link: "payment_link" };
+        expect(mergeGuessedMapping(fields, columns, previous)).not.toHaveProperty("3");
+    });
+
+    it("leaves a newly-appeared variable unmapped when no column plausibly matches", () => {
+        const previous = { "1": "first_name", "2": "invoice_number", payment_link: "payment_link" };
+        // No due_date-ish column for {{4}} to match → left absent, not blank-filled.
+        const merged = mergeGuessedMapping(fields, cols("first_name", "invoice_number", "payment_link"), previous);
+        expect(merged).not.toHaveProperty("4");
+    });
+
+    it("produces a fresh full guess when the previous mapping is empty", () => {
+        const seedFields = templateVariableFields(seedTemplate);
+        const cs = cols("first_name", "invoice_number", "amount_formatted", "payment_link");
+        expect(mergeGuessedMapping(seedFields, cs, {})).toEqual(guessVariableMapping(seedFields, cs));
     });
 });
 

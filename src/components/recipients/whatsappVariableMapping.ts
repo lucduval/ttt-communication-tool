@@ -181,6 +181,45 @@ export function guessVariableMapping(
 }
 
 /**
+ * Reconcile an in-progress mapping with a new template's variables when the
+ * operator switches templates mid-authoring (PRD #90). Given the *new* template's
+ * variable fields, the (unchanged) uploaded columns, and the previous mapping, it
+ * returns the next mapping:
+ *
+ *   - a variable the new template still has keeps the operator's existing
+ *     selection unchanged — hand edits are never lost to a re-guess;
+ *   - a variable that newly appears on the template is seeded from the header
+ *     guess ({@link guessVariableMapping}), so it starts from a sensible default
+ *     rather than blank — and stays unmapped if no column plausibly matches;
+ *   - a variable that no longer exists on the new template is dropped (only the
+ *     new template's fields appear in the result).
+ *
+ * An empty previous mapping therefore yields a fresh full guess. This is the one
+ * piece of genuinely new decision logic the PRD needs, kept pure here so it is
+ * unit-tested rather than buried in a React effect.
+ */
+export function mergeGuessedMapping(
+    fields: readonly TemplateVariableField[],
+    columns: readonly DetectedColumn[],
+    previous: Readonly<Record<string, string>>,
+): Record<string, string> {
+    const guess = guessVariableMapping(fields, columns);
+    const merged: Record<string, string> = {};
+    for (const f of fields) {
+        const prior = (previous[f.name] ?? "").trim();
+        if (prior !== "") {
+            // Preserve the operator's own selection verbatim.
+            merged[f.name] = previous[f.name];
+        } else if (guess[f.name] !== undefined) {
+            // Newly-appeared (or never-set) variable — seed from the header guess,
+            // leaving it unmapped when the guess found no plausible column.
+            merged[f.name] = guess[f.name];
+        }
+    }
+    return merged;
+}
+
+/**
  * Validate that every template variable — body positions **and** the
  * button/payment-link variable — is bound to a column, so a send never silently
  * renders blank variables. A field is unmapped when its mapping value is
