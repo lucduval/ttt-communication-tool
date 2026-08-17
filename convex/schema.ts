@@ -50,16 +50,39 @@ export default defineSchema({
         createOpportunities: v.optional(v.boolean()),
         // Font size for email content
         fontSize: v.optional(v.string()),
+        // Per-campaign email type governing unsubscribe gating (PRD #74, issue #75).
+        // "utility" (transactional) suppresses the unsubscribe footer even where a
+        // site URL is configured; "marketing" appends it as today. Unset is treated
+        // as Marketing, so existing/untouched campaigns keep today's behaviour — the
+        // choice records the operator's compliance decision, so it is auditable.
+        emailType: v.optional(v.union(v.literal("marketing"), v.literal("utility"))),
         // Designated column roles for a source-of-truth uploaded-file campaign
         // (PRD prd-bad-debt-excel-campaign.md, issue #65). Persisted by column
         // header (durable across re-exports that share headers) — the send
         // address (email), the tracking key (contact GUID = recipient identity),
-        // and the invoice GUID. Unset for non-uploaded campaigns.
+        // the invoice GUID, and an optional consultant-CC column (PRD #78,
+        // issue #79). Unset for non-uploaded campaigns; `ccAddress` is additive
+        // and optional, so existing campaigns are unaffected.
         columnRoles: v.optional(v.object({
             sendAddress: v.optional(v.string()),
             trackingKey: v.string(),
             invoiceGuid: v.optional(v.string()),
+            ccAddress: v.optional(v.string()),
+            // The mobile-number column — the WhatsApp send destination for an
+            // uploaded recipient (PRD #84, issue #85). Additive and optional, so
+            // existing campaigns are unaffected.
+            phone: v.optional(v.string()),
         })),
+        // Per-campaign WhatsApp variable→column mapping for a source-of-truth
+        // uploaded-file campaign (PRD prd-bad-debt-excel-campaign.md, issue #70).
+        // JSON stringified map of the template's logical variable name (each
+        // positional body variable like "1"/"2", plus any dynamic button URL
+        // variable) → the Excel column header whose cell fills it. Reuses the
+        // `variableMappings` concept but points it at uploaded columns instead of
+        // Dynamics fields, and lives on the campaign (not the template) because the
+        // operator maps the chosen template's variables to columns once per
+        // campaign. Unset for non-uploaded / Dynamics-resolved campaigns.
+        whatsappVariableMappings: v.optional(v.string()),
     })
         .index("by_status", ["status"])
         .index("by_user", ["createdBy"])
@@ -87,6 +110,14 @@ export default defineSchema({
         aiPrompt: v.optional(v.string()),
         aiSystemPrompt: v.optional(v.string()),
         fontSize: v.optional(v.string()),
+        // Managed-disclaimer attachment (PRD #74, issue #77). The disclaimer's wording
+        // is snapshotted onto the content record at send time (mirroring the campaign
+        // content), so a later edit/archive of the source disclaimer never rewrites what
+        // an already-sent campaign contained. `disclaimerId` references the source for
+        // traceability; `disclaimerHtml` is the frozen wording the send/preview render.
+        // Both unset = "None" (no disclaimer appended).
+        disclaimerId: v.optional(v.id("disclaimers")),
+        disclaimerHtml: v.optional(v.string()),
     })
         .index("by_campaign", ["campaignId"]),
 
@@ -134,6 +165,12 @@ export default defineSchema({
         storageId: v.optional(v.id("_storage")), // set only when generated; never bytes
         invoiceType: v.optional(v.string()), // Tax | Accounting, when designated
         errorMessage: v.optional(v.string()), // failure detail, drives the gate's missing-pdf hold
+        // WhatsApp document-header send (PRD prd-bad-debt-excel-campaign.md, issue
+        // #70). When this recipient's PDF is sent over WhatsApp, its bytes are
+        // uploaded to Meta once and only the returned media id is cached here —
+        // never bytes. Expires ~30 days after upload (Meta), refreshed at ~25.
+        whatsappMediaId: v.optional(v.string()),
+        whatsappMediaIdUploadedAt: v.optional(v.number()),
     })
         .index("by_campaign", ["campaignId"])
         .index("by_campaign_recipient", ["campaignId", "recipientId"])
@@ -293,5 +330,20 @@ export default defineSchema({
     })
         .index("by_name", ["name"])
         .index("by_user", ["createdBy"]),
+
+    // Managed set of named legal disclaimers (PRD #74). Mirrors emailTemplates:
+    // named, org-shared, upsert-by-name seedable. Unlike templates, disclaimers
+    // are archived (a flag) rather than hard-deleted, so historical campaigns that
+    // referenced one stay meaningful — `archived` is optional (undefined = active),
+    // modelled on the shape of the existing `visibility` optional union above.
+    disclaimers: defineTable({
+        name: v.string(),
+        htmlContent: v.string(), // The disclaimer HTML, appended above the unsubscribe footer
+        isDefault: v.optional(v.boolean()), // Marks the suggested default in the picker
+        archived: v.optional(v.boolean()), // undefined treated as active; archived hides from the operator list
+        createdBy: v.string(), // Convex user _id
+        lastUpdatedAt: v.number(),
+    })
+        .index("by_name", ["name"]),
 });
 

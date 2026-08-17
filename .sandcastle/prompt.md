@@ -50,4 +50,4 @@ Pick the highest-priority open issue that is not blocked by another open issue.
 
 When all actionable issues are complete (or you are blocked on all remaining ones), or the open-issues block at the top of this prompt is empty, output the completion signal:
 
-<promise>COMPLETE</promise>
+`<promise>`COMPLETE`</promise>`

@@ -83,9 +83,10 @@ describe("recomputeCampaignStats", () => {
 
         await recomputeCampaignStats(ctx, "c1" as any);
 
-        // sent = "sent" + "delivered" = 2 + 1; delivered = 1; failed = 1.
+        // sent = "sent" + "delivered" = 2 + 1; delivered mirrors sent (no
+        // post-handoff signal distinct from bounces); failed = 1.
         expect(campaign.sentCount).toBe(3);
-        expect(campaign.deliveredCount).toBe(1);
+        expect(campaign.deliveredCount).toBe(3);
         expect(campaign.failedCount).toBe(1);
     });
 
@@ -101,7 +102,7 @@ describe("recomputeCampaignStats", () => {
         await recomputeCampaignStats(ctx, "c1" as any);
 
         expect(campaign.sentCount).toBe(2);
-        expect(campaign.deliveredCount).toBe(1);
+        expect(campaign.deliveredCount).toBe(2);
         expect(campaign.failedCount).toBe(0);
     });
 
@@ -144,7 +145,8 @@ describe("recordBouncesImpl", () => {
         const { ctx } = createCtx(messages, campaign);
 
         await recomputeCampaignStats(ctx, "c1" as any);
-        expect(campaign.deliveredCount).toBe(1);
+        // delivered mirrors sent: "delivered"(r0) + "sent"(r1) = 2.
+        expect(campaign.deliveredCount).toBe(2);
         expect(campaign.failedCount).toBe(0);
 
         // Bounce the delivered recipient (r0).
@@ -153,7 +155,8 @@ describe("recordBouncesImpl", () => {
         ]);
 
         expect(messages[0].status).toBe("failed");
-        expect(campaign.deliveredCount).toBe(0);
+        // The bounce demotes r0 out of the success bucket: sent = delivered = 1.
+        expect(campaign.deliveredCount).toBe(1);
         expect(campaign.failedCount).toBe(1);
         // sent = remaining "sent" (r1) only; the bounced "delivered" no longer counts.
         expect(campaign.sentCount).toBe(1);

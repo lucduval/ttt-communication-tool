@@ -7,7 +7,7 @@
  * (claim, flush, mark-complete, reschedule) is the driver's and is tested
  * separately in convex/lib/__tests__/channelSend.test.ts.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { getFunctionName } from "convex/server";
 import type { SendResult } from "../lib/channelSend";
 
@@ -22,6 +22,10 @@ import { emailSender } from "../channelSenders";
 
 interface CtxOpts {
     campaignContent?: unknown;
+    /** Rows `invoicePdfs:getGeneratedPdfRefs` returns — the recipients with a generated PDF. */
+    pdfRefs?: Array<{ recipientId: string; storageId: string; size: number }>;
+    /** URL `files:getDownloadUrlInternal` returns for a stored PDF (bytes fetched via global fetch). */
+    downloadUrl?: string | null;
 }
 
 function createCtx(opts: CtxOpts) {
@@ -30,8 +34,10 @@ function createCtx(opts: CtxOpts) {
             switch (getFunctionName(ref as any)) {
                 case "campaignBatches:getCampaignContent":
                     return opts.campaignContent ?? null;
+                case "invoicePdfs:getGeneratedPdfRefs":
+                    return opts.pdfRefs ?? [];
                 case "files:getDownloadUrlInternal":
-                    return null;
+                    return opts.downloadUrl ?? null;
                 default:
                     return undefined;
             }
@@ -56,6 +62,10 @@ const campaignContent = { htmlBody: "<p>Hi {firstName}</p>", fontSize: "15px", a
 beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.CONVEX_SITE_URL;
+});
+
+afterEach(() => {
+    vi.unstubAllGlobals();
 });
 
 describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
@@ -268,5 +278,265 @@ describe("emailSender.sendBatch (faked Graph $batch boundary)", () => {
         expect(sent[0].subject).toBe("re ");
         expect(sent[0].body).not.toContain("{amount}");
         expect(sent[0].body).toContain("Amount: </p>");
+    });
+});
+
+describe("emailSender.sendBatch — per-recipient invoice-PDF hold (PRD #69)", () => {
+    // An upload campaign that attaches a per-recipient invoice PDF designates an
+    // `invoiceGuid` column role. By send time the pre-gen gate has settled every
+    // recipient; a recipient absent from getGeneratedPdfRefs is one whose PDF did
+    // not generate, and must be held out of the send — never an invoice-less email.
+    const uploadCampaign = {
+        ...campaign,
+        subject: "Overdue",
+        columnRoles: { trackingKey: "Ref", invoiceGuid: "InvoiceGuid" },
+    };
+
+    it("holds every recipient when no PDF generated, sending none", async () => {
+        const batch = {
+            _id: "batch-1" as any,
+            recipients: [
+                { id: "r1", email: "alice@example.com", name: "Alice" },
+                { id: "r2", email: "bob@example.com", name: "Bob" },
+            ],
+        };
+
+        const emitted: SendResult[] = [];
+        const emit = async (results: SendResult[]) => {
+            emitted.push(...results);
+        };
+        const markedIds: string[] = [];
+        const markAttempted = async (ids: string[]) => {
+            markedIds.push(...ids);
+        };
+
+        // getGeneratedPdfRefs returns [] — no recipient's PDF is ready.
+        const { ctx } = createCtx({ campaignContent, pdfRefs: [] });
+        await emailSender.sendBatch(
+            ctx as any,
+            uploadCampaign,
+            batch,
+            emit,
+            batch.recipients,
+            markAttempted
+        );
+
+        // Nothing reaches Graph, nothing is marked attempted, both are held failed.
+        expect(boundary.sendEmailBatch).not.toHaveBeenCalled();
+        expect(markedIds).toEqual([]);
+        const byId = Object.fromEntries(emitted.map((r) => [r.recipientId, r]));
+        expect(byId.r1).toMatchObject({
+            success: false,
+            error: "Invoice PDF was not generated for this recipient",
+        });
+        expect(byId.r2).toMatchObject({
+            success: false,
+            error: "Invoice PDF was not generated for this recipient",
+        });
+    });
+
+    it("sends only recipients whose PDF generated and holds the rest", async () => {
+        const batch = {
+            _id: "batch-1" as any,
+            recipients: [
+                { id: "r1", email: "alice@example.com", name: "Alice" }, // generated
+                { id: "r2", email: "bob@example.com", name: "Bob" }, // not generated → held
+            ],
+        };
+        boundary.sendEmailBatch.mockImplementation(async (msgs: any[]) =>
+            msgs.map(() => ({ success: true }))
+        );
+
+        // The generated recipient's bytes are fetched from storage via global fetch.
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => ({
+                ok: true,
+                arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+            }))
+        );
+
+        const emitted: SendResult[] = [];
+        const emit = async (results: SendResult[]) => {
+            emitted.push(...results);
+        };
+        const markedIds: string[] = [];
+        const markAttempted = async (ids: string[]) => {
+            markedIds.push(...ids);
+        };
+
+        const { ctx } = createCtx({
+            campaignContent,
+            pdfRefs: [{ recipientId: "r1", storageId: "st1" as any, size: 1024 }],
+            downloadUrl: "https://storage.test/r1.pdf",
+        });
+        await emailSender.sendBatch(
+            ctx as any,
+            uploadCampaign,
+            batch,
+            emit,
+            batch.recipients,
+            markAttempted
+        );
+
+        // Only r1 reaches Graph — with its invoice PDF attached — and is marked.
+        expect(boundary.sendEmailBatch).toHaveBeenCalledTimes(1);
+        const sent = boundary.sendEmailBatch.mock.calls[0][0];
+        expect(sent).toHaveLength(1);
+        expect(sent[0].toRecipients[0].email).toBe("alice@example.com");
+        const pdfAttachment = sent[0].attachments.find(
+            (a: any) => a.contentType === "application/pdf"
+        );
+        expect(pdfAttachment).toBeDefined();
+        expect(markedIds).toEqual(["r1"]);
+
+        // r2 is held failed and never sent.
+        const byId = Object.fromEntries(emitted.map((r) => [r.recipientId, r]));
+        expect(byId.r1).toMatchObject({ success: true });
+        expect(byId.r2).toMatchObject({
+            success: false,
+            error: "Invoice PDF was not generated for this recipient",
+        });
+    });
+
+    it("does not hold when the campaign designates no invoice-GUID column (non-upload unchanged)", async () => {
+        const batch = {
+            _id: "batch-1" as any,
+            recipients: [
+                { id: "r1", email: "alice@example.com", name: "Alice" },
+                { id: "r2", email: "bob@example.com", name: "Bob" },
+            ],
+        };
+        boundary.sendEmailBatch.mockImplementation(async (msgs: any[]) =>
+            msgs.map(() => ({ success: true }))
+        );
+
+        const emitted: SendResult[] = [];
+        const emit = async (results: SendResult[]) => {
+            emitted.push(...results);
+        };
+
+        // Plain campaign (no columnRoles): getGeneratedPdfRefs returns [] and the
+        // hold is inert — both recipients send normally.
+        const { ctx } = createCtx({ campaignContent, pdfRefs: [] });
+        await emailSender.sendBatch(ctx as any, campaign, batch, emit, batch.recipients, async () => {});
+
+        expect(boundary.sendEmailBatch.mock.calls[0][0]).toHaveLength(2);
+        expect(emitted.map((r) => r.recipientId).sort()).toEqual(["r1", "r2"]);
+        expect(emitted.every((r) => r.success)).toBe(true);
+    });
+});
+
+describe("emailSender.sendBatch — per-recipient consultant CC (PRD #78, issue #81)", () => {
+    // The `ccAddress` column role names the uploaded header holding each client's
+    // consultant email; the cell already travels in the recipient's variables bag.
+    // The adapter merges that per-recipient cell with any static campaign CC, so
+    // both are copied on every one of the four spaced touches.
+    const ccCampaign = {
+        ...campaign,
+        subject: "Overdue",
+        columnRoles: { trackingKey: "Ref", ccAddress: "Consultant" },
+    };
+
+    /** The CC email list on the message the faked $batch boundary received. */
+    const ccOf = (sent: any[], idx: number): string[] =>
+        (sent[idx].ccRecipients ?? []).map((r: any) => r.email);
+
+    const runSend = async (campaignArg: any, recipients: any[]) => {
+        boundary.sendEmailBatch.mockImplementation(async (msgs: any[]) =>
+            msgs.map(() => ({ success: true }))
+        );
+        const emitted: SendResult[] = [];
+        const emit = async (results: SendResult[]) => {
+            emitted.push(...results);
+        };
+        const { ctx } = createCtx({ campaignContent });
+        await emailSender.sendBatch(
+            ctx as any,
+            campaignArg,
+            { _id: "batch-1" as any, recipients },
+            emit,
+            recipients,
+            async () => {}
+        );
+        return { sent: boundary.sendEmailBatch.mock.calls[0]?.[0] ?? [], emitted };
+    };
+
+    it("merges the recipient's consultant cell with the static campaign CC (both set)", async () => {
+        const { sent } = await runSend({ ...ccCampaign, ccEmail: "audit@ttt.test" }, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "cons1@ttt.test" }),
+            },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["audit@ttt.test", "cons1@ttt.test"]);
+    });
+
+    it("CCs the consultant only when the campaign has no static CC", async () => {
+        const { sent } = await runSend(ccCampaign, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "cons1@ttt.test" }),
+            },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["cons1@ttt.test"]);
+    });
+
+    it("CCs the static CC only when no ccAddress role is designated (unchanged behaviour)", async () => {
+        // Plain campaign with a static CC and no columnRoles — the per-recipient
+        // input is absent, so behaviour collapses to today's static-only CC.
+        const { sent } = await runSend({ ...campaign, ccEmail: "audit@ttt.test" }, [
+            { id: "r1", email: "alice@example.com", name: "Alice" },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["audit@ttt.test"]);
+    });
+
+    it("sends with no CC when the recipient's consultant cell is blank (row still sends)", async () => {
+        const { sent, emitted } = await runSend(ccCampaign, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "   " }),
+            },
+        ]);
+        expect(sent).toHaveLength(1);
+        expect(sent[0].ccRecipients).toBeUndefined();
+        expect(emitted).toEqual([{ recipientId: "r1", success: true }]);
+    });
+
+    it("splits a multi-address consultant cell into separate CC recipients", async () => {
+        const { sent } = await runSend(ccCampaign, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "a@ttt.test; b@ttt.test" }),
+            },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["a@ttt.test", "b@ttt.test"]);
+    });
+
+    it("resolves the consultant CC per recipient across the batch", async () => {
+        const { sent } = await runSend({ ...ccCampaign, ccEmail: "audit@ttt.test" }, [
+            {
+                id: "r1",
+                email: "alice@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "cons1@ttt.test" }),
+            },
+            {
+                id: "r2",
+                email: "bob@example.com",
+                name: "",
+                variables: JSON.stringify({ Consultant: "cons2@ttt.test" }),
+            },
+        ]);
+        expect(ccOf(sent, 0)).toEqual(["audit@ttt.test", "cons1@ttt.test"]);
+        expect(ccOf(sent, 1)).toEqual(["audit@ttt.test", "cons2@ttt.test"]);
     });
 });

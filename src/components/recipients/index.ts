@@ -5,6 +5,10 @@ export { useRecipientPagination } from "./useRecipientPagination";
 export { filterSignature } from "./filterSignature";
 export { materialiseExplicit } from "./materialiseExplicit";
 export { UploadListPanel, type UploadRolesResult } from "./UploadListPanel";
+export { ColumnSelect } from "./ColumnSelect";
+export { WhatsAppVariableMapping } from "./WhatsAppVariableMappingFields";
+export { UploadPreviewSample } from "./UploadPreviewSample";
+export { buildPreviewMessages, buildMergeContext, type PreviewMessage } from "./previewSample";
 export {
     extractContactIds,
     extractContactIdsForColumn,
@@ -38,6 +42,18 @@ export {
     type HeldRow,
     type HeldReason,
 } from "./columnRoles";
+export {
+    templateVariableFields,
+    guessVariableMapping,
+    mergeGuessedMapping,
+    validateVariableMapping,
+    serialiseVariableMapping,
+    resolvePreviewVariableValues,
+    shouldRenderComposeVariableMapping,
+    type WhatsAppTemplateShape,
+    type TemplateVariableField,
+    type VariableMappingValidation,
+} from "./whatsappVariableMapping";
 export {
     buildValidationReport,
     extractPlaceholders,

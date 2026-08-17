@@ -60,6 +60,13 @@ export interface GenerateInvoicePdfArgs {
     config?: InvoicePdfConfig;
     /** Max attempts including the first (default 3), matching the Graph client. */
     maxAttempts?: number;
+    /**
+     * Per-attempt request timeout in ms (default 45 000). Generous by design: a cold
+     * start is ~4–5 s (warm ~1 s), so this must never assume sub-second — it only
+     * exists to abort a genuinely hung connection before it consumes the whole
+     * action budget. Comfortably above the ≥30 s floor the function contract sets.
+     */
+    timeoutMs?: number;
     /** Injectable sleep so backoff costs no real wall-clock under test. */
     sleep?: (ms: number) => Promise<void>;
 }
@@ -100,6 +107,7 @@ export async function generateInvoicePdf(
 
     const config = args.config ?? getInvoicePdfConfig();
     const maxAttempts = args.maxAttempts ?? 3;
+    const timeoutMs = args.timeoutMs ?? 45_000;
     const baseDelayMs = 1000;
     const sleep =
         args.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
@@ -109,19 +117,33 @@ export async function generateInvoicePdf(
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         let response: Response;
+        // Bound each attempt so a hung connection aborts rather than stalling the
+        // whole action. A timeout aborts the fetch, surfacing as a rejection we
+        // treat like any other network error (retry, then terminal).
+        const controller = new AbortController();
+        let timedOut = false;
+        const timer = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, timeoutMs);
         try {
             response = await fetch(url, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body,
+                signal: controller.signal,
             });
         } catch (err) {
-            // A network error delivered nothing; retry it like a transient status.
+            // A network error (or our own timeout abort) delivered nothing; retry it
+            // like a transient status.
+            const reason = timedOut ? `request timed out after ${timeoutMs} ms` : String(err);
             if (attempt === maxAttempts) {
-                return { success: false, error: `Invoice PDF request failed: ${String(err)}` };
+                return { success: false, error: `Invoice PDF request failed: ${reason}` };
             }
             await sleep(baseDelayMs * 2 ** (attempt - 1));
             continue;
+        } finally {
+            clearTimeout(timer);
         }
 
         if (response.ok) {

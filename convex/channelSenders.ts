@@ -11,14 +11,20 @@ import {
     sendTemplateWithRetry,
     isTemplatePermanentError,
     isMediaHeaderType,
+    isMediaIdFresh,
     shouldRefreshMediaId,
     uploadWhatsAppMedia,
+    parseRowBag,
+    resolveRowVariables,
     RateLimiter,
     type TemplateLike,
+    type MetaSendResult,
 } from "./lib/whatsapp";
 import { logWhatsAppActivity } from "./lib/dynamics_logging";
 import { notifyTinaOfOutboundTemplate, substitutedBodyVariables } from "./lib/notifyTina";
 import { applyMerge } from "./lib/applyMerge";
+import { mergeCcRecipients, consultantCellFromBag } from "./lib/ccMerge";
+import { composeEmailContent } from "./lib/composeEmailContent";
 import {
     chunkByPayload,
     base64Size,
@@ -44,20 +50,6 @@ import {
 // Email backs off further than other channels after a thrown error to let Graph
 // recover; on the success path the successor delay is GRAPH_BATCH_DELAY_MS.
 const emailBatchDelayMs = () => parseInt(process.env.GRAPH_BATCH_DELAY_MS ?? "500", 10) || 500;
-
-/**
- * Generate an HTML unsubscribe footer for marketing email compliance.
- */
-function getUnsubscribeFooter(unsubscribeUrl: string): string {
-    return `
-    <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0; text-align: center; font-size: 12px; color: #718096; font-family: Arial, Helvetica, sans-serif;">
-        <p style="margin: 4px 0;">You are receiving this email because you are a client of TTT.</p>
-        <p style="margin: 4px 0;">
-            If you no longer wish to receive these emails, you can
-            <a href="${unsubscribeUrl}" style="color: #1a73e8; text-decoration: underline;">unsubscribe here</a>.
-        </p>
-    </div>`;
-}
 
 /**
  * Email Channel Sender. Owns Graph `$batch` chunking, the validate/prepare phase,
@@ -91,6 +83,15 @@ async function sendEmailBatch_(
     const pdfRefByRecipient = new Map(
         (pdfRefs ?? []).map((ref) => [ref.recipientId, ref] as const),
     );
+
+    // Upload campaigns that attach a per-recipient invoice PDF (an `invoiceGuid`
+    // column role is designated) must never send an invoice-less email. By the time
+    // this runs the pre-gen gate has settled every recipient (`generated`/`failed`),
+    // so a recipient absent from `pdfRefByRecipient` is one whose PDF did not
+    // generate (blank/absent GUID or a terminal generation failure) — it is held as
+    // a failure below and never handed to Graph. Inert for every non-upload
+    // campaign, where this flag is false and the flow is unchanged.
+    const requiresInvoicePdf = !!campaign.columnRoles?.invoiceGuid?.trim();
 
     // `eligible` is the driver-provided set of recipients with no existing
     // `messages` row for this campaign, or a row still `pending` — the seed
@@ -175,6 +176,21 @@ async function sendEmailBatch_(
     const prepared: PreparedSend[] = [];
 
     for (const recipient of eligible) {
+        // Hold any recipient whose invoice PDF did not generate (upload campaigns
+        // only) \u2014 a bad-debt email must never go out without its invoice attached.
+        // Settled `failed` here so it surfaces in the failed-messages view for a
+        // later operator-initiated resend, and never reaches the $batch call.
+        if (requiresInvoicePdf && !pdfRefByRecipient.has(recipient.id)) {
+            await emit([
+                {
+                    recipientId: recipient.id,
+                    success: false,
+                    error: "Invoice PDF was not generated for this recipient",
+                },
+            ]);
+            continue;
+        }
+
         // Strip whitespace and Unicode space characters (e.g. \u00a0 from Dynamics CRM)
         // that pass a truthiness check but are rejected by the Graph API.
         const cleanEmail = recipient.email?.replace(/[\u00a0\u200B-\u200D\uFEFF\s]/g, "");
@@ -240,8 +256,22 @@ async function sendEmailBatch_(
             // `{placeholder}` into the body (PRD #66 — nothing raw ever ships).
             const mergedSubject = applyMergeFields(campaign.subject || "");
 
+            // The single composition core (PRD #74, #75) owns the compliance rule
+            // (Utility omits the unsubscribe footer even where a URL exists; Marketing
+            // and unset append it when a URL is present) and the body → disclaimer →
+            // unsubscribe append order. The preview renders through the same core, so
+            // fidelity holds by construction. The disclaimer HTML was snapshotted onto
+            // the content record at send time (issue #77) — we read that frozen wording,
+            // not the live disclaimer, and run the merge engine over it exactly as over
+            // the body so a `{firstName}` etc. substitutes (unknown tokens render empty).
+            const mergedDisclaimer = applyMergeFields(campaignContent?.disclaimerHtml || "");
             let emailBody = wrapEmail(
-                mergedHtmlBody + (unsubscribeUrl ? getUnsubscribeFooter(unsubscribeUrl) : ""),
+                composeEmailContent({
+                    body: mergedHtmlBody,
+                    emailType: campaign.emailType,
+                    unsubscribeUrl,
+                    disclaimerHtml: mergedDisclaimer,
+                }),
                 mergedSubject || "Notification",
                 campaignContent?.fontSize || "15px"
             );
@@ -266,7 +296,16 @@ async function sendEmailBatch_(
                     subject: mergedSubject,
                     body: emailBody,
                     toRecipients: emailAddresses.map((email) => ({ email, name: recipient.name })),
-                    ccRecipients: campaign.ccEmail ? [{ email: campaign.ccEmail }] : undefined,
+                    // Per-recipient consultant CC (PRD #78, issue #81). The static
+                    // campaign CC is merged (de-duplicated) with this recipient's own
+                    // consultant cell, read from the uploaded-row variables bag by the
+                    // campaign's designated `ccAddress` header. When no `ccAddress`
+                    // role is designated the cell is absent and this collapses to the
+                    // prior static-only CC; a blank cell simply yields no consultant CC.
+                    ccRecipients: mergeCcRecipients(
+                        campaign.ccEmail,
+                        consultantCellFromBag(recipient.variables, campaign.columnRoles?.ccAddress),
+                    ),
                     bccRecipients: campaign.bccEmail ? [{ email: campaign.bccEmail }] : undefined,
                     attachments: processedAttachments,
                     fromMailbox: campaign.fromMailbox,
@@ -542,41 +581,167 @@ async function sendWhatsAppBatch_(
     let consecutiveTemplateErrors = 0;
     let templateAbortReason: string | null = null;
 
-    // Resolve template variables from each recipient's CRM record — never from the
-    // UI form. The template editor maps every variable (named or positional like
-    // "1"/"2") to a Dynamics field via variableMappings; that mapping is the source
-    // of truth at real send time. The UI "Fill in Template Variables" form only
-    // feeds test sends.
-    let variableMappings: Record<string, string> = {};
-    if (template.variableMappings) {
-        try {
-            variableMappings = JSON.parse(template.variableMappings);
-        } catch {
-            console.warn(`Invalid variableMappings JSON on template ${template._id}; resolving variables by name`);
-        }
-    }
-    // For each template variable, the Dynamics field to read. Falls back to the
-    // variable name itself (generic-by-field-name) for templates whose variable
-    // names already are logical field names (e.g. riivo_referralcode).
-    const varToField: Record<string, string> = {};
-    for (const varName of template.variables) {
-        varToField[varName] = variableMappings[varName] || varName;
-    }
-    // Dynamic URL buttons substitute {{1}} with a logical field's value too.
+    // Every variable the payload builder needs a value for: each positional body
+    // variable, plus any dynamic URL button whose {{1}} is substituted per
+    // recipient (the payment token/URL suffix on the Excel-driven path — Meta
+    // reconstructs approved-prefix + suffix).
     const buttonVars = [template.buttonUrlVariable, template.button2UrlVariable].filter(
         (v): v is string => !!v
     );
-    const neededFields = [...Object.values(varToField), ...buttonVars];
-    const { fetchContactFieldsByIds } = await import("./lib/dynamics_util");
-    // Send only to the driver-computed eligible set (the send-path idempotency
-    // seam, PRD #55 / #56 / #61): a recipient already handled — `attempted`,
-    // `sent`, `delivered`, or a terminal `failed` — is never here, so an
-    // ambiguous Meta response settled `failed` is never auto-resent on a
-    // recovery re-run, while a fresh campaign's `pending` recipients all send.
-    const crmFieldMap = await fetchContactFieldsByIds(
-        eligible.map((r) => r.id),
-        neededFields
-    );
+
+    // Two source-of-truth modes share one send loop (PRD prd-bad-debt-excel-campaign.md,
+    // issue #70). An uploaded-file campaign (columnRoles set) resolves every variable —
+    // body + button suffix — from the recipient's own uploaded row, and sends that
+    // recipient's pre-generated invoice PDF as the document header (uploaded to Meta per
+    // recipient → media id, only the id cached — never bytes). Every other campaign
+    // resolves variables from Dynamics against the template's shared header, unchanged.
+    const isUpload = !!campaign.columnRoles;
+
+    // Per-recipient resolver: the variables map + the (possibly per-recipient) template
+    // to send, or a terminal per-recipient error. Runs inside the rate-limiter slot so
+    // the per-recipient Meta media upload is bounded by maxConcurrent, not fanned out
+    // across the whole (up to 1000-recipient) batch at once.
+    type Resolved = { allVariables: Record<string, string>; templateForSend: TemplateLike };
+    let resolveForRecipient: (
+        recipient: DriverBatch["recipients"][number]
+    ) => Promise<Resolved | { error: string }>;
+
+    if (isUpload) {
+        // The template variable → Excel column mapping lives on the campaign (mapped
+        // once per campaign), not the template. Missing/malformed → resolve by column
+        // name (the validation gate holds un-renderable rows upstream).
+        let variableMappings: Record<string, string> = {};
+        if (campaign.whatsappVariableMappings) {
+            try {
+                variableMappings = JSON.parse(campaign.whatsappVariableMappings);
+            } catch {
+                console.warn(
+                    `Invalid whatsappVariableMappings JSON on campaign ${campaignId}; resolving variables by column name`
+                );
+            }
+        }
+        const names = [...template.variables, ...buttonVars];
+
+        // Per-recipient invoice-PDF references (#68/#69): the storageId to fetch the
+        // bytes from, plus any cached Meta media id so a recovery re-run skips the
+        // re-upload while the id is still fresh.
+        const pdfRefs = await ctx.runQuery(internal.invoicePdfs.getWhatsAppPdfRefs, {
+            campaignId,
+        });
+        const pdfRefByRecipient = new Map(pdfRefs.map((r) => [r.recipientId, r] as const));
+        // Only a media header (document, for the invoice PDF) needs a per-recipient
+        // upload; a text/none header does not.
+        const mediaHeader = isMediaHeaderType(template.headerType);
+
+        resolveForRecipient = async (recipient) => {
+            const rowBag = parseRowBag(recipient.variables);
+            const allVariables = resolveRowVariables(names, variableMappings, rowBag);
+
+            if (!mediaHeader) {
+                return { allVariables, templateForSend: { ...(template as TemplateLike) } };
+            }
+
+            const ref = pdfRefByRecipient.get(recipient.id);
+            if (!ref) {
+                return { error: "No generated invoice PDF for recipient (document header cannot be sent)" };
+            }
+
+            // Reuse a still-fresh cached media id; otherwise upload the stored PDF bytes
+            // to Meta and cache the returned id (never the bytes) for a re-run.
+            let mediaId = ref.whatsappMediaId;
+            if (!mediaId || !isMediaIdFresh(ref.whatsappMediaIdUploadedAt)) {
+                const url = await ctx.runQuery(internal.files.getDownloadUrlInternal, {
+                    storageId: ref.storageId,
+                });
+                if (!url) {
+                    return { error: "Invoice PDF file missing from storage" };
+                }
+                const upload = await uploadWhatsAppMedia(config, {
+                    sourceUrl: url,
+                    headerType: template.headerType as "image" | "video" | "document",
+                    mimeTypeOverride: "application/pdf",
+                });
+                mediaId = upload.mediaId;
+                await ctx.runMutation(internal.invoicePdfs.recordWhatsAppMediaId, {
+                    campaignId,
+                    recipientId: recipient.id,
+                    whatsappMediaId: mediaId,
+                    uploadedAt: Date.now(),
+                });
+            }
+
+            return {
+                allVariables,
+                templateForSend: {
+                    ...(template as TemplateLike),
+                    headerMediaId: mediaId,
+                    headerFilename: "invoice.pdf",
+                },
+            };
+        };
+    } else {
+        // Dynamics-resolved path (unchanged): variableMappings on the template maps
+        // each variable (named or positional) to a Dynamics field; button variables
+        // are field names too. The UI "Fill in Template Variables" form only feeds
+        // test sends — real send time reads the CRM.
+        let variableMappings: Record<string, string> = {};
+        if (template.variableMappings) {
+            try {
+                variableMappings = JSON.parse(template.variableMappings);
+            } catch {
+                console.warn(`Invalid variableMappings JSON on template ${template._id}; resolving variables by name`);
+            }
+        }
+        // For each template variable, the Dynamics field to read. Falls back to the
+        // variable name itself (generic-by-field-name) for templates whose variable
+        // names already are logical field names (e.g. riivo_referralcode).
+        const varToField: Record<string, string> = {};
+        for (const varName of template.variables) {
+            varToField[varName] = variableMappings[varName] || varName;
+        }
+        const neededFields = [...Object.values(varToField), ...buttonVars];
+        const { fetchContactFieldsByIds } = await import("./lib/dynamics_util");
+        // Send only to the driver-computed eligible set (the send-path idempotency
+        // seam, PRD #55 / #56 / #61): a recipient already handled — `attempted`,
+        // `sent`, `delivered`, or a terminal `failed` — is never here, so an
+        // ambiguous Meta response settled `failed` is never auto-resent on a
+        // recovery re-run, while a fresh campaign's `pending` recipients all send.
+        const crmFieldMap = await fetchContactFieldsByIds(
+            eligible.map((r) => r.id),
+            neededFields
+        );
+
+        resolveForRecipient = async (recipient) => {
+            const crm = crmFieldMap.get(recipient.id) ?? {};
+            // Resolve a Dynamics field for this recipient, with sensible fallbacks
+            // derived from the recipient record so name/phone still work for
+            // non-contact audiences (leads/employees) that have no Dynamics contact row.
+            const resolveField = (field: string): string => {
+                const fromCrm = crm[field];
+                if (fromCrm) return fromCrm;
+                switch (field) {
+                    case "fullname":
+                        return recipient.name;
+                    case "firstname":
+                        return recipient.name.split(" ")[0];
+                    case "lastname":
+                        return recipient.name.split(" ").slice(1).join(" ");
+                    case "mobilephone":
+                        return recipient.phone || "";
+                    default:
+                        return "";
+                }
+            };
+            const allVariables: Record<string, string> = {};
+            for (const varName of template.variables) {
+                allVariables[varName] = resolveField(varToField[varName]);
+            }
+            for (const bv of buttonVars) {
+                allVariables[bv] = resolveField(bv);
+            }
+            return { allVariables, templateForSend };
+        };
+    }
 
     await Promise.all(
         eligible.map(async (recipient) => {
@@ -599,52 +764,55 @@ async function sendWhatsAppBatch_(
                 return;
             }
 
-            const crm = crmFieldMap.get(recipient.id) ?? {};
-            // Resolve a Dynamics field for this recipient, with sensible fallbacks
-            // derived from the recipient record so name/phone still work for
-            // non-contact audiences (leads/employees) that have no Dynamics contact
-            // row.
-            const resolveField = (field: string): string => {
-                const fromCrm = crm[field];
-                if (fromCrm) return fromCrm;
-                switch (field) {
-                    case "fullname":
-                        return recipient.name;
-                    case "firstname":
-                        return recipient.name.split(" ")[0];
-                    case "lastname":
-                        return recipient.name.split(" ").slice(1).join(" ");
-                    case "mobilephone":
-                        return recipient.phone || "";
-                    default:
-                        return "";
+            // Resolve variables + (for upload campaigns) upload the per-recipient PDF,
+            // then mark `attempted` and send — all inside one rate-limiter slot. Marking
+            // inside the slot (PRD #55 / #58 / #61) means only recipients the limiter has
+            // released are marked, so a mid-batch action kill strands at most the
+            // in-flight recipients in `attempted`; the eligibility rule (#56) then
+            // declines to auto-resend them, so an ambiguous Meta response is treated as
+            // handed-off, never re-sent. Bounding the media upload here too keeps a
+            // large batch from fanning out thousands of concurrent uploads.
+            const outcome = await limiter.schedule(
+                async (): Promise<
+                    | { kind: "aborted" }
+                    | { kind: "prep-error"; error: string }
+                    | { kind: "sent-or-failed"; result: MetaSendResult; resolved: Resolved }
+                > => {
+                    if (templateAbortReason) return { kind: "aborted" };
+                    let resolved: Resolved | { error: string };
+                    try {
+                        resolved = await resolveForRecipient(recipient);
+                    } catch (err) {
+                        return {
+                            kind: "prep-error",
+                            error: err instanceof Error ? err.message : "Failed to prepare message",
+                        };
+                    }
+                    if ("error" in resolved) return { kind: "prep-error", error: resolved.error };
+
+                    const body = buildTemplateRequestBody(
+                        resolved.templateForSend,
+                        toDigits,
+                        resolved.allVariables
+                    );
+                    await markAttempted([recipient.id]);
+                    const result = await sendTemplateWithRetry(config, body);
+                    return { kind: "sent-or-failed", result, resolved };
                 }
-            };
+            );
 
-            const allVariables: Record<string, string> = {};
-            // Body variables, keyed by their template placeholder name.
-            for (const varName of template.variables) {
-                allVariables[varName] = resolveField(varToField[varName]);
+            if (outcome.kind === "aborted") {
+                await emit([
+                    { recipientId: recipient.id, success: false, error: `Aborted: ${templateAbortReason}` },
+                ]);
+                return;
             }
-            // Dynamic button URL variables are looked up by field name directly.
-            for (const bv of buttonVars) {
-                allVariables[bv] = resolveField(bv);
+            if (outcome.kind === "prep-error") {
+                await emit([{ recipientId: recipient.id, success: false, error: outcome.error }]);
+                return;
             }
 
-            // The payload builder picks body variables from template.variables and the
-            // button variable from template.buttonUrlVariable, both from this map.
-            const body = buildTemplateRequestBody(templateForSend, toDigits, allVariables);
-            // Durably mark this recipient `attempted` immediately BEFORE handing it
-            // to Meta (PRD #55 / #58 / #61). Marking inside the rate-limiter slot —
-            // not before scheduling — means only recipients the limiter has actually
-            // released to send are marked, so a mid-batch action kill strands at most
-            // the in-flight recipients (not the whole queued fan-out) in `attempted`;
-            // the eligibility rule (#56) then declines to auto-resend them, so an
-            // ambiguous Meta response is treated as handed-off, never re-sent.
-            const result = await limiter.schedule(async () => {
-                await markAttempted([recipient.id]);
-                return sendTemplateWithRetry(config, body);
-            });
+            const { result, resolved } = outcome;
 
             if (result.status === "sent") {
                 consecutiveTemplateErrors = 0;
@@ -659,7 +827,10 @@ async function sendWhatsAppBatch_(
                     phone: toDigits,
                     templateName: template.name,
                     templateLanguage: template.language,
-                    templateVariables: substitutedBodyVariables(templateForSend.variables, allVariables),
+                    templateVariables: substitutedBodyVariables(
+                        resolved.templateForSend.variables,
+                        resolved.allVariables
+                    ),
                     senderMessageId: result.wamid,
                     sender: "campaign_whatsapp",
                 });
@@ -821,12 +992,25 @@ async function sendPersonalisedBatch_(
             // one recipient in `attempted`, which the eligibility rule (#56)
             // declines to auto-resend — the same crash-blast-radius guarantee the
             // email seam gives, one recipient at a time for this sequential path.
+            // Per-recipient consultant CC (PRD #78, #82): merge the static
+            // campaign CC with this recipient's consultant cell, read from the
+            // uploaded-row variables bag via the campaign's `columnRoles.ccAddress`
+            // header, through the same helper the batch path uses so the two
+            // cannot diverge. With no `ccAddress` role designated the cell is
+            // absent and this collapses to today's static-only CC; a blank cell
+            // adds no consultant (the recipient still sends).
+            const consultantCell = consultantCellFromBag(
+                recipient.variables,
+                campaign.columnRoles?.ccAddress
+            );
+            const ccRecipients = mergeCcRecipients(campaign.ccEmail, consultantCell);
+
             await markAttempted([recipient.id]);
             const result = await sendEmail({
                 subject: emailSubject,
                 body: emailBody,
                 toRecipients: [{ email: recipient.email!, name: recipient.name }],
-                ccRecipients: campaign.ccEmail ? [{ email: campaign.ccEmail }] : undefined,
+                ccRecipients,
                 bccRecipients: campaign.bccEmail ? [{ email: campaign.bccEmail }] : undefined,
                 attachments: [],
                 fromMailbox: campaign.fromMailbox,

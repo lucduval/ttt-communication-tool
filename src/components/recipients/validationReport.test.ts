@@ -3,9 +3,13 @@ import {
     buildValidationReport,
     extractPlaceholders,
     isValidSendAddress,
+    isPlausiblePhone,
     type PdfStatus,
+    type WhatsAppReportContext,
 } from "./validationReport";
 import type { MaterialiseResult, MaterialisedRecipient } from "./columnRoles";
+import { templateVariableFields } from "./whatsappVariableMapping";
+import type { DetectedColumn } from "./extractContactIds";
 
 // Distinct tracking-key GUIDs to draw on.
 const A = "11111111-1111-1111-1111-111111111111";
@@ -18,6 +22,7 @@ function recipient(overrides: Partial<MaterialisedRecipient> = {}): Materialised
         recipientId: A,
         sendAddress: "alice@example.com",
         invoiceGuid: null,
+        phone: null,
         variables: { Amount: "R1,200.00", Email: "alice@example.com" },
         ...overrides,
     };
@@ -216,5 +221,137 @@ describe("buildValidationReport — consolidation", () => {
             rows([recipient({ variables: { Amount: "", Email: "alice@example.com" } })]),
         );
         expect(report.held[0].reasons).toEqual(["unmatched-placeholder", "empty-referenced-cell"]);
+    });
+});
+
+describe("isPlausiblePhone", () => {
+    it("accepts local and international SA-style numbers", () => {
+        expect(isPlausiblePhone("082 123 4567")).toBe(true); // local, leading 0
+        expect(isPlausiblePhone("+27 82 123 4567")).toBe(true); // E.164
+        expect(isPlausiblePhone("27821234567")).toBe(true);
+    });
+
+    it("rejects blank / null / too-short cells", () => {
+        expect(isPlausiblePhone("")).toBe(false);
+        expect(isPlausiblePhone("   ")).toBe(false);
+        expect(isPlausiblePhone(null)).toBe(false);
+        expect(isPlausiblePhone(undefined)).toBe(false);
+        expect(isPlausiblePhone("12345")).toBe(false); // too few digits
+        expect(isPlausiblePhone("not a number")).toBe(false);
+    });
+});
+
+describe("buildValidationReport — WhatsApp authoring warnings (PRD #84, issue #87)", () => {
+    // A seed-style WhatsApp template: {{1}} first name, {{2}} invoice, {{3}} amount,
+    // plus a "Pay now" button variable carrying the payment token.
+    const template = {
+        variables: ["1", "2", "3"],
+        variableMappings: JSON.stringify({
+            "1": "first_name",
+            "2": "invoice_no",
+            "3": "amount",
+            payment_link: "payment_token",
+        }),
+        buttonUrlVariable: "payment_link",
+    };
+    const fields = templateVariableFields(template);
+
+    const col = (header: string, index: number): DetectedColumn => ({ index, header });
+    const columns: DetectedColumn[] = [
+        col("first_name", 0),
+        col("invoice_no", 1),
+        col("amount", 2),
+        col("payment_token", 3),
+        col("Mobile", 4),
+    ];
+    const fullMapping: Record<string, string> = {
+        "1": "first_name",
+        "2": "invoice_no",
+        "3": "amount",
+        payment_link: "payment_token",
+    };
+
+    /** A WhatsApp report context with everything supplied; override per test. */
+    function whatsapp(overrides: Partial<WhatsAppReportContext> = {}): WhatsAppReportContext {
+        return {
+            fields,
+            mapping: fullMapping,
+            columns,
+            phoneDesignated: true,
+            ...overrides,
+        };
+    }
+
+    // A WhatsApp recipient: no send-address role, a phone cell, no email placeholders.
+    function waRecipient(overrides: Partial<MaterialisedRecipient> = {}): MaterialisedRecipient {
+        return recipient({
+            sendAddress: null,
+            phone: "082 123 4567",
+            variables: { first_name: "Ann", invoice_no: "INV-1", amount: "R1,200.00" },
+            ...overrides,
+        });
+    }
+
+    it("sends every recipient when the mapping is complete and phones are valid", () => {
+        const report = buildValidationReport([], rows([waRecipient()]), {}, whatsapp());
+        expect(report.unmappedVariables).toEqual([]);
+        expect(report.phoneColumnMissing).toBe(false);
+        expect(report.held).toEqual([]);
+        expect(report.sendable.map((r) => r.recipientId)).toEqual([A]);
+    });
+
+    it("warns which variables are unmapped and holds every recipient", () => {
+        // Drop the amount + button mappings.
+        const mapping = { "1": "first_name", "2": "invoice_no" };
+        const report = buildValidationReport(
+            [],
+            rows([waRecipient()]),
+            {},
+            whatsapp({ mapping }),
+        );
+        expect(report.unmappedVariables.map((f) => f.name)).toEqual(["3", "payment_link"]);
+        expect(report.sendable).toEqual([]);
+        expect(report.held).toHaveLength(1);
+        expect(report.held[0].reasons).toContain("unmapped-variable");
+    });
+
+    it("warns when no phone column is designated and holds every recipient", () => {
+        const report = buildValidationReport(
+            [],
+            rows([waRecipient({ phone: null })]),
+            {},
+            whatsapp({ phoneDesignated: false }),
+        );
+        expect(report.phoneColumnMissing).toBe(true);
+        expect(report.sendable).toEqual([]);
+        expect(report.held[0].reasons).toContain("missing-phone");
+    });
+
+    it("surfaces per-recipient blank/malformed phone cells (phone column IS designated)", () => {
+        const report = buildValidationReport(
+            [],
+            rows([
+                waRecipient({ rowIndex: 0, recipientId: A, phone: "082 123 4567" }), // valid
+                waRecipient({ rowIndex: 1, recipientId: B, phone: "  " }), // blank
+            ]),
+            {},
+            whatsapp(),
+        );
+        expect(report.phoneColumnMissing).toBe(false);
+        expect(report.sendable.map((r) => r.recipientId)).toEqual([A]);
+        expect(report.held).toEqual([
+            { rowIndex: 1, trackingKey: B, reasons: ["missing-phone"] },
+        ]);
+    });
+
+    it("leaves email uploads unaffected (no WhatsApp context = no phone/variable checks)", () => {
+        const report = buildValidationReport(
+            ["Amount"],
+            rows([recipient({ phone: null })]),
+        );
+        expect(report.unmappedVariables).toEqual([]);
+        expect(report.phoneColumnMissing).toBe(false);
+        expect(report.held).toEqual([]);
+        expect(report.sendable.map((r) => r.recipientId)).toEqual([A]);
     });
 });

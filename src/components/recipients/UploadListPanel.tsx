@@ -9,6 +9,15 @@ import {
     type PersistedColumnRoles,
 } from "./columnRoles";
 import { extractPlaceholders, type ValidationReport, type ValidationHoldReason } from "./validationReport";
+import {
+    templateVariableFields,
+    guessVariableMapping,
+    mergeGuessedMapping,
+    type WhatsAppTemplateShape,
+    type TemplateVariableField,
+} from "./whatsappVariableMapping";
+import { ColumnSelect } from "./ColumnSelect";
+import { WhatsAppVariableMapping } from "./WhatsAppVariableMappingFields";
 import type { DetectedColumn } from "./extractContactIds";
 import type { CampaignRecipient } from "@/../convex/lib/recipientSelection";
 
@@ -51,31 +60,60 @@ export interface UploadRolesResult {
     roles: PersistedColumnRoles;
     /** The consolidated pre-send validation report — held rows and why (#67). */
     report: ValidationReport;
+    /**
+     * The file's detected columns, lifted out of the panel so the wizard page (the
+     * single source of truth for the WhatsApp mapping) and the follow-on compose-step
+     * editor can render the mapping controls against them without re-parsing (#92).
+     */
+    columns: DetectedColumn[];
     fileName: string;
 }
 
 /** Local role selection — header strings; `""` means "not yet designated". */
-type RoleSelection = { sendAddress: string; trackingKey: string; invoiceGuid: string };
+export type RoleSelection = {
+    sendAddress: string;
+    trackingKey: string;
+    invoiceGuid: string;
+    ccAddress: string;
+    phone: string;
+};
 
-const EMPTY_ROLES: RoleSelection = { sendAddress: "", trackingKey: "", invoiceGuid: "" };
+const EMPTY_ROLES: RoleSelection = {
+    sendAddress: "",
+    trackingKey: "",
+    invoiceGuid: "",
+    ccAddress: "",
+    phone: "",
+};
 
 /**
  * Best-effort initial guess for each role from the column headers, so a
  * conventional CRM export lands designated. The operator can always override.
  */
-function guessRoles(columns: DetectedColumn[]): RoleSelection {
+export function guessRoles(columns: DetectedColumn[]): RoleSelection {
     const find = (re: RegExp) => columns.find((c) => re.test(c.header))?.header ?? "";
     return {
         // "email" but not "emailoptin" etc. — a plain address column.
         sendAddress: find(/^e-?mail$|email address/i),
         trackingKey: find(/contact\s*id|tracking\s*key|contactid/i),
         invoiceGuid: find(/invoice.*(guid|id)/i),
+        // Prefer a consultant *email* header; fall back to a bare consultant/adviser
+        // column so a likely per-recipient CC is pre-filled for the operator (#83).
+        ccAddress:
+            find(/consultant.*e-?mail|e-?mail.*consultant/i) ||
+            find(/consultant|advis[eo]r/i),
+        // Common mobile-number headers — phone, mobile, cell, msisdn, whatsapp
+        // (#85). An absent phone column leaves this blank.
+        phone: find(/phone|mobile|cell|msisdn|whats\s*app/i),
     };
 }
 
 export function UploadListPanel({
     requireSendAddress,
     templateText,
+    whatsappTemplate,
+    mapping,
+    onMappingChange,
     onResult,
 }: {
     /** Email/personalised campaigns must designate a send address; WhatsApp need not. */
@@ -86,6 +124,24 @@ export function UploadListPanel({
      * — and memoises — the placeholder list itself (stable identity, no render loop).
      */
     templateText?: string;
+    /**
+     * The selected WhatsApp template, for a WhatsApp upload only. Its positional
+     * body variables + button variable become the variable→column mapping the
+     * operator authors here (pre-filled from the headers, always editable).
+     * `undefined` for email/personalised uploads, which show no mapping (#86).
+     */
+    whatsappTemplate?: WhatsAppTemplateShape | null;
+    /**
+     * The WhatsApp variable→column mapping (logical variable name → column header),
+     * owned by the wizard page — the single source of truth (#92). The panel is
+     * *controlled* for it: it reads this value and reports every change (a dropdown
+     * edit, or a fresh guess on upload / template change) via {@link onMappingChange}
+     * rather than holding its own copy, so the mapping survives navigating away and
+     * back and cannot drift from the compose-step editor.
+     */
+    mapping: Record<string, string>;
+    /** Reports a new mapping upward (dropdown edits, and guesses on upload/template change). */
+    onMappingChange: (mapping: Record<string, string>) => void;
     /** Fires with the materialised result, or `null` while the designation is incomplete. */
     onResult: (result: UploadRolesResult | null) => void;
 }) {
@@ -96,15 +152,35 @@ export function UploadListPanel({
     const [roles, setRoles] = useState<RoleSelection>(EMPTY_ROLES);
     const inputRef = useRef<HTMLInputElement>(null);
 
+    // The controlled mapping, mirrored into a ref so effects that reconcile it
+    // (the template-change re-guess below) can read the latest value without
+    // taking `mapping` as a dependency — which would re-fire them on every edit.
+    const mappingRef = useRef(mapping);
+    useEffect(() => {
+        mappingRef.current = mapping;
+    });
+
     // Derive the referenced placeholders once per template change (stable identity
     // so the effect below does not re-fire every parent render).
     const placeholders = useMemo(() => extractPlaceholders(templateText ?? ""), [templateText]);
+
+    // The template's variables the operator must map (empty for a non-WhatsApp
+    // upload). Memoised so downstream memo/effects have a stable identity.
+    const varFields = useMemo<TemplateVariableField[]>(
+        () => (whatsappTemplate ? templateVariableFields(whatsappTemplate) : []),
+        [whatsappTemplate],
+    );
 
     // Re-run the pure gate whenever the designation changes and push the result (or
     // null) up. Kept in one place so every dropdown change and the initial guess
     // funnel through the same seam.
     const recompute = useCallback(
-        (cols: UploadedColumns | null, sel: RoleSelection, name: string | null) => {
+        (
+            cols: UploadedColumns | null,
+            sel: RoleSelection,
+            name: string | null,
+            whatsapp: { fields: TemplateVariableField[]; mapping: Record<string, string> } | undefined,
+        ) => {
             if (!cols || cols.status === "empty" || !name) {
                 onResult(null);
                 return;
@@ -117,8 +193,10 @@ export function UploadListPanel({
                 trackingKey: sel.trackingKey,
                 sendAddress: sel.sendAddress || undefined,
                 invoiceGuid: sel.invoiceGuid || undefined,
+                ccAddress: sel.ccAddress || undefined,
+                phone: sel.phone || undefined,
             };
-            const prepared = prepareUploadForSend(cols, persisted, { placeholders });
+            const prepared = prepareUploadForSend(cols, persisted, { placeholders, whatsapp });
             if (prepared.status !== "ok" || !prepared.report) {
                 onResult(null); // a designated header vanished — hold the upload
                 return;
@@ -127,17 +205,21 @@ export function UploadListPanel({
                 recipients: prepared.recipients,
                 roles: persisted,
                 report: prepared.report,
+                columns: cols.columns,
                 fileName: name,
             });
         },
         [onResult, requireSendAddress, placeholders],
     );
 
-    // Re-run the gate when the template's placeholders change after an upload, so a
-    // newly-added `{column}` (or a fix) re-holds/re-clears rows without a re-upload.
+    // Re-run the gate when the template's placeholders — or the variable mapping —
+    // change after an upload, so a newly-added `{column}` (or a mapping edit)
+    // re-pushes the result without a re-upload.
     useEffect(() => {
-        recompute(columns, roles, fileName);
-    }, [placeholders, columns, roles, fileName, recompute]);
+        const whatsapp =
+            varFields.length > 0 ? { fields: varFields, mapping } : undefined;
+        recompute(columns, roles, fileName, whatsapp);
+    }, [placeholders, columns, roles, fileName, varFields, mapping, recompute]);
 
     const handleFile = useCallback(
         async (file: File) => {
@@ -148,24 +230,46 @@ export function UploadListPanel({
                 setColumns(cols);
                 setFileName(file.name);
                 setRoles(guessed);
-                recompute(cols, guessed, file.name);
+                // Pre-fill the WhatsApp variable→column mapping from the headers too
+                // (empty for a non-WhatsApp upload), reporting it up to the page which
+                // owns the mapping. Always editable below.
+                onMappingChange(guessVariableMapping(varFields, cols.columns));
+                // The effect re-runs the gate once these state updates commit —
+                // no imperative recompute needed (and it double-fires `onResult`).
             } finally {
                 setIsParsing(false);
             }
         },
-        [recompute],
+        [varFields, onMappingChange],
     );
 
-    const setRole = useCallback(
-        (role: keyof RoleSelection, header: string) => {
-            setRoles((prev) => {
-                const next = { ...prev, [role]: header };
-                recompute(columns, next, fileName);
-                return next;
-            });
+    // Re-guess the mapping if the template's variables arrive/change after a file is
+    // already loaded (e.g. the operator picks the template after uploading), so the
+    // mapping section lands pre-filled rather than blank. Existing operator edits for
+    // still-present variables are preserved; only newly-seen variables are guessed
+    // (the pure {@link mergeGuessedMapping} seam, reading the page-owned mapping).
+    const guessedFor = useRef<TemplateVariableField[] | null>(null);
+    useEffect(() => {
+        if (guessedFor.current === varFields) return;
+        guessedFor.current = varFields;
+        if (varFields.length === 0 || !columns || columns.status === "empty") return;
+        onMappingChange(mergeGuessedMapping(varFields, columns.columns, mappingRef.current));
+    }, [varFields, columns, onMappingChange]);
+
+    const setVar = useCallback(
+        (name: string, header: string) => {
+            onMappingChange({ ...mappingRef.current, [name]: header });
         },
-        [columns, fileName, recompute],
+        [onMappingChange],
     );
+
+    const setRole = useCallback((role: keyof RoleSelection, header: string) => {
+        // Just update the designation; the effect above re-runs the gate. Calling
+        // `recompute` (which fires `onResult` → parent setState) inside a setState
+        // updater runs it during render — "Cannot update a component while rendering
+        // a different component". The effect is the single, render-safe seam.
+        setRoles((prev) => ({ ...prev, [role]: header }));
+    }, []);
 
     const onDrop = useCallback(
         (e: React.DragEvent) => {
@@ -219,7 +323,7 @@ export function UploadListPanel({
                 </p>
                 <p className="text-xs text-gray-500">
                     The tool reads back every column. Designate which columns are the send address,
-                    the tracking key, and the invoice below — the rest are available as{" "}
+                    the tracking key, the invoice, and the consultant CC below — the rest are available as{" "}
                     <span className="font-mono">{"{column}"}</span> merge variables.
                 </p>
             </div>
@@ -242,6 +346,9 @@ export function UploadListPanel({
                     placeholders={placeholders}
                     fileName={fileName}
                     onRole={setRole}
+                    varFields={varFields}
+                    mapping={mapping}
+                    onVar={setVar}
                 />
             )}
         </div>
@@ -261,6 +368,9 @@ function RoleDesignation({
     placeholders,
     fileName,
     onRole,
+    varFields,
+    mapping,
+    onVar,
 }: {
     columns: UploadedColumns;
     roles: RoleSelection;
@@ -268,6 +378,11 @@ function RoleDesignation({
     placeholders: readonly string[];
     fileName: string | null;
     onRole: (role: keyof RoleSelection, header: string) => void;
+    /** WhatsApp template variables to map (empty for a non-WhatsApp upload). */
+    varFields: TemplateVariableField[];
+    /** Current variable→header mapping (owned by the wizard page). */
+    mapping: Record<string, string>;
+    onVar: (name: string, header: string) => void;
 }) {
     const requiredMissing =
         roles.trackingKey === "" || (requireSendAddress && roles.sendAddress === "");
@@ -282,8 +397,16 @@ function RoleDesignation({
                       trackingKey: roles.trackingKey,
                       sendAddress: roles.sendAddress || undefined,
                       invoiceGuid: roles.invoiceGuid || undefined,
+                      ccAddress: roles.ccAddress || undefined,
+                      phone: roles.phone || undefined,
                   },
-                  { placeholders },
+                  {
+                      placeholders,
+                      whatsapp:
+                          varFields.length > 0
+                              ? { fields: varFields, mapping }
+                              : undefined,
+                  },
               )
             : null;
 
@@ -296,27 +419,50 @@ function RoleDesignation({
                 {fileName ? ` in ${fileName}` : ""} — designate the columns:
             </p>
 
-            <RoleSelect
+            <ColumnSelect
                 label="Send address (email)"
                 required={requireSendAddress}
                 value={roles.sendAddress}
                 columns={columns.columns}
                 onChange={(h) => onRole("sendAddress", h)}
             />
-            <RoleSelect
+            <ColumnSelect
                 label="Tracking key (contact GUID)"
                 required
                 value={roles.trackingKey}
                 columns={columns.columns}
                 onChange={(h) => onRole("trackingKey", h)}
             />
-            <RoleSelect
+            <ColumnSelect
                 label="Invoice GUID (optional)"
                 required={false}
                 value={roles.invoiceGuid}
                 columns={columns.columns}
                 onChange={(h) => onRole("invoiceGuid", h)}
             />
+            <ColumnSelect
+                label="Consultant CC (optional)"
+                required={false}
+                value={roles.ccAddress}
+                columns={columns.columns}
+                onChange={(h) => onRole("ccAddress", h)}
+            />
+            <ColumnSelect
+                label="Phone (WhatsApp destination)"
+                required={false}
+                value={roles.phone}
+                columns={columns.columns}
+                onChange={(h) => onRole("phone", h)}
+            />
+
+            {varFields.length > 0 && (
+                <WhatsAppVariableMapping
+                    fields={varFields}
+                    mapping={mapping}
+                    columns={columns.columns}
+                    onChange={onVar}
+                />
+            )}
 
             {requiredMissing && (
                 <p className="text-xs text-amber-700">
@@ -338,41 +484,6 @@ function RoleDesignation({
     );
 }
 
-function RoleSelect({
-    label,
-    required,
-    value,
-    columns,
-    onChange,
-}: {
-    label: string;
-    required: boolean;
-    value: string;
-    columns: DetectedColumn[];
-    onChange: (header: string) => void;
-}) {
-    return (
-        <label className="block text-sm">
-            <span className="mb-1 block font-medium text-gray-600">
-                {label}
-                {required && <span className="text-red-600"> *</span>}
-            </span>
-            <select
-                value={value}
-                onChange={(e) => onChange(e.target.value)}
-                className="w-full rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-800 focus:border-[#1E3A5F] focus:outline-none"
-            >
-                <option value="">{required ? "Select a column…" : "None"}</option>
-                {columns.map((c) => (
-                    <option key={c.index} value={c.header}>
-                        {c.header || `Column ${c.index + 1}`}
-                    </option>
-                ))}
-            </select>
-        </label>
-    );
-}
-
 /** A human phrase for each hold reason, for the consolidated report. */
 const REASON_LABEL: Record<ValidationHoldReason, string> = {
     "missing-tracking-key": "a missing/invalid tracking key",
@@ -381,6 +492,8 @@ const REASON_LABEL: Record<ValidationHoldReason, string> = {
     "empty-referenced-cell": "an empty cell in a referenced column",
     "invalid-send-address": "an invalid/missing send address",
     "missing-pdf": "no generated invoice PDF",
+    "unmapped-variable": "an unmapped WhatsApp template variable",
+    "missing-phone": "a blank/malformed phone number",
 };
 
 /**
@@ -429,6 +542,23 @@ function UploadReport({ report }: { report: ValidationReport }) {
                         </span>
                         . Add the column{report.unmatchedPlaceholders.length === 1 ? "" : "s"} or
                         remove the placeholder{report.unmatchedPlaceholders.length === 1 ? "" : "s"}.
+                    </p>
+                )}
+                {report.unmappedVariables.length > 0 && (
+                    <p>
+                        WhatsApp template variable
+                        {report.unmappedVariables.length === 1 ? "" : "s"} with no mapped column:{" "}
+                        {report.unmappedVariables
+                            .map((f) => (f.position ? `{{${f.position}}} (${f.label})` : f.label))
+                            .join(", ")}
+                        . Map {report.unmappedVariables.length === 1 ? "it" : "them"} to a column —
+                        unmapped variables send blank.
+                    </p>
+                )}
+                {report.phoneColumnMissing && (
+                    <p>
+                        No phone column is designated — a WhatsApp campaign has no destination for
+                        any recipient. Designate the phone column above.
                     </p>
                 )}
                 {held.length > 0 && (

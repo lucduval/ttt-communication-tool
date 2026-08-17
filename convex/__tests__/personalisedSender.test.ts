@@ -188,3 +188,82 @@ describe("personalisedSender.sendBatch (faked Dynamics + AI + send boundary)", (
         expect(mutationNames).not.toContain("messages:createBatch");
     }, 20000);
 });
+
+describe("personalisedSender.sendBatch consultant CC (PRD #78, #82)", () => {
+    // A recipient that reaches the send (has ITA34 + contact), carrying an
+    // uploaded-row variables bag whose "Consultant" cell names its consultant.
+    function fakeDynamicsWithTax() {
+        boundary.dynamicsRequest.mockImplementation(async (path: string) => {
+            if (path.includes("riivo_ita34s")) return { value: [ita34] };
+            if (path.includes("riivo_irp5s")) return { value: [] };
+            if (path.includes("contacts(")) {
+                return { fullname: "Pat Jones", firstname: "Pat", ttt_idnumber: null, riivo_age: 40 };
+            }
+            return { value: [] };
+        });
+        boundary.generatePersonalisedCopy.mockResolvedValue({ greeting: "Hi Pat", closingText: "Regards" });
+        boundary.sendEmail.mockResolvedValue({ success: true });
+    }
+
+    function recipient(variables?: Record<string, string>) {
+        return {
+            id: "p1",
+            email: "pat@example.com",
+            name: "Pat Jones",
+            ...(variables ? { variables: JSON.stringify(variables) } : {}),
+        };
+    }
+
+    async function ccOfSingleSend(campaignOverride: any, rcpt: any) {
+        const batch = { _id: "pbatch-1" as any, recipients: [rcpt] };
+        const { emit } = collector();
+        const { ctx } = createCtx();
+        await personalisedSender.sendBatch(
+            ctx as any,
+            { ...campaign, ...campaignOverride },
+            batch,
+            emit,
+            batch.recipients,
+            async () => {}
+        );
+        expect(boundary.sendEmail).toHaveBeenCalledTimes(1);
+        return boundary.sendEmail.mock.calls[0][0].ccRecipients;
+    }
+
+    it("CCs the recipient's consultant merged with the static CC (both set)", async () => {
+        fakeDynamicsWithTax();
+        const cc = await ccOfSingleSend(
+            { ccEmail: "audit@ttt.test", columnRoles: { trackingKey: "Id", ccAddress: "Consultant" } },
+            recipient({ Consultant: "cons@firm.co" })
+        );
+        expect(cc).toEqual([{ email: "audit@ttt.test" }, { email: "cons@firm.co" }]);
+    }, 20000);
+
+    it("CCs the consultant only when no static CC is set", async () => {
+        fakeDynamicsWithTax();
+        const cc = await ccOfSingleSend(
+            { ccEmail: undefined, columnRoles: { trackingKey: "Id", ccAddress: "Consultant" } },
+            recipient({ Consultant: "cons@firm.co" })
+        );
+        expect(cc).toEqual([{ email: "cons@firm.co" }]);
+    }, 20000);
+
+    it("stays static-only (unchanged) when no ccAddress role is designated", async () => {
+        fakeDynamicsWithTax();
+        const cc = await ccOfSingleSend(
+            { ccEmail: "audit@ttt.test", columnRoles: { trackingKey: "Id" } },
+            recipient({ Consultant: "cons@firm.co" })
+        );
+        expect(cc).toEqual([{ email: "audit@ttt.test" }]);
+    }, 20000);
+
+    it("no CC when the recipient's consultant cell is blank (recipient still sends)", async () => {
+        fakeDynamicsWithTax();
+        const cc = await ccOfSingleSend(
+            { ccEmail: undefined, columnRoles: { trackingKey: "Id", ccAddress: "Consultant" } },
+            recipient({ Consultant: "   " })
+        );
+        expect(cc).toBeUndefined();
+        expect(boundary.sendEmail).toHaveBeenCalledTimes(1); // still sent
+    }, 20000);
+});

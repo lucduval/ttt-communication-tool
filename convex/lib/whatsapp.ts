@@ -91,7 +91,15 @@ export function getMetaWhatsAppConfig(): MetaWhatsAppConfig {
 // ---------- Template payload ----------
 
 export interface TemplateLike {
+    /** Human-readable display label shown in the app's template UI. NOT the
+     *  identifier Meta matches on — see `metaTemplateId`. */
     name: string;
+    /** The name Meta registered the template under (lowercase snake_case, e.g.
+     *  `bad_debt_wa_30_90_paid_before_day0`). This — not `name` — is what a send
+     *  must transmit; Meta matches on it + `language` and returns #132001 when it
+     *  doesn't exist. Optional for back-compat with older rows/fixtures where the
+     *  display `name` doubled as the Meta name; the send falls back to `name`. */
+    metaTemplateId?: string;
     language: string;
     variables: string[];
     headerType?: string;
@@ -103,6 +111,13 @@ export interface TemplateLike {
      * than asking Meta to re-fetch a public URL on every send.
      */
     headerMediaId?: string;
+    /**
+     * Optional filename for a document header. Meta shows this to the recipient as
+     * the document's name in the chat. Used by the Excel-driven path where the
+     * per-recipient invoice PDF has no source URL to derive a name from; falls back
+     * to the `headerUrl` basename, then `"document"`, when unset.
+     */
+    headerFilename?: string;
     /**
      * Optional URL buttons. Meta allows up to two URL buttons per template,
      * occupying button-array positions 0 and 1 in the approved template. Each
@@ -269,7 +284,9 @@ function buildHeaderComponent(template: TemplateLike): MetaComponent | undefined
         return { type: "header", parameters: [{ type: "video", video: mediaRef }] };
     }
     if (headerType === "document") {
-        const filename = template.headerUrl ? template.headerUrl.split("/").pop() || "document" : "document";
+        const filename =
+            template.headerFilename ||
+            (template.headerUrl ? template.headerUrl.split("/").pop() || "document" : "document");
         return { type: "header", parameters: [{ type: "document", document: { ...mediaRef, filename } }] };
     }
     return undefined;
@@ -303,11 +320,72 @@ export function buildTemplateRequestBody(
         to: toDigits,
         type: "template",
         template: {
-            name: template.name,
+            // Meta matches on the registered template name, which we store in
+            // `metaTemplateId`; `name` is only a display label and may diverge
+            // (older rows) or be a pretty string (bad-debt seed). Fall back to
+            // `name` for legacy rows where metaTemplateId was never set.
+            name: template.metaTemplateId || template.name,
             language: { code: template.language },
             ...(components.length > 0 ? { components } : {}),
         },
     };
+}
+
+// ---------- Row-bag variable resolution (Excel-driven campaigns) ----------
+
+/**
+ * Parse a recipient's per-recipient `variables` bag — the JSON-stringified full
+ * uploaded row, keyed by column header (PRD prd-bad-debt-excel-campaign.md, #66)
+ * — into a flat `Record<string,string>`. Keys are trimmed and every value is
+ * coerced to a string (empty for null/undefined). A missing or malformed bag
+ * yields `{}`, so the caller resolves nothing rather than throwing — the pre-send
+ * validation gate (#67) is what actually holds an un-renderable row upstream.
+ */
+export function parseRowBag(variables: string | undefined | null): Record<string, string> {
+    if (!variables) return {};
+    try {
+        const parsed = JSON.parse(variables);
+        if (!parsed || typeof parsed !== "object") return {};
+        const bag: Record<string, string> = {};
+        for (const [k, val] of Object.entries(parsed as Record<string, unknown>)) {
+            bag[k.trim()] = val == null ? "" : String(val);
+        }
+        return bag;
+    } catch {
+        return {};
+    }
+}
+
+/**
+ * Resolve WhatsApp template variables from an uploaded row (PRD
+ * prd-bad-debt-excel-campaign.md, issue #70). For each logical variable name
+ * (every positional body variable like "1"/"2", plus any dynamic button URL
+ * variable), look up the column header it maps to via `mappings` and read that
+ * cell from the row bag. This repoints the existing `variableMappings` concept at
+ * Excel columns instead of Dynamics fields: the uploaded file — not the CRM — is
+ * the source of truth.
+ *
+ * A name with no explicit mapping falls back to a column named exactly like the
+ * variable, mirroring the Dynamics path's generic-by-field-name fallback. A
+ * resolved cell that is absent renders as an empty string; the validation gate
+ * holds such rows before they ever reach the send.
+ *
+ * The returned map is keyed by logical variable name — exactly the shape
+ * {@link buildTemplateRequestBody} expects for both body params and the button
+ * suffix (the button variable carries the payment token/URL suffix, not a full
+ * URL — Meta reconstructs `approved-prefix + suffix`).
+ */
+export function resolveRowVariables(
+    names: readonly string[],
+    mappings: Record<string, string>,
+    rowBag: Record<string, string>
+): Record<string, string> {
+    const resolved: Record<string, string> = {};
+    for (const name of names) {
+        const column = mappings[name] || name;
+        resolved[name] = rowBag[column] ?? "";
+    }
+    return resolved;
 }
 
 // ---------- Error classification ----------

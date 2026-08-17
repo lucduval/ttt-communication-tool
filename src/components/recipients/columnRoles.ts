@@ -37,6 +37,7 @@ import {
     type PdfStatus,
     type ValidationReport,
 } from "./validationReport";
+import type { TemplateVariableField } from "./whatsappVariableMapping";
 
 export type UploadedColumnsStatus =
     | "ok" // the file had a header row (dataRows may still be empty)
@@ -60,11 +61,20 @@ export interface UploadedColumns {
  *   Required: identity is the whole point of the seam.
  * - `invoiceGuid` — the column holding the invoice GUID used to fetch each
  *   recipient's PDF (null until the PDF slice; not every campaign attaches one).
+ * - `ccAddress` — the column naming a per-recipient consultant email to CC
+ *   (null when not designated). No dedicated per-recipient field: the cell
+ *   already travels in the variables bag; this role only records *which header*
+ *   is the CC (PRD #78, issue #79).
+ * - `phone` — the column holding each recipient's mobile number, the WhatsApp
+ *   send destination (null when not designated). Distinct from `sendAddress`
+ *   (email): designating one never populates the other (PRD #84, issue #85).
  */
 export interface ColumnRoles {
     sendAddress: number | null;
     trackingKey: number;
     invoiceGuid: number | null;
+    ccAddress: number | null;
+    phone: number | null;
 }
 
 /**
@@ -79,6 +89,8 @@ export interface PersistedColumnRoles {
     sendAddress?: string | null;
     trackingKey: string;
     invoiceGuid?: string | null;
+    ccAddress?: string | null;
+    phone?: string | null;
 }
 
 /** One designated role whose persisted header is not among the uploaded columns. */
@@ -109,6 +121,11 @@ export interface MaterialisedRecipient {
     sendAddress: string | null;
     /** The invoice-GUID cell (trimmed), or null when no invoice-GUID role. */
     invoiceGuid: string | null;
+    /**
+     * The phone cell (trimmed), or null when no phone role. This is the WhatsApp
+     * send destination for an uploaded recipient (PRD #84, issue #85).
+     */
+    phone: string | null;
     /**
      * This row's full cell data as `{ header: cell }` — the per-recipient merge
      * variables bag the email/WhatsApp adapters consume. Headers are trimmed
@@ -171,8 +188,8 @@ export function parseUploadedColumns(rows: string[][]): UploadedColumns {
  * Optional roles left unset (absent / null / blank) resolve to `null`. If the
  * required `trackingKey` header — or any designated optional header — is not
  * present among the columns, the result is `unresolved`, listing each missing
- * role in `sendAddress, trackingKey, invoiceGuid` order, so the caller can hold
- * the upload rather than materialise against the wrong columns.
+ * role in `sendAddress, trackingKey, invoiceGuid, ccAddress, phone` order, so the
+ * caller can hold the upload rather than materialise against the wrong columns.
  */
 export function resolveColumnRoles(
     columns: DetectedColumn[],
@@ -198,16 +215,19 @@ export function resolveColumnRoles(
         return resolve(role, header);
     };
 
-    // Resolve in role order so `unresolved` reads sendAddress → trackingKey → invoiceGuid.
+    // Resolve in role order so `unresolved` reads
+    // sendAddress → trackingKey → invoiceGuid → ccAddress → phone.
     const sendAddress = resolveOptional("sendAddress", persisted.sendAddress);
     const trackingKey = resolve("trackingKey", persisted.trackingKey);
     const invoiceGuid = resolveOptional("invoiceGuid", persisted.invoiceGuid);
+    const ccAddress = resolveOptional("ccAddress", persisted.ccAddress);
+    const phone = resolveOptional("phone", persisted.phone);
 
     if (unresolved.length > 0 || trackingKey === null) {
         return { status: "unresolved", unresolved };
     }
 
-    return { status: "ok", roles: { sendAddress, trackingKey, invoiceGuid } };
+    return { status: "ok", roles: { sendAddress, trackingKey, invoiceGuid, ccAddress, phone } };
 }
 
 /**
@@ -257,6 +277,7 @@ export function materialiseRecipients(
             recipientId: key,
             sendAddress: cellForRole(row, roles.sendAddress),
             invoiceGuid: cellForRole(row, roles.invoiceGuid),
+            phone: cellForRole(row, roles.phone),
             variables,
         });
     });
@@ -289,6 +310,12 @@ export interface UploadRecipient {
     name: string;
     /** The send-address cell, omitted when no send-address role is designated. */
     email?: string;
+    /**
+     * The phone cell, omitted when no phone role is designated. This is the
+     * WhatsApp send destination the sender's phone lookup + E.164 normalisation
+     * resolve against for an uploaded recipient (PRD #84, issue #85).
+     */
+    phone?: string;
     /**
      * The per-recipient merge bag (`{ header: cell }`) as a JSON string — the
      * `variables` slot the email/WhatsApp adapters parse for `{column}`
@@ -330,6 +357,18 @@ export interface ValidationContext {
     placeholders: readonly string[];
     /** Per-recipient PDF status, keyed by `recipientId`; absent = passing sentinel. */
     pdfStatus?: Readonly<Record<string, PdfStatus>>;
+    /**
+     * WhatsApp authoring inputs (PRD #84, issue #87) — present only for a WhatsApp
+     * upload. When supplied, the report warns about unmapped template variables and
+     * a missing phone column, and holds recipients with a blank/malformed phone. An
+     * email upload omits this, so those warnings never fire.
+     */
+    whatsapp?: {
+        /** The template's variables to map (body positions + button variables). */
+        fields: readonly TemplateVariableField[];
+        /** The operator's current variable→column mapping (logical name → header). */
+        mapping: Readonly<Record<string, string>>;
+    };
 }
 
 /** Project one materialised recipient into the send-path payload shape. */
@@ -340,6 +379,7 @@ export function toUploadRecipient(r: MaterialisedRecipient): UploadRecipient {
         variables: JSON.stringify(r.variables),
     };
     if (r.sendAddress !== null) payload.email = r.sendAddress;
+    if (r.phone !== null) payload.phone = r.phone;
     return payload;
 }
 
@@ -354,8 +394,9 @@ export function toUploadRecipient(r: MaterialisedRecipient): UploadRecipient {
  * projects each materialised recipient into the {@link UploadRecipient} payload:
  * the tracking key fills `id` (so the one-message-per-`(campaign, recipient)`
  * idempotency seam keeps working unchanged), the send-address cell fills `email`
- * (omitted when unassigned, e.g. a WhatsApp upload), and the full row travels as
- * the JSON-encoded `variables` bag.
+ * (omitted when unassigned, e.g. a WhatsApp upload), the phone cell fills `phone`
+ * (omitted when unassigned, e.g. an email upload) so the WhatsApp sender resolves
+ * a destination, and the full row travels as the JSON-encoded `variables` bag.
  *
  * When a designated header is missing from the upload the roles cannot be
  * resolved, so it returns `unresolved` (the caller holds the whole upload rather
@@ -384,11 +425,21 @@ export function prepareUploadForSend(
         };
     }
 
-    // Full pre-send gate: only rows the report clears reach the send path.
+    // Full pre-send gate: only rows the report clears reach the send path. A
+    // WhatsApp upload also carries the authored variable mapping and whether a
+    // phone column was designated, so the report can warn on both (#87).
     const report = buildValidationReport(
         validation.placeholders,
         materialised,
         validation.pdfStatus,
+        validation.whatsapp
+            ? {
+                  fields: validation.whatsapp.fields,
+                  mapping: validation.whatsapp.mapping,
+                  columns: uploaded.columns,
+                  phoneDesignated: resolved.roles.phone !== null,
+              }
+            : undefined,
     );
     return {
         status: "ok",

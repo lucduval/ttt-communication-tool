@@ -37,14 +37,52 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { getFunctionName } from "convex/server";
 
-const boundary = vi.hoisted(() => ({ sendEmailBatch: vi.fn() }));
+const boundary = vi.hoisted(() => ({
+    sendEmailBatch: vi.fn(),
+    // WhatsApp file-as-source boundary (issue #70): the Meta send, the per-recipient
+    // media upload, and the Tina notify are all faked so no real network is hit.
+    sendTemplateWithRetry: vi.fn(),
+    uploadWhatsAppMedia: vi.fn(),
+    notifyTinaOfOutboundTemplate: vi.fn(),
+    logWhatsAppActivity: vi.fn(),
+}));
 
 vi.mock("../lib/graph_client", async (orig) => {
     const actual = (await orig()) as Record<string, unknown>;
     return { ...actual, sendEmailBatch: boundary.sendEmailBatch };
 });
 
-import { emailSender } from "../channelSenders";
+vi.mock("../lib/whatsapp", async (orig) => {
+    const actual = (await orig()) as Record<string, unknown>;
+    return {
+        ...actual,
+        getMetaWhatsAppConfig: () => ({
+            token: "tok",
+            phoneNumberId: "pnid",
+            graphApiVersion: "v22.0",
+            sendUrl: "https://graph.test/messages",
+            maxSendPerSecond: 1000,
+            maxConcurrent: 1,
+            retryMaxAttempts: 5,
+            retryBaseDelayMs: 1,
+            dailyTierLimit: 100000,
+        }),
+        sendTemplateWithRetry: boundary.sendTemplateWithRetry,
+        uploadWhatsAppMedia: boundary.uploadWhatsAppMedia,
+    };
+});
+
+vi.mock("../lib/notifyTina", async (orig) => {
+    const actual = (await orig()) as Record<string, unknown>;
+    return { ...actual, notifyTinaOfOutboundTemplate: boundary.notifyTinaOfOutboundTemplate };
+});
+
+vi.mock("../lib/dynamics_logging", () => ({
+    logWhatsAppActivity: boundary.logWhatsAppActivity,
+    logEmailActivity: vi.fn(),
+}));
+
+import { emailSender, whatsappSender } from "../channelSenders";
 import { runChannelSend } from "../lib/channelSend";
 import { markAttemptedBatchImpl } from "../messages";
 import { recoverStuckBatchesImpl } from "../campaignBatches";
@@ -66,6 +104,7 @@ function makeHarness(now: () => number) {
         campaignBatches: [],
         messages: [],
         invoicePdfs: [],
+        whatsappTemplates: [],
     };
     let seq = 0;
 
@@ -148,6 +187,19 @@ function makeHarness(now: () => number) {
                 case "files:getDownloadUrlInternal":
                     // A stable fake URL per storageId; the stubbed fetch serves bytes for it.
                     return `https://storage.test/${args.storageId}`;
+                case "campaignBatches:getWhatsAppTemplate":
+                    return db.get(args.templateId);
+                case "invoicePdfs:getWhatsAppPdfRefs":
+                    // Mirror the real query: one ref per `generated` row, carrying any
+                    // cached Meta media id so a re-run can skip the re-upload.
+                    return tables.invoicePdfs
+                        .filter((r) => r.campaignId === args.campaignId && r.status === "generated")
+                        .map((r) => ({
+                            recipientId: r.recipientId,
+                            storageId: r.storageId,
+                            whatsappMediaId: r.whatsappMediaId,
+                            whatsappMediaIdUploadedAt: r.whatsappMediaIdUploadedAt,
+                        }));
                 case "messages:getExistingMessageStatuses": {
                     const rows: Array<{ recipientId: string; status: string }> = [];
                     for (const recipientId of args.recipientIds) {
@@ -217,6 +269,16 @@ function makeHarness(now: () => number) {
                     // The REAL idempotent upsert — the heart of "recovery = no dup".
                     await markAttemptedBatchImpl(ctx, args);
                     return undefined;
+                case "invoicePdfs:recordWhatsAppMediaId": {
+                    const row = tables.invoicePdfs.find(
+                        (r) => r.campaignId === args.campaignId && r.recipientId === args.recipientId
+                    );
+                    if (row) {
+                        row.whatsappMediaId = args.whatsappMediaId;
+                        row.whatsappMediaIdUploadedAt = args.uploadedAt;
+                    }
+                    return undefined;
+                }
                 case "messages:updateStatusBatch": {
                     for (const update of args.updates) {
                         const msg = await db
@@ -278,6 +340,62 @@ const campaignBase = {
     createDynamicsActivity: false,
     createOpportunities: false,
 };
+
+/**
+ * A Meta send fake for the WhatsApp file-as-source path. Counts real
+ * `sendTemplateWithRetry` calls keyed by the recipient's phone (`body.to`) and
+ * lets each be scripted `"ok"` (sent) or `"ambiguous"` (Meta returned a
+ * non-permanent failure though the message may have delivered — the WhatsApp
+ * analogue of the ambiguous 429). The media upload is faked to always succeed so
+ * the document-attachment seam is exercised end to end.
+ */
+function scriptMeta(behavior: Map<string, "ok" | "ambiguous">) {
+    const sendsByPhone = new Map<string, number>();
+    boundary.uploadWhatsAppMedia.mockResolvedValue({
+        mediaId: "meta-media-x",
+        mimeType: "application/pdf",
+        sizeBytes: 1024,
+    });
+    boundary.sendTemplateWithRetry.mockImplementation(async (_config: any, body: any) => {
+        const to = body.to as string;
+        sendsByPhone.set(to, (sendsByPhone.get(to) ?? 0) + 1);
+        if ((behavior.get(to) ?? "ok") === "ambiguous") {
+            return { status: "failed", errorCode: 131056, errorMessage: "pair-rate (may have delivered)", attempts: 5, latencyMs: 1 };
+        }
+        return { status: "sent", wamid: `wamid.${to}`, attempts: 1, latencyMs: 1 };
+    });
+    return sendsByPhone;
+}
+
+const whatsappCampaignBase = {
+    status: "processing",
+    channel: "whatsapp",
+    name: "WA Reg Test",
+    createdBy: "user1",
+    createDynamicsActivity: false,
+    createOpportunities: false,
+    whatsappTemplateId: "wtmpl",
+    // columnRoles present → the file-as-source WhatsApp path.
+    columnRoles: { trackingKey: "contactid", invoiceGuid: "invoiceguid" },
+    whatsappVariableMappings: JSON.stringify({ "1": "amount", pay_token: "pay_token" }),
+};
+
+const whatsappTemplateDoc = {
+    _id: "wtmpl",
+    name: "bad_debt_reminder",
+    language: "en",
+    body: "You owe {{1}}.",
+    variables: ["1"],
+    headerType: "document",
+    buttonType: "url",
+    buttonText: "Pay Now",
+    buttonUrl: "https://pay.ttt.io/{{1}}",
+    buttonUrlVariable: "pay_token",
+};
+
+function waRecipient(id: string, phone: string) {
+    return { id, phone, name: `R ${id}`, variables: JSON.stringify({ amount: "R100", pay_token: `tok-${id}` }) };
+}
 
 beforeEach(() => {
     vi.clearAllMocks();
@@ -498,5 +616,95 @@ describe("send-path idempotency — headline regression (#62)", () => {
         } finally {
             vi.unstubAllGlobals();
         }
+    });
+});
+
+describe("send-path idempotency — WhatsApp file-as-source path (#70)", () => {
+    it("one message per (campaign, tracking key): an ambiguous Meta response settles `failed`, each recipient handed to Meta once, with the document attachment seam intact", async () => {
+        const clock = 2_000_000;
+        const { ctx, db } = makeHarness(() => clock);
+        await db.insert("whatsappTemplates", { ...whatsappTemplateDoc });
+        const campaignId = await db.insert("campaigns", { ...whatsappCampaignBase });
+        await db.insert("campaignBatches", {
+            campaignId,
+            batchNumber: 0,
+            status: "pending",
+            recipients: [waRecipient("A", "+27821111111"), waRecipient("B", "+27822222222")],
+        });
+        // Seed a `pending` message row per recipient (#63) + a `generated` PDF each.
+        await db.insert("messages", { campaignId, recipientId: "A", recipientName: "R A", status: "pending", channel: "whatsapp" });
+        await db.insert("messages", { campaignId, recipientId: "B", recipientName: "R B", status: "pending", channel: "whatsapp" });
+        await db.insert("invoicePdfs", { campaignId, recipientId: "A", invoiceGuid: "gA", status: "generated", storageId: "sA" });
+        await db.insert("invoicePdfs", { campaignId, recipientId: "B", invoiceGuid: "gB", status: "generated", storageId: "sB" });
+
+        const sends = scriptMeta(new Map([["27822222222", "ambiguous"]]));
+
+        await runChannelSend(ctx, { campaignId: campaignId as any, sender: whatsappSender, now: () => clock });
+
+        // Each recipient handed to Meta exactly once — no in-call resend.
+        expect(sends.get("27821111111")).toBe(1);
+        expect(sends.get("27822222222")).toBe(1);
+        // Both PDFs uploaded as document media (the attachment seam ran for real).
+        expect(boundary.uploadWhatsAppMedia).toHaveBeenCalledTimes(2);
+
+        const rowFor = (rid: string) => db.query("messages")
+            .withIndex("by_campaign_recipient", (q: any) => q.eq("campaignId", campaignId).eq("recipientId", rid))
+            .first();
+        expect((await rowFor("A"))!.status).toBe("sent");
+        // The ambiguous-Meta recipient settles `failed` terminally — never re-sent.
+        expect((await rowFor("B"))!.status).toBe("failed");
+    });
+
+    it("recovers a genuinely-dead `processing` WhatsApp batch and re-runs it with ZERO duplicate sends and a fresh document upload only for the unfinished recipient", async () => {
+        let clock = 6_000_000;
+        const { ctx, db, tables } = makeHarness(() => clock);
+        await db.insert("whatsappTemplates", { ...whatsappTemplateDoc });
+        const campaignId = await db.insert("campaigns", { ...whatsappCampaignBase });
+        const staleBeat = clock;
+        const batchId = await db.insert("campaignBatches", {
+            campaignId,
+            batchNumber: 0,
+            status: "processing",
+            heartbeatAt: staleBeat,
+            startedAt: staleBeat,
+            recipients: [waRecipient("A", "+27821111111"), waRecipient("B", "+27822222222")],
+        });
+        // Post-crash: A durably settled `failed` (ambiguous), B never sent (`pending`).
+        await db.insert("messages", { campaignId, recipientId: "A", recipientName: "R A", status: "failed", channel: "whatsapp", errorMessage: "pair-rate (may have delivered)" });
+        await db.insert("messages", { campaignId, recipientId: "B", recipientName: "R B", status: "pending", channel: "whatsapp" });
+        await db.insert("invoicePdfs", { campaignId, recipientId: "A", invoiceGuid: "gA", status: "generated", storageId: "sA" });
+        await db.insert("invoicePdfs", { campaignId, recipientId: "B", invoiceGuid: "gB", status: "generated", storageId: "sB" });
+
+        const sends = scriptMeta(new Map());
+
+        // 1) Sweep reclaims the dead batch and schedules exactly one WhatsApp worker.
+        clock += LEASE_MS + 1;
+        const { recovered } = await recoverStuckBatchesImpl(ctx, () => clock);
+        expect(recovered).toBe(1);
+        expect((await db.get(batchId))!.status).toBe("pending");
+        expect(ctx.scheduler.runAfter).toHaveBeenCalledTimes(1);
+        expect(getFunctionName(ctx.scheduler.runAfter.mock.calls[0][1])).toBe(
+            "campaignQueue:processWhatsAppBatch"
+        );
+
+        // 2) The re-run through the real driver.
+        await runChannelSend(ctx, { campaignId: campaignId as any, sender: whatsappSender, now: () => clock });
+
+        // A (already-handled `failed`) is NEVER re-sent; B (unfinished) sends once.
+        expect(sends.get("27821111111")).toBeUndefined();
+        expect(sends.get("27822222222")).toBe(1);
+        // Only B's PDF was uploaded on the re-run — A was never re-prepared.
+        expect(boundary.uploadWhatsAppMedia).toHaveBeenCalledTimes(1);
+
+        const rowFor = (rid: string) => db.query("messages")
+            .withIndex("by_campaign_recipient", (q: any) => q.eq("campaignId", campaignId).eq("recipientId", rid))
+            .first();
+        expect((await rowFor("A"))!.status).toBe("failed"); // untouched
+        expect((await rowFor("B"))!.status).toBe("sent"); // completed by the re-run
+
+        // Exactly one message row per recipient — no duplicate row created.
+        expect(tables.messages.filter((m) => m.recipientId === "A")).toHaveLength(1);
+        expect(tables.messages.filter((m) => m.recipientId === "B")).toHaveLength(1);
+        expect((await db.get(batchId))!.status).toBe("completed");
     });
 });

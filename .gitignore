@@ -52,3 +52,13 @@ next-env.d.ts
 # agent scratch analysis notes (not source)
 /*_ANALYSIS.md
 /IMPLEMENTATION_PLAN.md
+
+# bad-debt campaign working files — real PII, never commit
+/.scratch/
+
+# bad-debt working docs & one-off debug scripts (not source)
+/bad-debt
+/bad-debt-merge-csv-handoff.md
+/bad-debt-technical-requirements.html
+/bad-debt-templates.html
+/crm-connect.py

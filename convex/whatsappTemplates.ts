@@ -189,6 +189,61 @@ export const setHeaderMediaCache = internalMutation({
     },
 });
 
+/**
+ * Reconcile the DB copies of Meta templates with the real state fetched from
+ * Meta — status (pending/approved/rejected/paused/…) and category (Meta may
+ * auto-reclassify utility→marketing on approval). Matched by `metaTemplateId`;
+ * rows with no matching DB template are reported back, not created. Status is
+ * display-only in this app, so this never affects selection or sending — it
+ * just stops the seeded "approved" from lying while Meta review is pending.
+ *
+ * Called by `actions/whatsappTemplateAdmin:reconcileMetaStatuses`, which does
+ * the Graph fetch and passes the already-lowercased values in.
+ */
+export const applyMetaStatuses = internalMutation({
+    args: {
+        statuses: v.array(
+            v.object({
+                metaTemplateId: v.string(),
+                status: v.string(),
+                category: v.optional(v.string()),
+            }),
+        ),
+    },
+    returns: v.object({
+        updated: v.number(),
+        unchanged: v.number(),
+        notFound: v.array(v.string()),
+    }),
+    handler: async (ctx, args) => {
+        let updated = 0;
+        let unchanged = 0;
+        const notFound: string[] = [];
+        for (const row of args.statuses) {
+            const existing = await ctx.db
+                .query("whatsappTemplates")
+                .withIndex("by_meta_id", (q) => q.eq("metaTemplateId", row.metaTemplateId))
+                .first();
+            if (!existing) {
+                notFound.push(row.metaTemplateId);
+                continue;
+            }
+            const nextCategory = row.category ?? existing.category;
+            if (existing.status === row.status && existing.category === nextCategory) {
+                unchanged++;
+                continue;
+            }
+            await ctx.db.patch(existing._id, {
+                status: row.status,
+                category: nextCategory,
+                lastUpdatedAt: Date.now(),
+            });
+            updated++;
+        }
+        return { updated, unchanged, notFound };
+    },
+});
+
 // Delete a template — admin only
 export const remove = mutation({
     args: {
