@@ -354,4 +354,56 @@ describe("buildValidationReport — WhatsApp authoring warnings (PRD #84, issue 
         expect(report.held).toEqual([]);
         expect(report.sendable.map((r) => r.recipientId)).toEqual([A]);
     });
+
+    // Regression, bad-debt run 5 (2026-08-07): a WhatsApp file that also carries an
+    // `email` column gets a send-address role from `guessRoles` whether or not the
+    // addresses mean anything, so the address check held 24 recipients who had a
+    // valid mobile, a WhatsApp opt-in, and no email at all — precisely the people
+    // WhatsApp exists to reach. On WhatsApp the phone is the destination; the
+    // send-address cell is not the channel's address and must not gate the send.
+    it("sends a WhatsApp recipient whose designated send address is blank", () => {
+        const report = buildValidationReport(
+            [],
+            rows([waRecipient({ sendAddress: "" })]),
+            {},
+            whatsapp(),
+        );
+        expect(report.held).toEqual([]);
+        expect(report.sendable.map((r) => r.recipientId)).toEqual([A]);
+    });
+
+    it("sends a WhatsApp recipient whose designated send address is malformed", () => {
+        const report = buildValidationReport(
+            [],
+            rows([waRecipient({ sendAddress: "not-an-email" })]),
+            {},
+            whatsapp(),
+        );
+        expect(report.held).toEqual([]);
+        expect(report.sendable.map((r) => r.recipientId)).toEqual([A]);
+    });
+
+    it("still holds a WhatsApp recipient with no usable phone, blank address or not", () => {
+        const report = buildValidationReport(
+            [],
+            rows([waRecipient({ sendAddress: "", phone: "" })]),
+            {},
+            whatsapp(),
+        );
+        expect(report.sendable).toEqual([]);
+        expect(report.held).toEqual([
+            { rowIndex: 0, trackingKey: A, reasons: ["missing-phone"] },
+        ]);
+    });
+
+    it("keeps enforcing the address check on an email upload with the same bad cell", () => {
+        const report = buildValidationReport(
+            ["Amount"],
+            rows([recipient({ sendAddress: "" })]),
+        );
+        expect(report.sendable).toEqual([]);
+        expect(report.held).toEqual([
+            { rowIndex: 0, trackingKey: A, reasons: ["invalid-send-address"] },
+        ]);
+    });
 });

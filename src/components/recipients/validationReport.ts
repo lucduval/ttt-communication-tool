@@ -230,9 +230,18 @@ export function buildValidationReport(
         );
         if (hasEmptyCell) reasons.push("empty-referenced-cell");
 
-        // Send address: null = no send-address role (e.g. a WhatsApp upload) → skip;
-        // otherwise it must be a complete, valid address.
-        if (recipient.sendAddress !== null && !isValidSendAddress(recipient.sendAddress)) {
+        // Send address: only checked when it is the channel's actual destination.
+        //
+        // On a WhatsApp upload the destination is the phone, and the send-address
+        // role is vestigial — `guessRoles` designates it from any `email` header,
+        // so a WhatsApp file that also carries an email column gets one whether or
+        // not the addresses mean anything. Checking it there held every row whose
+        // client has no email address, i.e. exactly the people WhatsApp is for: in
+        // the 2026-08-07 bad-debt run 5, 24 recipients with a valid mobile and a
+        // WhatsApp opt-in were silently held on a blank email cell.
+        //
+        // null = no send-address role at all → nothing to check either way.
+        if (!whatsapp && recipient.sendAddress !== null && !isValidSendAddress(recipient.sendAddress)) {
             reasons.push("invalid-send-address");
         }
 
