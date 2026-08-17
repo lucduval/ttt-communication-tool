@@ -6,10 +6,13 @@ import { internalMutation } from "./_generated/server";
  * three age bands, each in a relationship-led ("Paid before") and a professional
  * ("Never paid") variant — with four spaced touches apiece (Day 0 / 10 / 25 / 40).
  *
- * Merge fields use the app's single-curly-brace syntax (`{key}`) so they resolve
- * through convex/lib/applyMerge.ts at send time; unresolved fields render empty.
- * The keys mirror the human-readable labels from the source doc — for an
- * uploaded-file campaign these bind on the matching Excel column header.
+ * Wording is deliberately warm and spare: every touch merges only two fields —
+ * `{first_name}` and `{amount_formatted}` — so no message ever looks cluttered
+ * with brackets. Merge fields use the app's single-curly-brace syntax (`{key}`)
+ * so they resolve through convex/lib/applyMerge.ts at send time; unresolved
+ * fields render empty. The keys mirror the human-readable labels from the source
+ * doc — for an uploaded-file campaign these bind on the matching Excel column
+ * header.
  *
  * Idempotent: templates already present (matched by name) are skipped, so this
  * is safe to re-run. Run with `npx convex run seedTemplates:seedBadDebtEmailTemplates`.
@@ -75,8 +78,9 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "The simplest way to settle your account",
         paragraphs: [
             "Hi {first_name},",
-            "It has been great having you as a client for {years_a_client} years, and we would like to keep everything running smoothly on your account. Invoice {invoice_number} for {amount_formatted}, issued {invoice_issue_date}, is now due.",
-            "You can settle it securely in one step using the button below.",
+            "It has been great having you as a client, and we would like to keep everything running smoothly on your account.",
+            "Our records show there is still an outstanding invoice on your account of {amount_formatted}.",
+            "To keep everything running smoothly, please settle your invoice securely using the Pay now button below.",
             SIGN_KIND,
         ],
     },
@@ -85,7 +89,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "A quick follow-up on your account",
         paragraphs: [
             "Hi {first_name},",
-            "Hope you are well. Just circling back on invoice {invoice_number} ({amount_formatted}), which is still open on your account. Whenever it suits you, you can settle it in one step using the button below.",
+            "We hope you are well. We are just following up on your account, where our records show an outstanding invoice of {amount_formatted} still open.",
+            "Whenever it suits you, you can settle it securely using the Pay now button below.",
             SIGN_KIND,
         ],
     },
@@ -94,8 +99,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Your invoice still needs settling",
         paragraphs: [
             "Hi {first_name},",
-            "We would still like to get this one wrapped up with you. Invoice {invoice_number} ({amount_formatted}) has now been open a few weeks. Please settle it below when you can.",
-            "If anything about it is unclear, or a payment plan would help, reply and we will sort it out.",
+            "We would still like to get your account wrapped up with you. Your outstanding invoice of {amount_formatted} has now been open a few weeks.",
+            "Please settle it securely using the Pay now button below. If anything is unclear, or a payment plan would help, just reply and we will sort it out.",
             SIGN_KIND,
         ],
     },
@@ -104,7 +109,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Final reminder on your account",
         paragraphs: [
             "Hi {first_name},",
-            "This is a final reminder on invoice {invoice_number} ({amount_formatted}). We would much rather settle it with you directly than take it any further. Please pay below, or reply so we can find a way forward together.",
+            "This is a final reminder on your outstanding invoice of {amount_formatted}.",
+            "We would much rather settle it with you directly than take it any further. Please settle securely using the Pay now button below, or reply and we will find a way forward together.",
             SIGN_KIND,
         ],
     },
@@ -115,8 +121,9 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Your balance and how to settle it",
         paragraphs: [
             "Hi {first_name},",
-            "Thank you for choosing TTT for your tax work. We would like to make settling your account as easy as possible. Invoice {invoice_number} for {amount_formatted}, issued {invoice_issue_date}, is currently unpaid, and here is a clear, simple way to settle it — use the button below.",
-            "If you believe the balance is not correct, reply and we will look into it with you.",
+            "Thank you for choosing TTT for your tax work. We would like to make settling your account as easy as possible.",
+            "Our records show an outstanding invoice on your account of {amount_formatted}.",
+            "You can settle it securely in one step using the Pay now button below. If you believe the balance is not correct, just reply and we will look into it with you.",
             SIGN_REGARDS,
         ],
     },
@@ -125,8 +132,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Following up on your invoice",
         paragraphs: [
             "Hi {first_name},",
-            "Following up to help you get your account settled. Invoice {invoice_number} ({amount_formatted}) is still open, and you can settle it in one step using the button below.",
-            "If you believe the balance is wrong, reply and we will look into it.",
+            "We are following up to help you get your account settled. Our records show an outstanding invoice of {amount_formatted} still open.",
+            "You can settle it securely using the Pay now button below. If you believe the balance is wrong, reply and we will look into it.",
             SIGN_REGARDS,
         ],
     },
@@ -135,8 +142,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Action needed on your account",
         paragraphs: [
             "Hi {first_name},",
-            "Invoice {invoice_number} ({amount_formatted}) remains unpaid and now needs your attention. Please settle it using the button below.",
-            "If there is a dispute, or you need a payment plan, reply and we will work it through with you.",
+            "Your outstanding invoice of {amount_formatted} remains unpaid and now needs your attention.",
+            "Please settle it securely using the Pay now button below. If there is a dispute, or you need a payment plan, reply and we will work it through with you.",
             SIGN_REGARDS,
         ],
     },
@@ -145,7 +152,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Final notice on your account",
         paragraphs: [
             "Hi {first_name},",
-            "This is a final notice on invoice {invoice_number} ({amount_formatted}). If it stays unpaid and we do not hear from you, the account will be referred to our recoveries process. We would much prefer to resolve it with you first, so please settle using the button below, or reply.",
+            "This is a final notice on your outstanding invoice of {amount_formatted}.",
+            "If it stays unpaid and we do not hear from you, the account will be referred to our recoveries process. We would much prefer to resolve it with you first, so please settle securely using the Pay now button below, or reply.",
             SIGN_REGARDS,
         ],
     },
@@ -156,8 +164,9 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Tax season is open, let's clear your account and start your return",
         paragraphs: [
             "Hi {first_name},",
-            "It has been good doing your returns over the past {years_a_client} years, and tax season has just opened, so we would love to handle this year's too. We cannot start while an invoice is open, so clearing invoice {invoice_number} ({amount_formatted}, issued {invoice_issue_date}) now means we can get straight onto your filing.",
-            "Settle securely in one step using the button below.",
+            "Thank you for trusting us with your returns. Tax season has just opened and we would love to handle this year's too.",
+            "We cannot start while an invoice is open, and our records show an outstanding invoice on your account of {amount_formatted}.",
+            "Clear it securely using the Pay now button below and we will get straight onto your filing.",
             SIGN_KIND,
         ],
     },
@@ -166,7 +175,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Your tax return is ready to start",
         paragraphs: [
             "Hi {first_name},",
-            "Filing season is underway and your return is ready to start. We just need invoice {invoice_number} ({amount_formatted}) settled first — use the button below.",
+            "Filing season is underway and your return is ready to start. We just need your outstanding invoice of {amount_formatted} settled first.",
+            "You can settle it securely using the Pay now button below and we will get straight onto your return.",
             SIGN_KIND,
         ],
     },
@@ -175,8 +185,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Season is moving, your invoice is holding up your return",
         paragraphs: [
             "Hi {first_name},",
-            "Season deadlines do not wait, and invoice {invoice_number} ({amount_formatted}) is still open, which is holding up your return. Let us clear it and get your filing moving using the button below.",
-            "If a payment plan would help, reply and we will set one up.",
+            "Season deadlines do not wait, and your outstanding invoice of {amount_formatted} is still holding up your return.",
+            "Let us clear it and get your filing moving — settle securely using the Pay now button below. If a payment plan would help, just reply and we will set one up.",
             SIGN_KIND,
         ],
     },
@@ -185,7 +195,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Final reminder: clear your account so we can file in time",
         paragraphs: [
             "Hi {first_name},",
-            "Final reminder on invoice {invoice_number} ({amount_formatted}). With season already open, we would hate for the delay to cost you your filing window. Clear it using the button below and we will prioritise your return, or reply and we will help.",
+            "This is a final reminder on your outstanding invoice of {amount_formatted}.",
+            "With season already open, we would hate for the delay to cost you your filing window. Clear it securely using the Pay now button below and we will prioritise your return, or reply and we will help.",
             SIGN_KIND,
         ],
     },
@@ -196,9 +207,9 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Tax season is open, settling your account lets us start your return",
         paragraphs: [
             "Hi {first_name},",
-            "Tax season has just opened and we would be glad to file your return this year. We cannot begin while an invoice is unpaid, so settling invoice {invoice_number} ({amount_formatted}, issued {invoice_issue_date}) clears the way to start.",
-            "Settle securely in one step using the button below.",
-            "If you believe the balance is wrong, reply and we will look into it.",
+            "Tax season has just opened and we would be glad to file your return this year.",
+            "We cannot begin while an invoice is unpaid, and our records show an outstanding invoice on your account of {amount_formatted}.",
+            "Settle it securely using the Pay now button below and we can start. If you believe the balance is wrong, reply and we will look into it.",
             SIGN_REGARDS,
         ],
     },
@@ -207,8 +218,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Your tax return is ready to start",
         paragraphs: [
             "Hi {first_name},",
-            "Filing season is underway and your return is ready to start. We just need invoice {invoice_number} ({amount_formatted}) settled first — use the button below.",
-            "If you believe the balance is wrong, reply and we will look into it.",
+            "Filing season is underway and your return is ready to start. We just need your outstanding invoice of {amount_formatted} settled first.",
+            "You can settle it securely using the Pay now button below. If you believe the balance is wrong, reply and we will look into it.",
             SIGN_REGARDS,
         ],
     },
@@ -217,8 +228,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Season is moving, your invoice is still open",
         paragraphs: [
             "Hi {first_name},",
-            "Season deadlines do not wait, and invoice {invoice_number} ({amount_formatted}) is still unpaid, which is holding up your return. Please settle it using the button below.",
-            "If there is a dispute, or you need a payment plan, reply and we will work it through.",
+            "Season deadlines do not wait, and your outstanding invoice of {amount_formatted} is still unpaid, which is holding up your return.",
+            "Please settle it securely using the Pay now button below. If there is a dispute, or you need a payment plan, reply and we will work it through.",
             SIGN_REGARDS,
         ],
     },
@@ -227,8 +238,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Final notice on your account",
         paragraphs: [
             "Hi {first_name},",
-            "Final notice on invoice {invoice_number} ({amount_formatted}). Settle now and we can still fit your return in this season; if it stays unpaid and we do not hear from you, the account will be referred to our recoveries process.",
-            "Settle securely in one step using the button below.",
+            "This is a final notice on your outstanding invoice of {amount_formatted}.",
+            "Settle now and we can still fit your return in this season. If it stays unpaid and we do not hear from you, the account will be referred to our recoveries process, so please settle securely using the Pay now button below.",
             SIGN_REGARDS,
         ],
     },
@@ -239,8 +250,9 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Let's find a way to close your account",
         paragraphs: [
             "Hi {first_name},",
-            "It has been a while, and after {years_a_client} years as a client we would really like to help you close off invoice {invoice_number} ({amount_formatted}, issued {invoice_issue_date}) rather than let it drift any longer.",
-            "The button below is the quickest way to settle it in one step and put this behind you.",
+            "It has been a while, and as a valued client we would really like to help you close off your account rather than let it drift any longer.",
+            "Our records show an outstanding invoice of {amount_formatted}.",
+            "The Pay now button below is the quickest way to settle it in one step and put this behind you.",
             SIGN_KIND,
         ],
     },
@@ -249,7 +261,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Let's close off your account",
         paragraphs: [
             "Hi {first_name},",
-            "Following up on invoice {invoice_number} ({amount_formatted}). We would still really like to help you close this off, and settling in one step using the button below is the easiest way to put it behind you.",
+            "We are following up, and we would still really like to help you close this off. Our records show an outstanding invoice of {amount_formatted} still open.",
+            "Settling in one step using the Pay now button below is the easiest way to put it behind you.",
             SIGN_KIND,
         ],
     },
@@ -258,8 +271,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Let's get your invoice resolved",
         paragraphs: [
             "Hi {first_name},",
-            "Invoice {invoice_number} ({amount_formatted}) is still open and we would really like to resolve it with you. Whatever suits you, settle in full using the button below, or reply and we will put a plan in place.",
-            "If you believe the balance is not right, tell us and we will check it.",
+            "Your outstanding invoice of {amount_formatted} is still open and we would really like to resolve it with you.",
+            "Whatever suits you, settle in full using the Pay now button below, or reply and we will put a plan in place. If you believe the balance is not right, just tell us and we will check it.",
             SIGN_KIND,
         ],
     },
@@ -268,7 +281,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "A last note on your account",
         paragraphs: [
             "Hi {first_name},",
-            "A last note on invoice {invoice_number} ({amount_formatted}). We would much rather settle it with you, on a plan if that helps, than take it any further. Reply to us or use the button below and we will help you close it.",
+            "This is a last note on your outstanding invoice of {amount_formatted}.",
+            "We would much rather settle it with you, on a plan if that helps, than take it any further. Reply to us, or use the Pay now button below, and we will help you close it.",
             SIGN_KIND,
         ],
     },
@@ -279,8 +293,9 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Options to settle or query your invoice",
         paragraphs: [
             "Hi {first_name},",
-            "Invoice {invoice_number} for {amount_formatted}, issued {invoice_issue_date}, has been outstanding for some time and we would like to help you resolve it. You can settle it in one step using the button below.",
-            "If you believe the balance is not correct, tell us and we will look into it with you.",
+            "Your account has been outstanding for some time and we would like to help you resolve it.",
+            "Our records show an outstanding invoice on your account of {amount_formatted}.",
+            "You can settle it in one step using the Pay now button below. If you believe the balance is not correct, tell us and we will look into it with you.",
             SIGN_REGARDS,
         ],
     },
@@ -289,8 +304,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Following up on your invoice",
         paragraphs: [
             "Hi {first_name},",
-            "Following up on invoice {invoice_number} ({amount_formatted}) to help you get it resolved. You can settle it in one step using the button below.",
-            "If you believe the balance is wrong, reply and we will check it.",
+            "We are following up to help you get your account resolved. Our records show an outstanding invoice of {amount_formatted} still open.",
+            "You can settle it in one step using the Pay now button below. If you believe the balance is wrong, reply and we will check it.",
             SIGN_REGARDS,
         ],
     },
@@ -299,7 +314,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Your invoice still needs resolving",
         paragraphs: [
             "Hi {first_name},",
-            "Invoice {invoice_number} ({amount_formatted}) still needs resolving and we would like to sort it out with you. Settle using the button below, reply for a payment plan, or tell us if you dispute the balance and we will look into it.",
+            "Your outstanding invoice of {amount_formatted} still needs resolving and we would like to sort it out with you.",
+            "Settle using the Pay now button below, reply for a payment plan, or tell us if you dispute the balance and we will look into it.",
             SIGN_REGARDS,
         ],
     },
@@ -308,7 +324,8 @@ const TEMPLATES: SeedTemplate[] = [
         subject: "Final notice on your account",
         paragraphs: [
             "Hi {first_name},",
-            "Final notice on invoice {invoice_number} ({amount_formatted}). We would much prefer to resolve it with you, in full or on a plan, than refer it to our recoveries process. Please settle using the button below, or reply and we will help.",
+            "This is a final notice on your outstanding invoice of {amount_formatted}.",
+            "We would much prefer to resolve it with you, in full or on a plan, than refer it to our recoveries process. Please settle using the Pay now button below, or reply and we will help.",
             SIGN_REGARDS,
         ],
     },

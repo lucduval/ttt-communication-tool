@@ -91,7 +91,15 @@ export function getMetaWhatsAppConfig(): MetaWhatsAppConfig {
 // ---------- Template payload ----------
 
 export interface TemplateLike {
+    /** Human-readable display label shown in the app's template UI. NOT the
+     *  identifier Meta matches on — see `metaTemplateId`. */
     name: string;
+    /** The name Meta registered the template under (lowercase snake_case, e.g.
+     *  `bad_debt_wa_30_90_paid_before_day0`). This — not `name` — is what a send
+     *  must transmit; Meta matches on it + `language` and returns #132001 when it
+     *  doesn't exist. Optional for back-compat with older rows/fixtures where the
+     *  display `name` doubled as the Meta name; the send falls back to `name`. */
+    metaTemplateId?: string;
     language: string;
     variables: string[];
     headerType?: string;
@@ -312,7 +320,11 @@ export function buildTemplateRequestBody(
         to: toDigits,
         type: "template",
         template: {
-            name: template.name,
+            // Meta matches on the registered template name, which we store in
+            // `metaTemplateId`; `name` is only a display label and may diverge
+            // (older rows) or be a pretty string (bad-debt seed). Fall back to
+            // `name` for legacy rows where metaTemplateId was never set.
+            name: template.metaTemplateId || template.name,
             language: { code: template.language },
             ...(components.length > 0 ? { components } : {}),
         },

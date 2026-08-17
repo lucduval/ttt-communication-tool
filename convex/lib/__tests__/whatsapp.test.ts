@@ -119,6 +119,26 @@ describe('buildTemplateRequestBody', () => {
         });
     });
 
+    it('sends metaTemplateId as the Meta template name when set (name is only a display label)', () => {
+        const template: TemplateLike = {
+            name: 'Bad debt · WhatsApp · 30–90 days · Paid before · Day 0 (opening)',
+            metaTemplateId: 'bad_debt_wa_30_90_paid_before_day0',
+            language: 'en',
+            variables: [],
+        };
+        const body = buildTemplateRequestBody(template, '27821234567', {});
+        // Meta matches on the registered name; sending the display `name` would 132001.
+        expect(body.template.name).toBe('bad_debt_wa_30_90_paid_before_day0');
+    });
+
+    it('falls back to name as the Meta template name when metaTemplateId is unset (legacy rows)', () => {
+        const body = buildTemplateRequestBody(baseTemplate, '27821234567', {
+            '1': 'Alice',
+            '2': 'Acme',
+        });
+        expect(body.template.name).toBe('welcome_message');
+    });
+
     it('emits parameter_name when variable names are not numeric', () => {
         const template: TemplateLike = {
             name: 'reminder',
