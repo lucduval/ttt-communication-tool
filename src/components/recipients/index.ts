@@ -50,6 +50,7 @@ export {
     serialiseVariableMapping,
     resolvePreviewVariableValues,
     shouldRenderComposeVariableMapping,
+    whatsappUploadContext,
     type WhatsAppTemplateShape,
     type TemplateVariableField,
     type VariableMappingValidation,

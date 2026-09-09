@@ -6,6 +6,7 @@ import { checkAccessHelper } from "./users";
 import { batchProcessorFor } from "./lib/channelDispatch";
 import { isDead } from "./lib/batchLease";
 import { tallyCampaign } from "./lib/campaignTally";
+import { chunkByPayload, jsonByteSize, MAX_BATCH_DOCUMENT_BYTES } from "./lib/batchChunker";
 
 /**
  * Recompute the denormalised stat cache (`sentCount` / `deliveredCount` /
@@ -55,6 +56,11 @@ export const EMAIL_BATCH_SIZE = 100;
 export const WHATSAPP_BATCH_SIZE = 1000;
 export const PERSONALISED_BATCH_SIZE = 50;
 
+// These are RECIPIENT-COUNT caps, sized for each channel's send-rate limits. They say
+// nothing about how big the resulting document is, and a batch stores its recipients
+// inline — so they are a ceiling, not the whole rule. The byte budget below is the
+// other half; see MAX_BATCH_DOCUMENT_BYTES.
+
 /**
  * Create batches for a campaign and queue them for processing
  */
@@ -97,13 +103,19 @@ export const createBatches = internalMutation({
             .collect();
         const existingBatchCount = existingBatches.length;
 
-        const newBatchCount = Math.ceil(args.recipients.length / batchSize);
-        const totalBatches = existingBatchCount + newBatchCount;
+        // Pack by BOTH the channel's recipient cap and the Convex document-size limit.
+        // An uploaded list carries the whole CSV row per recipient, so a wide file blows
+        // the 1 MiB document ceiling long before it reaches the count cap — that is what
+        // rejected bad-debt run 9's 937-row WhatsApp file at 1.21 MiB. Same chunker the
+        // Graph $batch path uses; only the limits differ.
+        const chunks = chunkByPayload(args.recipients, jsonByteSize, {
+            maxCount: batchSize,
+            maxBytes: MAX_BATCH_DOCUMENT_BYTES,
+        });
+        const totalBatches = existingBatchCount + chunks.length;
 
-        for (let i = 0; i < newBatchCount; i++) {
-            const start = i * batchSize;
-            const end = Math.min(start + batchSize, args.recipients.length);
-            const batchRecipients = args.recipients.slice(start, end);
+        for (let i = 0; i < chunks.length; i++) {
+            const batchRecipients = chunks[i];
 
             await ctx.db.insert("campaignBatches", {
                 campaignId: args.campaignId,

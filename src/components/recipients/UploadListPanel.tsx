@@ -13,6 +13,7 @@ import {
     templateVariableFields,
     guessVariableMapping,
     mergeGuessedMapping,
+    whatsappUploadContext,
     type WhatsAppTemplateShape,
     type TemplateVariableField,
 } from "./whatsappVariableMapping";
@@ -109,6 +110,7 @@ export function guessRoles(columns: DetectedColumn[]): RoleSelection {
 }
 
 export function UploadListPanel({
+    channel,
     requireSendAddress,
     templateText,
     whatsappTemplate,
@@ -116,6 +118,13 @@ export function UploadListPanel({
     onMappingChange,
     onResult,
 }: {
+    /**
+     * The campaign's channel. This — not whether a template happens to be selected —
+     * is what tells the validation gate the destination is a phone number, so a
+     * WhatsApp row is never held for a blank email cell whatever order the operator
+     * works through the wizard in (see {@link whatsappUploadContext}).
+     */
+    channel: "email" | "whatsapp" | "personalised";
     /** Email/personalised campaigns must designate a send address; WhatsApp need not. */
     requireSendAddress: boolean;
     /**
@@ -179,7 +188,7 @@ export function UploadListPanel({
             cols: UploadedColumns | null,
             sel: RoleSelection,
             name: string | null,
-            whatsapp: { fields: TemplateVariableField[]; mapping: Record<string, string> } | undefined,
+            whatsapp: ReturnType<typeof whatsappUploadContext>,
         ) => {
             if (!cols || cols.status === "empty" || !name) {
                 onResult(null);
@@ -216,10 +225,8 @@ export function UploadListPanel({
     // change after an upload, so a newly-added `{column}` (or a mapping edit)
     // re-pushes the result without a re-upload.
     useEffect(() => {
-        const whatsapp =
-            varFields.length > 0 ? { fields: varFields, mapping } : undefined;
-        recompute(columns, roles, fileName, whatsapp);
-    }, [placeholders, columns, roles, fileName, varFields, mapping, recompute]);
+        recompute(columns, roles, fileName, whatsappUploadContext(channel, varFields, mapping));
+    }, [placeholders, columns, roles, fileName, channel, varFields, mapping, recompute]);
 
     const handleFile = useCallback(
         async (file: File) => {
@@ -342,6 +349,7 @@ export function UploadListPanel({
                 <RoleDesignation
                     columns={columns}
                     roles={roles}
+                    channel={channel}
                     requireSendAddress={requireSendAddress}
                     placeholders={placeholders}
                     fileName={fileName}
@@ -364,6 +372,7 @@ export function UploadListPanel({
 function RoleDesignation({
     columns,
     roles,
+    channel,
     requireSendAddress,
     placeholders,
     fileName,
@@ -374,6 +383,8 @@ function RoleDesignation({
 }: {
     columns: UploadedColumns;
     roles: RoleSelection;
+    /** The campaign's channel — the gate's WhatsApp signal. */
+    channel: "email" | "whatsapp" | "personalised";
     requireSendAddress: boolean;
     placeholders: readonly string[];
     fileName: string | null;
@@ -402,10 +413,7 @@ function RoleDesignation({
                   },
                   {
                       placeholders,
-                      whatsapp:
-                          varFields.length > 0
-                              ? { fields: varFields, mapping }
-                              : undefined,
+                      whatsapp: whatsappUploadContext(channel, varFields, mapping),
                   },
               )
             : null;

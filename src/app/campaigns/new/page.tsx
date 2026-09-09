@@ -1783,6 +1783,7 @@ export default function NewCampaignPage() {
 
                                     {audience === "upload" && (
                                         <UploadListPanel
+                                            channel={campaignChannel}
                                             requireSendAddress={
                                                 campaignChannel === "email" ||
                                                 campaignChannel === "personalised"

@@ -24,6 +24,28 @@ export const MAX_BATCH_SUBREQUESTS = 20;
  */
 export const MAX_BATCH_PAYLOAD_BYTES = 3 * 1024 * 1024;
 
+/**
+ * Cumulative recipient-payload budget for ONE `campaignBatches` document.
+ *
+ * Convex caps a document at **1 MiB**, and a batch stores its whole `recipients`
+ * array inline. Each uploaded-list recipient carries the entire CSV row in its
+ * `variables` bag, so a wide export is ~1.5 KB per recipient and the count caps
+ * alone stopped being sufficient: bad-debt run 9's 937-row WhatsApp file (41
+ * columns) is one 1.21 MiB document under `WHATSAPP_BATCH_SIZE = 1000`, and the
+ * insert is rejected outright — "Value is too large (1.21 MiB > maximum size 1 MiB)".
+ *
+ * 768 KiB leaves room for the rest of the document (campaignId, batch numbering,
+ * counters) plus the difference between our UTF-8 estimate and Convex's own
+ * encoded size, which has measured *smaller* than the estimate — so this budget
+ * errs safe in the direction that matters.
+ */
+export const MAX_BATCH_DOCUMENT_BYTES = 768 * 1024;
+
+/** UTF-8 byte length of a value's JSON encoding — what a Convex document costs. */
+export function jsonByteSize(value: unknown): number {
+    return new TextEncoder().encode(JSON.stringify(value) ?? "").length;
+}
+
 /** Base64 encodes 3 raw bytes as 4 chars (padded), so inflates size by ~4/3. */
 export function base64Size(rawBytes: number): number {
     if (rawBytes <= 0) return 0;

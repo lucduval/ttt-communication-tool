@@ -245,6 +245,32 @@ export function shouldRenderComposeVariableMapping(input: {
 }
 
 /**
+ * The WhatsApp context the pre-send validation gate is handed for an uploaded list,
+ * or `undefined` for a non-WhatsApp campaign.
+ *
+ * **This is a channel question, not a template question.** The gate reads the
+ * presence of this context as "the destination is a phone number, so do not check
+ * the send address" — a WhatsApp campaign whose recipients have no email is exactly
+ * the case the check must not fire on. Deriving it from `fields.length > 0` instead
+ * (i.e. "a template with variables has been selected") makes the guard depend on the
+ * order the operator works through the wizard: upload the file before picking the
+ * template and every blank-email row is held. That cost the same 31 people —
+ * 30 of whom have no email address anywhere in the CRM — in bad-debt runs 5, 6, 7
+ * and 8, so the channel is the input and the template is not.
+ *
+ * With no template selected yet the context carries empty `fields`, which validates
+ * as fully mapped; the phone checks still apply, as they should for WhatsApp.
+ */
+export function whatsappUploadContext(
+    channel: "email" | "whatsapp" | "personalised",
+    fields: readonly TemplateVariableField[],
+    mapping: Readonly<Record<string, string>>,
+): { fields: readonly TemplateVariableField[]; mapping: Readonly<Record<string, string>> } | undefined {
+    if (channel !== "whatsapp") return undefined;
+    return { fields, mapping };
+}
+
+/**
  * Validate that every template variable — body positions **and** the
  * button/payment-link variable — is bound to a column, so a send never silently
  * renders blank variables. A field is unmapped when its mapping value is
