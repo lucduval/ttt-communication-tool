@@ -176,6 +176,38 @@ separate branch, so a later touch's patch cannot carry the field at all. `riivo_
 write is gated on a **send outcome**, not on test mode: until #102/#103 land, both channel outcomes
 are literally `false`, so turning `riivo_ReminderTestMode` off early advances no counter.
 
+### Message inputs, and the abort
+
+Built in #100, as `Scope_|_Prepare_Documents` inside the per-client loop. Four things the build
+settled that the issue did not spell out:
+
+- **The token is written back to the invoice.** The cadence flow `c430ace5`, named as the source to
+  copy, mints inline and *drops* the token — so it re-mints on every run. The write-back is taken
+  from `9f8601a5` instead, which already owns `riivo_paymenttoken`. Without it the "skip an invoice
+  that already has a token" idempotence can never become true.
+- **Minting is gated on `riivo_PaymentLinkEnabled`**, as the cadence flow gates it. Every one of the
+  24 approved templates carries a Pay-now button, so with links switched off there is no compliant
+  message to send: the run holds each client naming that reason, rather than sending a button
+  pointing at a switched-off endpoint. The issue did not mention the switch; honouring it means one
+  environment variable can silence the campaign, but it does so **visibly**, in the report.
+- **No invoice-type gate.** The cadence flow mints only for Tax invoices (`riivo_invoicetype`
+  `100000000`); that condition is deliberately not inherited. The dev book is 53 Tax to 7
+  Accounting, the PDF child handles both, and every bad-debt template needs a button — so a Tax-only
+  path would silently hold every accounting debtor. If the mint endpoint turns out to reject
+  accounting invoices, that surfaces as a held client with the endpoint's status in the reason.
+- **`Retry-After` is honoured by hand.** Azure documents the retry policy as covering 408/429/5xx
+  but says nothing, anywhere, about honouring `Retry-After`, so the default policy retries on its
+  own clock. The mint call therefore carries `retryPolicy: none` inside an `Until` that reads the
+  header and waits exactly that long, clamped to 300s. The PDF call keeps its default policy on
+  purpose: the child's own HTTP action retries `riivo_InvoiceGen2_Endpoint`, which is the layer
+  where such a header actually arrives — a child flow's `Response` cannot carry one back.
+
+**The abort** is a handled scope failure, so one client's unproducible document cannot end the run
+for the clients behind them in a sequential loop. The gate is "do we *have* both things", not "did
+the calls succeed", so a call that failed and a call that returned nothing are treated identically.
+An aborted client receives **no bookkeeping patch at all**, which is what makes the next run pick
+them up unchanged.
+
 ### Consent is not optional
 
 D6 sets the *campaign* stop rule to Paid-only; channel consent is separate and enforced regardless:
@@ -289,6 +321,9 @@ measurement of a run has to account for both plus the new flow.
 - **P2 — Template selection.** ✅ Built (#99): campaign-key mapping to the 24 templates, the D12
   fallback past touch 4, and touch bookkeeping gated on a send outcome. Still test mode, still no
   sends. Awaiting the dev replace-deploy and a human test run.
+- **P2a — Message inputs.** ✅ Built (#100): per-client token minting with write-back, the invoice
+  PDF via the existing child flow, and a clean per-client abort when either cannot be produced.
+  Still test mode, still no sends. Rides P2's replace-deploy and human run.
 - **P3 — Email live.** To colleague addresses, then a small canary.
 - **P4 — WhatsApp live.** Same progression.
 - **P5 — Schedule and hand over.** Recurrence on in dev, observe two cycles, hand to Luc for prod.

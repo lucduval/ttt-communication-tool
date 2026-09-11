@@ -95,6 +95,49 @@ print(json.dumps({
   fi
 fi
 
+# --------------------------------------------------------- #100 depends on ----
+# The flow reads three environment variables it does NOT create, and calls one
+# child flow it does not own. A missing dependency is not a deploy-time error —
+# Dataverse accepts the definition happily — it is a runtime failure for every
+# client in the run, so it is checked here instead.
+echo "==> dependencies for the mint and PDF steps (#100)"
+MISSING=0
+for DEP in riivo_PaymentLink_BaseUrl riivo_PaymentLink_FunctionKey riivo_PaymentLinkEnabled; do
+  COUNT=$(api GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$DEP'" \
+    | sed '$d' | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
+  if [[ "$COUNT" == "0" ]]; then
+    echo "    MISSING environment variable $DEP"; MISSING=1
+  else
+    echo "    $DEP ok"
+  fi
+done
+
+# Addressed by workflowid, which differs per environment: this is the one
+# reference in the definition that cannot travel to prod unchanged.
+PDF_CHILD="be610dd6-bf7b-f111-ab0f-000d3ada6ac0"
+# statecode FIRST, name last: the name contains spaces, and `read` would
+# otherwise split it and report the state of a word.
+read -r PDF_STATE PDF_NAME < <(
+  api GET "workflows($PDF_CHILD)?\$select=name,statecode" | sed '$d' \
+    | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('statecode','-'),d.get('name','-'))" 2>/dev/null \
+    || echo "- -")
+if [[ "$PDF_STATE" == "-" ]]; then
+  echo "    MISSING child flow $PDF_CHILD (Invoice - Child - Generate PDF)"; MISSING=1
+elif [[ "$PDF_STATE" != "1" ]]; then
+  echo "    child flow '$PDF_NAME' is OFF — every PDF call will fail"; MISSING=1
+else
+  echo "    child flow '$PDF_NAME' ok (on)"
+fi
+
+if [[ "$MISSING" != "0" ]]; then
+  if $CHECK_ONLY; then
+    echo "    ^ would deploy a flow that holds every client until these exist"
+  else
+    echo "    ABORT: deploying now would hold every client in every run." >&2
+    exit 1
+  fi
+fi
+
 # ------------------------------------------------------------------- flow ----
 FLOW_NAME="Invoice - Scheduled - Send Bad Debt Recovery Touches"
 echo "==> flow $FLOW_NAME"
@@ -153,10 +196,12 @@ print(json.dumps({
     # Modern cloud flow: category 5, type 1, scope 4, mode 0, primaryentity none.
     "category": 5, "type": 1, "scope": 4, "mode": 0, "primaryentity": "none",
     "description": (
-        "Bad-debt recovery selection and campaign key (issues #98, #99). "
-        "Selects one client per run from open riivo_baddebt rows, resolves the "
-        "campaign-key WhatsApp template for the touch that is due, and SENDS "
-        "NOTHING - the touch bookkeeping is gated on a send outcome that is "
+        "Bad-debt recovery selection, campaign key and message inputs (issues "
+        "#98, #99, #100). Selects one client per run from open riivo_baddebt "
+        "rows, resolves the campaign-key WhatsApp template for the touch that "
+        "is due, mints a payment token and renders the invoice PDF - holding "
+        "any client whose token or PDF cannot be produced - and SENDS "
+        "NOTHING: the touch bookkeeping is gated on a send outcome that is "
         "false until #102/#103. Mon/Thu 09:45 SAST - 09:45 not 09:30 because "
         "'Bad Debt Referral & Owner Digest' (dd5a766f) runs daily 09:30 and "
         "creates riivo_baddebt rows. The definition is generated and tested in "
@@ -204,3 +249,8 @@ echo "  2. run it once on demand, in test mode, to produce the dry-run report"
 echo "  3. diff that report against the comms tool's recipient list for the same day"
 echo "  4. #99: read Compose_|_Dry_Run_Report - every touch carries ageBand,"
 echo "     relationship, touch and templateName; every held row carries a reason"
+echo "  5. #100: every touch also carries paymentLink and documentBytes > 0."
+echo "     The parameters are declared with EMPTY defaults so no key reaches"
+echo "     git, which makes that run the proof the environment variables"
+echo "     actually resolve: a blank paymentLink means the binding, not the"
+echo "     endpoint, is what failed."

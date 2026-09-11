@@ -1,10 +1,19 @@
 /**
- * `Invoice - Scheduled - Send Bad Debt Recovery Touches` — issues #98, #99.
+ * `Invoice - Scheduled - Send Bad Debt Recovery Touches` — issues #98, #99, #100.
  *
- * The selection half of the bad-debt cadence, plus the campaign key that says
- * WHICH message each selected client is due — and deliberately nothing else:
- * this flow still sends nothing at all. Minting, PDF generation and the
- * channels arrive in #100–#103.
+ * The selection half of the bad-debt cadence, the campaign key that says WHICH
+ * message each selected client is due, and the two inputs that message needs —
+ * and deliberately nothing else: this flow still sends nothing at all. The
+ * channels arrive in #102/#103.
+ *
+ * #100 adds the payment token and the invoice PDF, under one guarantee carried
+ * over from the comms tool's pre-send validation gate — which is otherwise out
+ * of the path now that sending is unattended: NO MESSAGE GOES OUT WITHOUT ITS
+ * ATTACHMENT. Both inputs are produced inside `Scope_|_Prepare_Documents`; if
+ * either cannot be produced, that client's touch ends, their bookkeeping is
+ * left untouched so the next run retries them, and they appear in the report
+ * as a held row naming the reason. One client's failure is contained by the
+ * scope and cannot end the run for anyone else.
  *
  * #99 adds two halves of one mechanism. `riivo_campaignsendcount` chooses the
  * template, and the touch increments it, so template resolution and touch
@@ -64,6 +73,60 @@ const ONGOING_TEMPLATE_PARAM = `WhatsApp Reminder Template - With Pay-Now Button
 
 /** Invoice statuscode meaning the client has actually paid. */
 const PAID_STATUSCODE = 958140003;
+
+/**
+ * `Invoice - Child - Generate PDF`, on in dev, read 2026-09-11.
+ *
+ * Takes `{ invoiceId }` and answers `{ pdfBase64, fileName, invoiceType }`,
+ * owning both the Tax/Accounting payload construction from
+ * `riivo_invoicelineitemses` and the call to `riivo_InvoiceGen2_Endpoint`. It
+ * is called rather than reimplemented because that duplication is exactly what
+ * the child flow exists to prevent — and because it already handles BOTH
+ * invoice types, which this campaign needs: the dev book is 53 Tax to 7
+ * Accounting, so a Tax-only path would silently hold every accounting debtor.
+ *
+ * PROMOTION HAZARD: a child flow is addressed by workflowid, and this GUID is
+ * dev's. Promoting to prod means re-pointing it at prod's copy — the one line
+ * in this file that cannot travel between environments unchanged.
+ */
+export const PDF_CHILD_FLOW_ID = "be610dd6-bf7b-f111-ab0f-000d3ada6ac0";
+
+/**
+ * The payment-link contract, all three values read from
+ * `environmentvariabledefinitions` and never written down here.
+ *
+ * The function key in particular is stored as a plaintext default on its
+ * environment variable, so a `defaultValue` on these parameters would copy a
+ * live secret into this file and into every solution export of the flow. They
+ * are therefore declared with EMPTY defaults: the value is the environment's
+ * to supply. If the binding ever fails to resolve, the mint call fails and the
+ * client is held — a visible abort, not a message carrying a dead link.
+ */
+const PAYMENT_LINK_BASE_URL_VARIABLE = "riivo_PaymentLink_BaseUrl";
+const PAYMENT_LINK_KEY_VARIABLE = "riivo_PaymentLink_FunctionKey";
+const PAYMENT_LINK_ENABLED_VARIABLE = "riivo_PaymentLinkEnabled";
+const BASE_URL_PARAM = `PaymentLink_BaseUrl (${PAYMENT_LINK_BASE_URL_VARIABLE})`;
+const FUNCTION_KEY_PARAM = `PaymentLink_FunctionKey (${PAYMENT_LINK_KEY_VARIABLE})`;
+const LINK_ENABLED_PARAM = `Payment Link Enabled (${PAYMENT_LINK_ENABLED_VARIABLE})`;
+
+/**
+ * Throttling, handled by hand because the platform does not do it for us.
+ *
+ * Azure documents the retry policy as covering 408, 429 and 5xx, but says
+ * nothing anywhere — error handling, limits, or the dedicated 429 page — about
+ * honouring a `Retry-After` header. So the default exponential policy would
+ * retry a 429 on its own schedule and ignore what the endpoint actually asked
+ * for. Instead both calls carry NO retry policy and sit inside an `Until` that
+ * reads the header and waits exactly that long.
+ *
+ * `Retry-After` is read as delta-seconds, which is what the Functions host
+ * sends. An HTTP-date would fail `int()`, fail the wait, and abort that one
+ * client — the safe direction, and visible in the report.
+ */
+const THROTTLED_STATUS = 429;
+const RETRY_ATTEMPTS = 4;
+const DEFAULT_RETRY_AFTER_SECONDS = 30;
+const MAX_RETRY_AFTER_SECONDS = 300;
 
 /**
  * The campaign key, as three ordered lists — the single source of truth for
@@ -196,8 +259,119 @@ const touchUpdate = (isFirstTouch: boolean) => ({
   }),
 });
 
+/**
+ * A client this run deliberately says nothing to, and why.
+ *
+ * Both hold paths report the same shape — a template that is not approved, and
+ * a token or document that could not be produced — so "who was silent today,
+ * and what stopped them" is one list to read rather than two.
+ */
+const heldRow = (reason: string) => ({
+  runAfter: {},
+  type: "AppendToArrayVariable",
+  inputs: {
+    name: "varHeld",
+    value: {
+      badDebtId: selectedValue("badDebtId"),
+      clientId: selectedValue("clientId"),
+      invoiceId: selectedValue("invoiceId"),
+      invoiceNumber: selectedValue("invoiceNumber"),
+      ageDays: "@outputs('Compose_|_Invoice_Age_Days')",
+      ageBand: "@outputs('Compose_|_Age_Band')",
+      touch: "@outputs('Compose_|_Touch_Number')",
+      templateName: "@outputs('Compose_|_Template_Name')",
+      reason,
+    },
+  },
+});
+
 /** Foreach concurrency cap. R8: uncapped loops trip service-protection limits. */
 const capped = { concurrency: { repetitions: 1 } };
+
+/** Seconds the endpoint asked us to wait, clamped to something sane. */
+const retryAfterSeconds = (call: string) =>
+  `@min(max(int(coalesce(outputs('${call}')?['headers']?['Retry-After'], outputs('${call}')?['headers']?['retry-after'], '${DEFAULT_RETRY_AFTER_SECONDS}')), 1), ${MAX_RETRY_AFTER_SECONDS})`;
+
+/**
+ * One call, retried only while the endpoint answers 429, waiting for as long
+ * as its `Retry-After` says.
+ *
+ * The call itself is allowed to FAIL inside the loop — a 429 is a failed HTTP
+ * action — and the status compose handles that failure, so the iteration ends
+ * Succeeded and the `Until` is free to go round again. Every other outcome,
+ * success or hard failure, sets the done flag on the first pass. Whether a
+ * call actually produced anything is NOT decided here: it is decided by
+ * `Compose_|_Prepare_Ok` reading the outputs, so a call that failed for any
+ * reason and a call that returned nothing useful abort the client identically.
+ *
+ * The done flag is a flow-level variable because Power Automate only allows
+ * variables to be initialised at the top level. That is safe solely because
+ * `Apply_to_each_|_Selected` runs one repetition at a time — the same
+ * sequential-loop assumption the candidate arrays already rest on.
+ */
+const untilNotThrottled = ({
+  slug,
+  variable,
+  call,
+  callAction,
+  runAfter,
+}: {
+  slug: string;
+  variable: string;
+  call: string;
+  callAction: Record<string, unknown>;
+  runAfter: Record<string, string[]>;
+}) => ({
+  [`Set_variable_|_${slug}_Pending`]: {
+    runAfter,
+    type: "SetVariable",
+    inputs: { name: variable, value: false },
+  },
+  [`Until_|_${slug}`]: {
+    runAfter: { [`Set_variable_|_${slug}_Pending`]: ["Succeeded"] },
+    type: "Until",
+    expression: `@equals(variables('${variable}'), true)`,
+    limit: { count: RETRY_ATTEMPTS, timeout: "PT5M" },
+    actions: {
+      [call]: { runAfter: {}, ...callAction },
+      [`Compose_|_${slug}_Status`]: {
+        // Succeeded, Failed AND TimedOut: a 429 arrives as a failed action, and
+        // reading its status is the whole point of this loop.
+        runAfter: { [call]: ["Succeeded", "Failed", "TimedOut"] },
+        type: "Compose",
+        inputs: `@coalesce(outputs('${call}')?['statusCode'], 0)`,
+      },
+      [`Condition_|_${slug}_Throttled`]: {
+        runAfter: { [`Compose_|_${slug}_Status`]: ["Succeeded"] },
+        type: "If",
+        expression: {
+          and: [
+            { equals: [`@outputs('Compose_|_${slug}_Status')`, THROTTLED_STATUS] },
+          ],
+        },
+        actions: {
+          [`Delay_|_${slug}_Retry_After`]: {
+            runAfter: {},
+            type: "Wait",
+            inputs: {
+              interval: { count: retryAfterSeconds(call), unit: "Second" },
+            },
+          },
+        },
+        else: { actions: {} },
+      },
+      // Last, and always Succeeded, so the loop body never fails the scope.
+      [`Set_variable_|_${slug}_Done`]: {
+        runAfter: { [`Condition_|_${slug}_Throttled`]: ["Succeeded"] },
+        type: "SetVariable",
+        inputs: {
+          name: variable,
+          value: `@not(equals(outputs('Compose_|_${slug}_Status'), ${THROTTLED_STATUS}))`,
+        },
+      },
+    },
+  },
+});
 
 export function buildBadDebtRecoveryTouchesFlow() {
   const invoiceScopeFilter =
@@ -246,6 +420,35 @@ export function buildBadDebtRecoveryTouchesFlow() {
               schemaName: "riivo_WhatsApp_Template_WithButton",
               description:
                 "D12: the template used from touch 5, once the four campaign-key touches are spent. Already approved with a Pay-now button, so no Meta submission blocks the cadence going unattended. Its copy is a general reminder rather than an arrears notice, so firmness softens after the Day-40 final notice - accepted, and swappable for a purpose-written bad_debt_wa_ongoing by changing this variable alone.",
+            },
+          },
+          // Empty defaults on all three: the values belong to the environment,
+          // and the key is a live secret that must never reach this file.
+          [BASE_URL_PARAM]: {
+            defaultValue: "",
+            type: "String",
+            metadata: {
+              schemaName: PAYMENT_LINK_BASE_URL_VARIABLE,
+              description:
+                "Base URL of the payment-link function app. Two things are built from it and nothing else: the POST {base}/mint-token endpoint, and the client-facing {base}/p/{token} link.",
+            },
+          },
+          [FUNCTION_KEY_PARAM]: {
+            defaultValue: "",
+            type: "String",
+            metadata: {
+              schemaName: PAYMENT_LINK_KEY_VARIABLE,
+              description:
+                "Function key sent as the x-functions-key header when minting. Held as a plaintext default on the environment variable, which is worth reviewing separately; it is never written into a flow definition.",
+            },
+          },
+          [LINK_ENABLED_PARAM]: {
+            defaultValue: true,
+            type: "Bool",
+            metadata: {
+              schemaName: PAYMENT_LINK_ENABLED_VARIABLE,
+              description:
+                "Master switch for payment links, honoured here exactly as the cadence flow c430ace5 honours it. Every one of the 24 approved bad-debt templates carries a Pay-now button, so with links off there is no compliant message to send: the run holds each client with that reason rather than sending a button pointing at a switched-off endpoint.",
             },
           },
         },
@@ -326,8 +529,12 @@ export function buildBadDebtRecoveryTouchesFlow() {
                 runAfter: {},
                 ...dataverse("ListRecords", {
                   entityName: "new_invoiceses",
+                  // riivo_paymenttoken is read HERE rather than re-fetched at
+                  // mint time: an invoice that already has a token must not be
+                  // re-minted, and the cheapest way to guarantee that is to
+                  // carry the answer from the query that already ran.
                   $select:
-                    "new_invoicesid,new_name,createdon,ttt_outstanding,_ttt_customer_value",
+                    "new_invoicesid,new_name,createdon,ttt_outstanding,_ttt_customer_value,riivo_paymenttoken,riivo_paymentlinksenton",
                   $filter: invoiceScopeFilter,
                   $top: 1,
                 }),
@@ -421,6 +628,10 @@ export function buildBadDebtRecoveryTouchesFlow() {
                             // report can read it.
                             invoiceCreatedOn:
                               "@first(outputs('List_rows_|_Invoice_In_Scope')?['body/value'])?['createdon']",
+                            paymentToken:
+                              "@coalesce(first(outputs('List_rows_|_Invoice_In_Scope')?['body/value'])?['riivo_paymenttoken'], '')",
+                            paymentLinkSentOn:
+                              "@coalesce(first(outputs('List_rows_|_Invoice_In_Scope')?['body/value'])?['riivo_paymentlinksenton'], '')",
                             // Touch state, read once here so template
                             // resolution and the increment share one value.
                             sendCount:
@@ -535,11 +746,28 @@ export function buildBadDebtRecoveryTouchesFlow() {
             type: "InitializeVariable",
             inputs: { variables: [{ name: "varHeld", type: "array", value: [] }] },
           },
+          // Retry flags for the two Until loops. Power Automate only allows a
+          // variable to be initialised at the top level, so they live here and
+          // are reset per client inside the loop.
+          "Initialize_variable_|_Mint_Done": {
+            runAfter: { "Initialize_variable_|_Held": ["Succeeded"] },
+            type: "InitializeVariable",
+            inputs: {
+              variables: [{ name: "varMintDone", type: "boolean", value: true }],
+            },
+          },
+          "Initialize_variable_|_Pdf_Done": {
+            runAfter: { "Initialize_variable_|_Mint_Done": ["Succeeded"] },
+            type: "InitializeVariable",
+            inputs: {
+              variables: [{ name: "varPdfDone", type: "boolean", value: true }],
+            },
+          },
 
           // ---- campaign key -> template, and the touch it records (#99) ----
           "Apply_to_each_|_Selected": {
             foreach: "@variables('varSelected')",
-            runAfter: { "Initialize_variable_|_Held": ["Succeeded"] },
+            runAfter: { "Initialize_variable_|_Pdf_Done": ["Succeeded"] },
             type: "Foreach",
             runtimeConfiguration: capped,
             actions: {
@@ -626,98 +854,321 @@ export function buildBadDebtRecoveryTouchesFlow() {
                   ],
                 },
                 actions: {
-                  "Append_to_array_variable_|_Touch": {
+                  // ---- #100: produce both inputs, or say nothing at all ----
+                  "Scope_|_Prepare_Documents": {
                     runAfter: {},
-                    type: "AppendToArrayVariable",
-                    inputs: {
-                      name: "varTouches",
-                      value: {
-                        badDebtId: selectedValue("badDebtId"),
-                        clientId: selectedValue("clientId"),
-                        invoiceId: selectedValue("invoiceId"),
-                        invoiceNumber: selectedValue("invoiceNumber"),
-                        outstanding: selectedValue("outstanding"),
-                        invoiceCreatedOn: selectedValue("invoiceCreatedOn"),
-                        ageDays: "@outputs('Compose_|_Invoice_Age_Days')",
-                        ageBand: "@outputs('Compose_|_Age_Band')",
-                        relationship: "@outputs('Compose_|_Relationship')",
-                        touch: "@outputs('Compose_|_Touch_Number')",
-                        templateName: "@outputs('Compose_|_Template_Name')",
-                        emailAllowed: selectedValue("emailAllowed"),
-                        whatsAppAllowed: selectedValue("whatsAppAllowed"),
-                      },
-                    },
-                  },
-
-                  // THE SEAM #102/#103 REPLACE. Bookkeeping records a touch
-                  // that happened; this slice performs no send, so both
-                  // outcomes are literally false and no counter can move. Left
-                  // as data rather than a condition on test mode so that
-                  // flipping riivo_ReminderTestMode off before the send slices
-                  // land still advances nothing.
-                  "Compose_|_Send_Outcome": {
-                    runAfter: { "Append_to_array_variable_|_Touch": ["Succeeded"] },
-                    type: "Compose",
-                    inputs: { email: false, whatsApp: false },
-                  },
-                  "Compose_|_Touch_Sent": {
-                    runAfter: { "Compose_|_Send_Outcome": ["Succeeded"] },
-                    type: "Compose",
-                    inputs:
-                      "@and(not(outputs('Compose_|_TestMode')), or(equals(outputs('Compose_|_Send_Outcome')?['email'], true), equals(outputs('Compose_|_Send_Outcome')?['whatsApp'], true)))",
-                  },
-
-                  "Condition_|_Touch_Sent": {
-                    runAfter: { "Compose_|_Touch_Sent": ["Succeeded"] },
-                    type: "If",
-                    expression: {
-                      and: [{ equals: ["@outputs('Compose_|_Touch_Sent')", true] }],
-                    },
+                    type: "Scope",
                     actions: {
-                      // riivo_campaignfirstsent is stamped once, ever. The
-                      // branch is on the field itself rather than on the count
-                      // so that a reset counter cannot rewrite a date that has
-                      // already been told to a client.
-                      "Condition_|_First_Touch": {
+                      "Compose_|_Link_Enabled": {
                         runAfter: {},
+                        type: "Compose",
+                        inputs: `@equals(coalesce(parameters('${LINK_ENABLED_PARAM}'), true), true)`,
+                      },
+                      "Compose_|_Existing_Token": {
+                        runAfter: { "Compose_|_Link_Enabled": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: `@coalesce(${selected("paymentToken")}, '')`,
+                      },
+
+                      // Idempotent by SKIPPING, not by comparing: an invoice
+                      // that already has a token never reaches the endpoint. A
+                      // retried run therefore costs nothing, and cannot
+                      // replace a token a client is already holding a link to.
+                      "Condition_|_Mint_Needed": {
+                        runAfter: { "Compose_|_Existing_Token": ["Succeeded"] },
                         type: "If",
                         expression: {
                           and: [
                             {
                               equals: [
-                                `@empty(coalesce(${selected("firstSent")}, ''))`,
+                                "@outputs('Compose_|_Link_Enabled')",
                                 true,
                               ],
                             },
+                            { equals: ["@outputs('Compose_|_Existing_Token')", ""] },
                           ],
                         },
-                        actions: { "Update_|_Touch_First": touchUpdate(true) },
-                        else: { actions: { "Update_|_Touch_Repeat": touchUpdate(false) } },
+                        actions: untilNotThrottled({
+                          slug: "Mint",
+                          variable: "varMintDone",
+                          call: "HTTP_|_Mint_Token",
+                          runAfter: {},
+                          callAction: {
+                            type: "Http",
+                            inputs: {
+                              method: "POST",
+                              uri: `@{parameters('${BASE_URL_PARAM}')}/mint-token`,
+                              headers: {
+                                "Content-Type": "application/json",
+                                "x-functions-key": `@parameters('${FUNCTION_KEY_PARAM}')`,
+                              },
+                              body: { invoiceId: `@{${selected("invoiceId")}}` },
+                              retryPolicy: { type: "none" },
+                            },
+                          },
+                        }),
+                        else: { actions: {} },
+                      },
+
+                      "Compose_|_Payment_Token": {
+                        runAfter: { "Condition_|_Mint_Needed": ["Succeeded"] },
+                        type: "Compose",
+                        inputs:
+                          "@if(not(empty(outputs('Compose_|_Existing_Token'))), outputs('Compose_|_Existing_Token'), coalesce(body('HTTP_|_Mint_Token')?['token'], ''))",
+                      },
+
+                      // The write-back c430ace5 never had: it mints inline and
+                      // drops the token, so it re-mints on every run. Writing
+                      // the token is what makes the skip above true next time.
+                      // The column is not new ground — 9f8601a5 already owns
+                      // this exact patch from the on-create path.
+                      "Condition_|_Token_Minted": {
+                        runAfter: { "Compose_|_Payment_Token": ["Succeeded"] },
+                        type: "If",
+                        expression: {
+                          and: [
+                            { equals: ["@outputs('Compose_|_Existing_Token')", ""] },
+                            {
+                              not: {
+                                equals: [
+                                  "@outputs('Compose_|_Payment_Token')",
+                                  "",
+                                ],
+                              },
+                            },
+                          ],
+                        },
+                        actions: {
+                          "Update_|_Invoice_Token": {
+                            runAfter: {},
+                            ...dataverse("UpdateRecord", {
+                              entityName: "new_invoiceses",
+                              recordId: selectedValue("invoiceId"),
+                              "item/riivo_paymenttoken":
+                                "@outputs('Compose_|_Payment_Token')",
+                              // Monotonic, like the touch bookkeeping: a date
+                              // already told to a client is never moved.
+                              "item/riivo_paymentlinksenton": `@if(empty(coalesce(${selected(
+                                "paymentLinkSentOn",
+                              )}, '')), utcNow(), ${selected("paymentLinkSentOn")})`,
+                            }),
+                          },
+                        },
+                        else: { actions: {} },
+                      },
+
+                      // ONE of the two swappable points. Both forms are
+                      // published here and read nowhere else: the Meta button
+                      // takes the BARE token — Meta rebuilds the URL from the
+                      // approved template, and a full URL silently breaks the
+                      // button — while email needs the whole link.
+                      "Compose_|_Payment_Link": {
+                        runAfter: { "Condition_|_Token_Minted": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: {
+                          token: "@outputs('Compose_|_Payment_Token')",
+                          url: `@if(empty(outputs('Compose_|_Payment_Token')), '', concat(parameters('${BASE_URL_PARAM}'), '/p/', outputs('Compose_|_Payment_Token')))`,
+                        },
+                      },
+
+                      ...untilNotThrottled({
+                        slug: "Pdf",
+                        variable: "varPdfDone",
+                        call: "Run_Child_|_Generate_PDF",
+                        runAfter: { "Compose_|_Payment_Link": ["Succeeded"] },
+                        // No retryPolicy override here, unlike the mint call:
+                        // the child's OWN http action already carries the
+                        // default policy against `riivo_InvoiceGen2_Endpoint`,
+                        // so function-side throttling is absorbed a layer down
+                        // where the Retry-After header actually arrives. What
+                        // a child flow returns to us is its Response, which
+                        // carries no such header to honour.
+                        callAction: {
+                          type: "Workflow",
+                          inputs: {
+                            host: { workflowReferenceName: PDF_CHILD_FLOW_ID },
+                            body: { invoiceId: selectedValue("invoiceId") },
+                          },
+                        },
+                      }),
+
+                      // THE OTHER swappable point. When the document source
+                      // becomes a Statement Issue GUID, the child called and
+                      // the id passed to it change HERE; nothing downstream
+                      // ever learns that an invoice was involved.
+                      "Compose_|_Document": {
+                        runAfter: { "Until_|_Pdf": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: {
+                          kind: "invoice",
+                          sourceId: selectedValue("invoiceId"),
+                          fileName:
+                            "@coalesce(body('Run_Child_|_Generate_PDF')?['fileName'], '')",
+                          base64:
+                            "@coalesce(body('Run_Child_|_Generate_PDF')?['pdfBase64'], '')",
+                        },
                       },
                     },
-                    else: { actions: {} },
+                  },
+
+                  // The scope's failure is HANDLED here, which is what keeps
+                  // one client's unrenderable invoice from ending the run for
+                  // everyone behind them. @result() reports the scope's
+                  // top-level actions, so a failure nested inside one of the
+                  // conditions still surfaces as that condition failing.
+                  "Filter_|_Prepare_Failures": {
+                    runAfter: {
+                      "Scope_|_Prepare_Documents": [
+                        "Succeeded",
+                        "Failed",
+                        "Skipped",
+                        "TimedOut",
+                      ],
+                    },
+                    type: "Query",
+                    inputs: {
+                      from: "@result('Scope_|_Prepare_Documents')",
+                      where: "@not(equals(item()['status'], 'Succeeded'))",
+                    },
+                  },
+                  "Select_|_Prepare_Failure_Names": {
+                    runAfter: { "Filter_|_Prepare_Failures": ["Succeeded"] },
+                    type: "Select",
+                    inputs: {
+                      from: "@body('Filter_|_Prepare_Failures')",
+                      select: "@item()['name']",
+                    },
+                  },
+
+                  // Not "did the scope succeed" but "do we HAVE both things":
+                  // a call that failed and a call that returned nothing useful
+                  // must abort the client identically. Every read is
+                  // null-safe, because an action that was skipped has no
+                  // outputs to read.
+                  "Compose_|_Prepare_Ok": {
+                    runAfter: { "Select_|_Prepare_Failure_Names": ["Succeeded"] },
+                    type: "Compose",
+                    inputs:
+                      "@and(equals(length(body('Filter_|_Prepare_Failures')), 0), not(empty(coalesce(outputs('Compose_|_Payment_Token'), ''))), not(empty(coalesce(outputs('Compose_|_Document')?['base64'], ''))))",
+                  },
+                  "Compose_|_Prepare_Hold_Reason": {
+                    runAfter: { "Compose_|_Prepare_Ok": ["Succeeded"] },
+                    type: "Compose",
+                    inputs: `@if(not(equals(coalesce(outputs('Compose_|_Link_Enabled'), false), true)), 'payment links are switched off (${PAYMENT_LINK_ENABLED_VARIABLE}), and every approved template carries a Pay-now button', if(empty(coalesce(outputs('Compose_|_Payment_Token'), '')), concat('no payment token: mint-token answered ', string(coalesce(outputs('Compose_|_Mint_Status'), 'nothing'))), if(empty(coalesce(outputs('Compose_|_Document')?['base64'], '')), concat('no invoice PDF: the generate-PDF child answered ', string(coalesce(outputs('Compose_|_Pdf_Status'), 'nothing'))), concat('preparation failed at ', join(body('Select_|_Prepare_Failure_Names'), ', ')))))`,
+                  },
+
+                  "Condition_|_Prepare_Ok": {
+                    runAfter: { "Compose_|_Prepare_Hold_Reason": ["Succeeded"] },
+                    type: "If",
+                    expression: {
+                      and: [{ equals: ["@outputs('Compose_|_Prepare_Ok')", true] }],
+                    },
+                    actions: {
+                      "Append_to_array_variable_|_Touch": {
+                        runAfter: {},
+                        type: "AppendToArrayVariable",
+                        inputs: {
+                          name: "varTouches",
+                          value: {
+                            badDebtId: selectedValue("badDebtId"),
+                            clientId: selectedValue("clientId"),
+                            invoiceId: selectedValue("invoiceId"),
+                            invoiceNumber: selectedValue("invoiceNumber"),
+                            outstanding: selectedValue("outstanding"),
+                            invoiceCreatedOn: selectedValue("invoiceCreatedOn"),
+                            ageDays: "@outputs('Compose_|_Invoice_Age_Days')",
+                            ageBand: "@outputs('Compose_|_Age_Band')",
+                            relationship: "@outputs('Compose_|_Relationship')",
+                            touch: "@outputs('Compose_|_Touch_Number')",
+                            templateName: "@outputs('Compose_|_Template_Name')",
+                            emailAllowed: selectedValue("emailAllowed"),
+                            whatsAppAllowed: selectedValue("whatsAppAllowed"),
+                            paymentLink: "@outputs('Compose_|_Payment_Link')?['url']",
+                            documentName: "@outputs('Compose_|_Document')?['fileName']",
+                            // The LENGTH, never the bytes: a base64 PDF per
+                            // client in an array variable would bloat every
+                            // run's history and the report with it.
+                            documentBytes:
+                              "@length(coalesce(outputs('Compose_|_Document')?['base64'], ''))",
+                          },
+                        },
+                      },
+
+                      // THE SEAM #102/#103 REPLACE. Bookkeeping records a touch
+                      // that happened; this slice performs no send, so both
+                      // outcomes are literally false and no counter can move.
+                      // Left as data rather than a condition on test mode so
+                      // that flipping riivo_ReminderTestMode off before the
+                      // send slices land still advances nothing.
+                      "Compose_|_Send_Outcome": {
+                        runAfter: {
+                          "Append_to_array_variable_|_Touch": ["Succeeded"],
+                        },
+                        type: "Compose",
+                        inputs: { email: false, whatsApp: false },
+                      },
+                      "Compose_|_Touch_Sent": {
+                        runAfter: { "Compose_|_Send_Outcome": ["Succeeded"] },
+                        type: "Compose",
+                        inputs:
+                          "@and(not(outputs('Compose_|_TestMode')), or(equals(outputs('Compose_|_Send_Outcome')?['email'], true), equals(outputs('Compose_|_Send_Outcome')?['whatsApp'], true)))",
+                      },
+
+                      "Condition_|_Touch_Sent": {
+                        runAfter: { "Compose_|_Touch_Sent": ["Succeeded"] },
+                        type: "If",
+                        expression: {
+                          and: [
+                            { equals: ["@outputs('Compose_|_Touch_Sent')", true] },
+                          ],
+                        },
+                        actions: {
+                          // riivo_campaignfirstsent is stamped once, ever. The
+                          // branch is on the field itself rather than on the
+                          // count so that a reset counter cannot rewrite a
+                          // date that has already been told to a client.
+                          "Condition_|_First_Touch": {
+                            runAfter: {},
+                            type: "If",
+                            expression: {
+                              and: [
+                                {
+                                  equals: [
+                                    `@empty(coalesce(${selected("firstSent")}, ''))`,
+                                    true,
+                                  ],
+                                },
+                              ],
+                            },
+                            actions: { "Update_|_Touch_First": touchUpdate(true) },
+                            else: {
+                              actions: {
+                                "Update_|_Touch_Repeat": touchUpdate(false),
+                              },
+                            },
+                          },
+                        },
+                        else: { actions: {} },
+                      },
+                    },
+                    // No bookkeeping patch anywhere down here: an aborted
+                    // client's riivo_campaignsendcount and
+                    // riivo_campaignlastsent are left exactly as they were, so
+                    // the next scheduled run selects them again unchanged.
+                    else: {
+                      actions: {
+                        "Append_to_array_variable_|_Held_Prepare": heldRow(
+                          "@outputs('Compose_|_Prepare_Hold_Reason')",
+                        ),
+                      },
+                    },
                   },
                 },
                 else: {
                   actions: {
-                    "Append_to_array_variable_|_Held": {
-                      runAfter: {},
-                      type: "AppendToArrayVariable",
-                      inputs: {
-                        name: "varHeld",
-                        value: {
-                          badDebtId: selectedValue("badDebtId"),
-                          clientId: selectedValue("clientId"),
-                          invoiceId: selectedValue("invoiceId"),
-                          invoiceNumber: selectedValue("invoiceNumber"),
-                          ageDays: "@outputs('Compose_|_Invoice_Age_Days')",
-                          ageBand: "@outputs('Compose_|_Age_Band')",
-                          touch: "@outputs('Compose_|_Touch_Number')",
-                          templateName: "@outputs('Compose_|_Template_Name')",
-                          reason: "@outputs('Compose_|_Hold_Reason')",
-                        },
-                      },
-                    },
+                    "Append_to_array_variable_|_Held": heldRow(
+                      "@outputs('Compose_|_Hold_Reason')",
+                    ),
                   },
                 },
               },
@@ -733,9 +1184,11 @@ export function buildBadDebtRecoveryTouchesFlow() {
               lastSentCutoff: "@outputs('Compose_|_Last_Sent_Cutoff')",
               candidatesBeforeCollapse: "@length(variables('varCandidates'))",
               selectedClients: "@outputs('Compose_|_Selected_Count')",
-              // Resolved rows are what #100-#103 will send; held rows are
-              // clients this run deliberately says nothing to, each carrying
-              // the reason, so a silent client is never a silent failure.
+              // Resolved rows are what #102/#103 will send — each now carries
+              // a minted link and a rendered PDF, so "resolved" means ready,
+              // not merely eligible. Held rows are clients this run
+              // deliberately says nothing to, each carrying the reason, so a
+              // silent client is never a silent failure.
               resolvedTouches: "@length(variables('varTouches'))",
               heldTouches: "@length(variables('varHeld'))",
               touches: "@variables('varTouches')",

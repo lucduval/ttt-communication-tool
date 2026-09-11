@@ -15,8 +15,8 @@ against the dev org on 2026-09-11 unless it says otherwise.
 | #97 Cadence policy | **Closed.** Decisions recorded as D10–D12 in the spec. |
 | #98 Selection, dry run only | **Open but built and deployed.** Two ACs need a human run. |
 | #99 Template resolution + touch bookkeeping | **Open but built.** Needs the replace-deploy and a human run. |
-| #100 Token minting + PDF | **Ready to start — this is the next one.** Blocked-by #98 is satisfied in practice. |
-| #101 Volume tripwire | Ready. |
+| #100 Token minting + PDF | **Open but built.** Rides the same replace-deploy and human run as #99. |
+| #101 Volume tripwire | **Ready to start — this is the next one.** |
 | #102–#104 | Human-gated (live sends, recurrence). |
 
 **#99, #100 and #101 all say "Blocked by #98".** That dependency is satisfied:
@@ -192,13 +192,62 @@ approved in Meta.
    on touch 2 (`riivo_campaignsendcount = 1`), so the Day-0 and Day-10 paths are
    both exercisable without touching data.
 
-## Next issue: #100 — token minting and PDF generation
+## What #100 added: the inputs, and the abort
 
-Mint per client (skip an invoice that already has `riivo_paymenttoken`), call
-`Invoice - Child - Generate PDF` (`be610dd6`) rather than the generator endpoint
-directly, and abort that client cleanly if either fails — no message without its
-document. Both blocks are lifted from the cadence flow `c430ace5`. The
-`resolvedTouches` rows in the dry-run report are the input shape it consumes.
+Everything lives in `Scope_|_Prepare_Documents`, inside the same
+`Apply_to_each_|_Selected` loop. A client leaves it with both a payment token
+and a rendered PDF, or leaves it held.
+
+- **Mint** is idempotent by *skipping*: an invoice arriving with a
+  `riivo_paymenttoken` never reaches the endpoint, so a re-run costs nothing and
+  cannot replace a token a client already holds a link to.
+- **The token is written back**, which the cadence flow `c430ace5` does *not*
+  do — it mints inline and drops the result, so it re-mints every run. The
+  patch is lifted from `9f8601a5` instead, which already owns that column.
+  `riivo_paymentlinksenton` is stamped monotonically: a date already told to a
+  client is never moved.
+- **The PDF comes from `Invoice - Child - Generate PDF`** (`be610dd6`), which
+  owns the line-item payload and the `riivo_InvoiceGen2_Endpoint` call, and
+  handles Tax *and* Accounting invoices — the dev book is 53 Tax to 7
+  Accounting, so a Tax-only path would silently hold every accounting debtor.
+- **The abort is a handled scope failure.** `Filter_|_Prepare_Failures` runs
+  after the scope on *any* status, so one unrenderable invoice cannot end the
+  run for the clients behind it in a sequential loop. An aborted client gets no
+  bookkeeping patch at all, which is what makes "the next run picks them up
+  again" true rather than hopeful.
+- **Two swappable points, read from nowhere else**: `Compose_|_Document` (the
+  Statement Issue GUID swap lands here) and `Compose_|_Payment_Link`, which
+  publishes both the full URL and the **bare token** the Meta button needs.
+
+### The 429 finding
+
+Azure documents the retry policy as covering 408/429/5xx but says nothing —
+error handling, limits, or the dedicated 429 page — about honouring
+`Retry-After`. The default policy would retry on its own clock. So the mint call
+carries `retryPolicy: none` and sits inside an `Until` that reads the header and
+waits exactly that long. The PDF call keeps its default policy deliberately:
+the child's *own* HTTP action already retries the generator, which is the layer
+where a `Retry-After` header actually arrives — a child flow's `Response` cannot
+carry one back to us.
+
+### Still needed for #100
+
+Nothing separate: it rides #99's replace-deploy. Two additions to the checks —
+
+1. `--check` now verifies the three payment-link environment variables and that
+   the PDF child flow exists and is **on**. All four confirmed present in dev on
+   2026-09-11. A missing one is a runtime failure for every client, not a deploy
+   error, so the script aborts a deploy rather than shipping it.
+2. On the test-mode run, every touch row must carry a non-empty `paymentLink`
+   and `documentBytes > 0`. The two payment-link parameters are declared with
+   **empty defaults** so no function key reaches git — which makes that run the
+   proof the environment-variable bindings actually resolve. A blank
+   `paymentLink` means the binding failed, not the endpoint.
+
+## Next issue: #101 — volume tripwire
+
+Abort an anomalous run before it sends. The counts it needs are already in
+`Compose_|_Dry_Run_Report` (`selectedClients`, `resolvedTouches`, `heldTouches`).
 
 ---
 
