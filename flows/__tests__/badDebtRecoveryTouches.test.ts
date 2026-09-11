@@ -47,7 +47,9 @@ import {
   buildBadDebtRecoveryTouchesFlow,
   ALERT_CHILD_FLOW_ID,
   APPROVED_CAMPAIGN_TEMPLATES,
+  CANARY_VARIABLE,
   DEFAULT_VOLUME_THRESHOLD_PERCENT,
+  EMAIL_CHILD_FLOW_ID,
   FLOW_NAME,
   ONGOING_TEMPLATE_VARIABLE,
   PDF_CHILD_FLOW_ID,
@@ -195,7 +197,18 @@ function evaluate(expression: string, env: Record<string, unknown>): unknown {
       case "contains":
         return (a[0] as unknown[]).includes(a[1]);
       case "string":
-        return String(a[0]);
+        // WDL's string() on an array or object produces JSON, which is how
+        // the email payloads are built — String() would give "a,b".
+        return typeof a[0] === "object" && a[0] !== null
+          ? JSON.stringify(a[0])
+          : String(a[0]);
+      case "createArray":
+        return a;
+      case "formatNumber":
+        // Only the one format this build uses; anything else should be a
+        // loud failure rather than a quietly wrong number in an email.
+        if (a[1] !== "N2") throw new Error(`formatNumber format ${a[1]}`);
+        return (a[0] as number).toFixed(2);
       case "join":
         return (a[0] as unknown[]).join(a[1] as string);
       case "min":
@@ -249,8 +262,22 @@ function evaluateCondition(
   }
 }
 
-describe("the flow sends nothing at all", () => {
-  it("creates no email row and performs no SendEmail", () => {
+/**
+ * #102 turns the email channel on, and these are the assertions that did NOT
+ * change when it did — which is the interesting half. The flow now sends, but
+ * it still writes no `email` row, performs no bound `SendEmail`, and makes no
+ * outbound HTTP call but the mint: all of that belongs to the house child, and
+ * the day any of it reappears here is the day this build started
+ * reimplementing something that already has a home.
+ */
+describe("what this flow still does not do itself", () => {
+  it("creates no email row and performs no SendEmail of its own", () => {
+    // The house child 0d0bc4d6 owns the email row, the attachment and the
+    // bound SendEmail. Before #102 this assertion said "nothing sends"; now it
+    // says "nothing sends HERE", which is the property worth keeping — a
+    // second implementation of the send would mean a second branded template,
+    // a second unsubscribe footer and a second attachment ordering to get
+    // right.
     for (const [name, action] of actions) {
       const params = action.inputs?.parameters ?? {};
       expect(
@@ -302,16 +329,9 @@ describe("the flow sends nothing at all", () => {
     ]);
   });
 
-  it("cannot advance a counter, because nothing is sent to advance it", () => {
-    // The bookkeeping gate is a send OUTCOME, not test mode: turning
-    // riivo_ReminderTestMode off before #102/#103 land must still record no
-    // touch. #102/#103 replace this compose with the real channel results —
-    // which is exactly when this test should fail and be updated.
+  it("still says nothing over WhatsApp, which is #103", () => {
     const outcome = actions.find(([n]) => n === "Compose_|_Send_Outcome")![1];
-    expect(outcome.inputs).toEqual({ email: false, whatsApp: false });
-    expect(
-      composeInputs("Compose_|_Touch_Sent"),
-    ).toContain("outputs('Compose_|_Send_Outcome')");
+    expect(outcome.inputs.whatsApp).toBe(false);
   });
 });
 
@@ -884,16 +904,20 @@ describe("payment token and PDF (#100)", () => {
     // safe only while every consumer reads these two composes.
     expect(json.split("body('Run_Child_|_Generate_PDF')?['pdfBase64']")).toHaveLength(2);
     expect(json.split("'/p/'")).toHaveLength(2);
-    // #101 adds the second child reference, so the count is no longer 1 — but
-    // the property this test is really about still holds: every child flow is
-    // named exactly once, at one call site, and both GUIDs are dev's. Both are
+    // #101 and #102 each add a child reference, so the count is no longer 1 —
+    // but the property this test is really about still holds: every child flow
+    // is called from exactly one site, and every GUID is dev's. All three are
     // re-pointed by hand on promotion (see the module's PROMOTION HAZARD note).
+    // The alert child is named twice because a park and a canary are different
+    // events; both are still the same one GUID.
     const children = actions
       .filter(([, a]) => a.type === "Workflow")
       .map(([name, a]) => [name, a.inputs.host.workflowReferenceName]);
     expect(children).toEqual([
       ["Run_Child_|_Volume_Alert", ALERT_CHILD_FLOW_ID],
+      ["Run_Child_|_Canary_Alert", ALERT_CHILD_FLOW_ID],
       ["Run_Child_|_Generate_PDF", PDF_CHILD_FLOW_ID],
+      ["Run_Child_|_Send_Email", EMAIL_CHILD_FLOW_ID],
     ]);
     expect(json.split("workflowReferenceName")).toHaveLength(
       children.length + 1,
@@ -974,11 +998,23 @@ describe("no message without its attachment (#100)", () => {
     );
   });
 
-  it("still performs no send, so a prepared client is prepared and nothing more", () => {
-    expect(action("Compose_|_Send_Outcome").inputs).toEqual({
-      email: false,
-      whatsApp: false,
-    });
+  it("puts the send strictly downstream of the preparation gate", () => {
+    // #102's whole safety rests on this: the email is built and sent inside
+    // Condition_|_Prepare_Ok's TRUE branch, so a client with no token or no
+    // rendered PDF cannot be emailed at all. Asserted structurally, because a
+    // future edit that moved the send one level out would still pass every
+    // test about what the message contains.
+    const prepared = new Set<string>();
+    const walk = (acts: Record<string, any>) => {
+      for (const [name, act] of Object.entries<any>(acts ?? {})) {
+        prepared.add(name);
+        walk(act.actions);
+        walk(act.else?.actions);
+      }
+    };
+    walk(action("Condition_|_Prepare_Ok").actions);
+    expect(prepared.has("Run_Child_|_Send_Email")).toBe(true);
+    expect(prepared.has("Compose_|_Email_Result")).toBe(true);
   });
 });
 
@@ -1096,17 +1132,20 @@ describe("the volume tripwire (#101)", () => {
     previous,
     hasPrevious = true,
     threshold = DEFAULT_VOLUME_THRESHOLD_PERCENT,
+    canary = false,
   }: {
     selected: number;
     previous: number;
     hasPrevious?: boolean;
     threshold?: number;
+    canary?: boolean;
   }) => {
     const change = evaluate(composeInputs("Compose_|_Volume_Change_Percent"), {
       "outputs('Compose_|_Selected_Count')": selected,
       "outputs('Compose_|_Previous_Count')": previous,
     }) as number;
     const verdict = evaluate(composeInputs("Compose_|_Tripwire_Verdict"), {
+      "outputs('Compose_|_Canary_Active')": canary,
       "outputs('Compose_|_Has_Previous_Run')": hasPrevious,
       "outputs('Compose_|_Selected_Count')": selected,
       "outputs('Compose_|_Previous_Count')": previous,
@@ -1347,6 +1386,7 @@ describe("the volume tripwire (#101)", () => {
       expect(Object.keys(patched).filter((k) => k.startsWith("item/"))).toEqual([
         "item/riivo_resolvedcount",
         "item/riivo_heldcount",
+        "item/riivo_emailsentcount",
       ]);
     });
 
@@ -1503,6 +1543,481 @@ describe("the volume tripwire (#101)", () => {
  * Dataverse would have accepted and the Flow service would have rejected, at
  * the cost of a human's deploy attempt. The cheapest place to notice is here.
  */
+describe("the email channel (#102)", () => {
+  const send = action("Run_Child_|_Send_Email");
+  const body = send.inputs.body as Record<string, string>;
+
+  /** The child call's payload, for one client at one touch. */
+  const compose = ({
+    touch,
+    invoice = "INV-42",
+    outstanding = 1234.5,
+  }: {
+    touch: number;
+    invoice?: string;
+    outstanding?: number;
+  }) => {
+    const amount = evaluate(composeInputs("Compose_|_Amount"), {
+      "items('Apply_to_each_|_Selected')?['outstanding']": outstanding,
+    }) as string;
+    const env = {
+      "outputs('Compose_|_Touch_Number')": touch,
+      "items('Apply_to_each_|_Selected')?['invoiceNumber']": invoice,
+      "outputs('Compose_|_Amount')": amount,
+    };
+    return {
+      amount,
+      subject: evaluate(composeInputs("Compose_|_Email_Subject"), env) as string,
+      paragraphs: JSON.parse(
+        evaluate(composeInputs("Compose_|_Email_Paragraphs"), env) as string,
+      ) as string[],
+    };
+  };
+
+  it("sends through the house child, in the house pattern", () => {
+    // The child creates the Dataverse email row, writes the
+    // activitymimeattachment and performs the bound SendEmail — verified
+    // against its deployed definition on 2026-09-11, in that order, so the
+    // attachment is on the message the client receives. This flow does none
+    // of those three things itself, which the block above pins.
+    expect(send.type).toBe("Workflow");
+    expect(send.inputs.host.workflowReferenceName).toBe(EMAIL_CHILD_FLOW_ID);
+    expect(body.variant).toBe("System");
+    expect(body.category).toBe("Transactional");
+    expect(body.toRecipientEntitySet).toBe("contacts");
+  });
+
+  it("uses no Office 365 Outlook connector anywhere in the path", () => {
+    // Sending as a Dataverse activity is what keeps the message on the
+    // client's timeline and inside TTT's email statistics; the connector
+    // bypasses both, which is why the issue names it by name.
+    expect(json).not.toMatch(/shared_office365|office365(outlook)?/i);
+  });
+
+  it("carries the Pay-now button and the PDF in the SAME call", () => {
+    // The issue's stated main risk: that the branded-email child could do one
+    // or the other but not both. It does both, and this is the assertion that
+    // says so about the call we actually make.
+    expect(body.buttonUrl).toBe("@outputs('Compose_|_Payment_Link')?['url']");
+    expect(body.attachmentsJson).toBe(
+      "@string(createArray(outputs('Compose_|_Email_Attachment')))",
+    );
+    expect(action("Compose_|_Email_Attachment").inputs).toEqual({
+      name: "@outputs('Compose_|_Document')?['fileName']",
+      contentBytes: "@outputs('Compose_|_Document')?['base64']",
+      contentType: "application/pdf",
+    });
+  });
+
+  it("never renders a button without a link behind it", () => {
+    const label = (url: string) =>
+      evaluate(body.buttonLabel, {
+        "outputs('Compose_|_Payment_Link')?['url']": url,
+      });
+    expect(label("https://pay.example/p/tok")).toBe("Pay now");
+    expect(label("")).toBe("");
+  });
+
+  it("reads the link from the one compose that publishes it", () => {
+    // Compose_|_Payment_Link is a swappable point: the URL form is built
+    // there and nowhere else, so the day it changes there is one line to edit.
+    expect(body.buttonUrl).toContain("Compose_|_Payment_Link");
+    expect(json.split("'/p/'")).toHaveLength(2);
+  });
+
+  it("regards the invoice, which is what puts it on the timeline", () => {
+    expect(body.regardingEntitySet).toBe("new_invoiceses");
+    expect(body.regardingId).toBe(
+      "@items('Apply_to_each_|_Selected')?['invoiceId']",
+    );
+  });
+
+  it("greets the client by the name already read at selection", () => {
+    // No second GetItem in the send loop: the contact was fetched once when
+    // consent was evaluated, and the name travelled on the candidate row.
+    expect(body.greetingName).toBe(
+      "@items('Apply_to_each_|_Selected')?['firstName']",
+    );
+    expect(
+      JSON.stringify(action("Append_to_array_variable_|_Candidate").inputs),
+    ).toContain("firstname");
+  });
+
+  it.each([1, 2, 3, 4, 5, 9])(
+    "names the invoice and the outstanding amount at touch %i",
+    (touch) => {
+      const { subject, paragraphs, amount } = compose({ touch });
+      expect(amount).toBe("1234.50");
+      expect(subject).toContain("INV-42");
+      expect(paragraphs[0]).toContain("INV-42");
+      expect(paragraphs[0]).toContain("R 1234.50");
+    },
+  );
+
+  it("takes the amount from ttt_outstanding, never an original total", () => {
+    // The candidate row's `outstanding` is populated from ttt_outstanding at
+    // selection; this is the line that carries it into the message.
+    expect(composeInputs("Compose_|_Amount")).toContain(
+      "items('Apply_to_each_|_Selected')?['outstanding']",
+    );
+    const selection = JSON.stringify(
+      action("Append_to_array_variable_|_Candidate").inputs.value,
+    );
+    expect(selection).toContain("ttt_outstanding");
+  });
+
+  it("escalates through the ladder and never wraps back to it", () => {
+    // The same failure D12 guards on WhatsApp: a fresh opening message after
+    // a final notice. Touch 5 and beyond get the ongoing copy, and it is not
+    // touch 1's.
+    const at = (touch: number) => compose({ touch }).subject;
+    expect(at(1)).toMatch(/^Outstanding account/);
+    expect(at(2)).toMatch(/^Reminder/);
+    expect(at(3)).toMatch(/^Urgent/);
+    expect(at(4)).toMatch(/^Final notice/);
+    for (const touch of [5, 6, 40]) {
+      expect(at(touch)).toBe(at(5));
+      expect(at(touch)).not.toBe(at(1));
+    }
+  });
+
+  it("attaches the invoice to every rung, by saying so in the copy", () => {
+    for (const touch of [1, 2, 3, 4, 5]) {
+      const { paragraphs } = compose({ touch });
+      expect(paragraphs).toHaveLength(2);
+      expect(paragraphs[1]).toContain("attached");
+      expect(paragraphs[1]).toContain("proof of payment");
+    }
+  });
+
+  it("serialises its payloads instead of concatenating JSON by hand", () => {
+    // c430ace5 builds attachmentsJson by string concatenation, so a quote or
+    // a backslash in a generated filename would produce a body the child
+    // cannot parse. Letting WDL serialise cannot have that bug — and the
+    // assertion is that no hand-built JSON fragment survives anywhere.
+    expect(body.paragraphsJson).toBe("@outputs('Compose_|_Email_Paragraphs')");
+    expect(composeInputs("Compose_|_Email_Paragraphs")).toContain(
+      "string(createArray(",
+    );
+    expect(json).not.toContain('{\\"name\\":');
+    expect(json).not.toContain("contentBytes\\\":\\\"");
+  });
+
+  describe("who it will not email", () => {
+    const gate = (testMode: boolean, emailAllowed: boolean) =>
+      evaluateCondition(action("Condition_|_Send_Email").expression, {
+        "outputs('Compose_|_TestMode')": testMode,
+        "items('Apply_to_each_|_Selected')?['emailAllowed']": emailAllowed,
+      });
+
+    it("sends nothing in test mode, not even redirected to a test address", () => {
+      // c430ace5 redirects to riivo_TestRecipient instead. Its population is
+      // a handful of invoices; ours is the whole book, and a redirected
+      // rehearsal would mail one address several hundred times.
+      expect(gate(true, true)).toBe(false);
+      expect(json).not.toContain("toEmailOverride");
+      expect(json).not.toContain("riivo_TestRecipient");
+    });
+
+    it("sends nothing to a client selection already suppressed", () => {
+      expect(gate(false, false)).toBe(false);
+      expect(gate(false, true)).toBe(true);
+    });
+
+    it("treats a row that says nothing about consent as suppressed", () => {
+      // coalesce(..., false), not (..., true). Every other default in this
+      // build leans towards contactable, copied from c430ace5; this one must
+      // not, because it is not a consent flag — it is the ANSWER this run
+      // already computed from three of them, and a missing answer means the
+      // question was never asked.
+      expect(gate(false, null as unknown as boolean)).toBe(false);
+      expect(
+        JSON.stringify(action("Condition_|_Send_Email").expression),
+      ).toContain("emailAllowed'], false)");
+    });
+
+    it("is reached only by a client the preparation gate cleared", () => {
+      // The send lives in Condition_|_Prepare_Ok's true branch, so the
+      // no-message-without-its-attachment guarantee covers email by
+      // construction. This asserts the branch actually reads that verdict —
+      // structure alone would still be satisfied by a condition on `true`.
+      const prepared = (ok: boolean) =>
+        evaluateCondition(action("Condition_|_Prepare_Ok").expression, {
+          "outputs('Compose_|_Prepare_Ok')": ok,
+        });
+      expect(prepared(true)).toBe(true);
+      expect(prepared(false)).toBe(false);
+    });
+
+    it("leaves a second consent check to the child, against fresher data", () => {
+      // Our gate reads the contact at selection; the child re-reads it at
+      // send time and refuses on donotemail or a recorded bounce. Both
+      // layers exist deliberately — this asserts ours, and that we do not
+      // pass anything that would bypass theirs.
+      expect(composeInputs("Compose_|_Email_Allowed")).toContain("donotemail");
+      expect(composeInputs("Compose_|_Email_Allowed")).toContain(
+        "donotbulkemail",
+      );
+      expect(body.category).toBe("Transactional");
+    });
+  });
+
+  describe("what it records afterwards", () => {
+    const result = ({
+      testMode = false,
+      emailAllowed = true,
+      sent = null as boolean | null,
+      skipped = null as boolean | null,
+      skipReason = null as string | null,
+      emailId = null as string | null,
+    }) =>
+      evaluate(action("Compose_|_Email_Result").inputs.note, {
+        "outputs('Compose_|_TestMode')": testMode,
+        "items('Apply_to_each_|_Selected')?['emailAllowed']": emailAllowed,
+        "body('Run_Child_|_Send_Email')?['sent']": sent,
+        "body('Run_Child_|_Send_Email')?['skipped']": skipped,
+        "body('Run_Child_|_Send_Email')?['skipReason']": skipReason,
+        "body('Run_Child_|_Send_Email')?['emailId']": emailId,
+      }) as string;
+
+    it("advances a counter only where the CHILD reported a send", () => {
+      // Not "we called it" and not "a row was created": the child reports
+      // false when the org switch left the mail as a draft and when it
+      // refused the recipient, and those must advance nothing.
+      expect(action("Compose_|_Send_Outcome").inputs.email).toBe(
+        "@outputs('Compose_|_Email_Result')?['sent']",
+      );
+      expect(action("Compose_|_Email_Result").inputs.sent).toBe(
+        "@equals(coalesce(body('Run_Child_|_Send_Email')?['sent'], false), true)",
+      );
+      expect(composeInputs("Compose_|_Touch_Sent")).toContain(
+        "outputs('Compose_|_Send_Outcome')",
+      );
+    });
+
+    it("still refuses to record a touch in test mode", () => {
+      expect(composeInputs("Compose_|_Touch_Sent")).toContain(
+        "not(outputs('Compose_|_TestMode'))",
+      );
+    });
+
+    it("says why, whenever a resolved client was not emailed", () => {
+      // The same rule the held rows follow: a silent client is never a
+      // silent failure. Each of these is a different silence.
+      expect(result({ testMode: true })).toMatch(/test mode/);
+      expect(result({ emailAllowed: false })).toMatch(/suppressed/);
+      expect(result({ sent: true, emailId: "abc" })).toBe("");
+      expect(
+        result({ sent: false, skipped: true, skipReason: "Do Not Allow Email" }),
+      ).toBe("Do Not Allow Email");
+      expect(result({ sent: false })).toMatch(/did not answer/);
+      // The one that matters most during a rehearsal: everything worked and
+      // the org switch is off, so there is a draft rather than a send.
+      expect(result({ sent: false, skipped: false, emailId: "abc" })).toMatch(
+        /riivo_SendEmail is off/,
+      );
+    });
+
+    it("reads every child answer null-safely, because a failed call has none", () => {
+      const inputs = JSON.stringify(action("Compose_|_Email_Result").inputs);
+      for (const field of ["sent", "skipped", "skipReason", "emailId"]) {
+        expect(inputs).toContain(`?['${field}']`);
+      }
+      expect(inputs).not.toMatch(/body\('Run_Child_\|_Send_Email'\)\['/);
+    });
+
+    it("carries the outcome onto the touch row and into the run history", () => {
+      const touch = JSON.stringify(
+        action("Append_to_array_variable_|_Touch").inputs.value,
+      );
+      expect(touch).toContain("emailSent");
+      expect(touch).toContain("emailNote");
+      expect(action("Filter_|_Emails_Sent").inputs).toEqual({
+        from: "@variables('varTouches')",
+        where: "@equals(item()['emailSent'], true)",
+      });
+      expect(
+        action("Update_|_Run_Record").inputs.parameters[
+          "item/riivo_emailsentcount"
+        ],
+      ).toBe("@length(body('Filter_|_Emails_Sent'))");
+    });
+
+    it("says whether the org switch was even on", () => {
+      // Without this the first rehearsal — which correctly produces drafts —
+      // is indistinguishable from one that silently failed to send.
+      expect(
+        JSON.stringify(composeInputs("Compose_|_Dry_Run_Report")),
+      ).toContain("riivo_SendEmail");
+    });
+  });
+
+  it("contains a failed send instead of ending the run", () => {
+    // Same property #100 established for the preparation scope: one client's
+    // failure is theirs. Reading the result on Failed is what handles it.
+    expect(action("Compose_|_Email_Result").runAfter).toEqual({
+      "Condition_|_Send_Email": ["Succeeded", "Failed", "Skipped", "TimedOut"],
+    });
+  });
+
+  it("leaves an unsent client's bookkeeping exactly as it was", () => {
+    // Which is what makes "the next run picks them up again" true: no touch,
+    // no riivo_campaignlastsent, so the cadence guard does not exclude them.
+    const patches = actions.filter(
+      ([, a]) =>
+        a.inputs?.parameters?.entityName === "riivo_baddebts" &&
+        a.inputs?.host?.operationId === "UpdateRecord",
+    );
+    expect(patches.map(([n]) => n).sort()).toEqual([
+      "Update_|_Touch_First",
+      "Update_|_Touch_Repeat",
+    ]);
+    const branch = JSON.stringify(action("Condition_|_Touch_Sent").actions);
+    expect(branch).toContain("Update_|_Touch_First");
+    expect(JSON.stringify(action("Condition_|_Touch_Sent").else)).toBe(
+      '{"actions":{}}',
+    );
+  });
+});
+
+describe("the canary list (#102)", () => {
+  const topLevel = definition.actions as Record<string, any>;
+
+  const filterFor = (ids: string[]) => {
+    const clause = ids.map((id) => `_riivo_client_value eq ${id}`);
+    return evaluate(composeInputs("Compose_|_Canary_Filter"), {
+      "outputs('Compose_|_Canary_Active')": ids.length > 0,
+      "body('Select_|_Canary_Clauses')": clause,
+    }) as string;
+  };
+
+  it("restricts the QUERY, so an unlisted client is never even fetched", () => {
+    // Same principle as the cadence guard: a record that is out of scope is
+    // not fetched, so no later branch can act on it by accident — and no
+    // token is minted and no PDF rendered for anyone off the list.
+    expect(topLevel["List_rows_|_Open_BadDebts"].inputs.parameters.$filter)
+      .toContain("outputs('Compose_|_Canary_Filter')");
+    expect(filterFor(["a-1", "b-2"])).toBe(
+      " and (_riivo_client_value eq a-1 or _riivo_client_value eq b-2)",
+    );
+  });
+
+  it("means the whole book when it is empty, which is the normal state", () => {
+    expect(filterFor([])).toBe("");
+    const parameter = (definition.parameters as any)[
+      `Bad Debt Canary Contact Ids (${CANARY_VARIABLE})`
+    ];
+    expect(parameter.defaultValue).toBe("");
+  });
+
+  it("fails the run rather than falling back to everybody", () => {
+    // json() on a malformed value throws, which ends the run during
+    // selection. The alternative — treating an unparseable allowlist as "no
+    // restriction" — turns a typo into an unintended mass send.
+    const ids = composeInputs("Compose_|_Canary_Ids");
+    expect(ids).toContain(`json(trim(parameters('Bad Debt Canary Contact Ids (${CANARY_VARIABLE})')))`);
+    expect(ids).not.toContain("try");
+  });
+
+  it("skips the volume tripwire, which could only ever park it", () => {
+    // A restricted run is anomalous by construction: three of six hundred is
+    // a 99% fall. The canary case short-circuits every volume test.
+    const verdict = evaluate(composeInputs("Compose_|_Tripwire_Verdict"), {
+      "outputs('Compose_|_Canary_Active')": true,
+      "outputs('Compose_|_Has_Previous_Run')": true,
+      "outputs('Compose_|_Selected_Count')": 3,
+      "outputs('Compose_|_Previous_Count')": 600,
+      "outputs('Compose_|_Volume_Change_Percent')": 99,
+      "outputs('Compose_|_Volume_Threshold_Percent')": 40,
+    });
+    expect(verdict).toBe("canary");
+  });
+
+  it("runs the loop rather than parking, unlike every other non-proceed verdict", () => {
+    const parked = (verdict: string) =>
+      evaluateCondition(action("Condition_|_Tripwire_Tripped").expression, {
+        "outputs('Compose_|_Tripwire_Verdict')": verdict,
+      });
+    expect(parked("proceed")).toBe(false);
+    expect(parked("canary")).toBe(false);
+    expect(parked("volume")).toBe(true);
+    expect(parked("empty")).toBe(true);
+  });
+
+  it("can never become the next run's baseline", () => {
+    // The mirror of the aborted-run rule, from the other direction: let a
+    // canary set the baseline and the next unrestricted run looks like a
+    // twentyfold explosion and parks — the tripwire firing on the return to
+    // normal rather than on the anomaly.
+    expect(BASELINE_OUTCOMES).not.toContain(RUN_OUTCOME.CANARY);
+    const outcome = evaluate(
+      action("Create_|_Run_Record").inputs.parameters["item/riivo_outcome"],
+      { "outputs('Compose_|_Tripwire_Verdict')": "canary" },
+    );
+    expect(outcome).toBe(RUN_OUTCOME.CANARY);
+  });
+
+  it("records how many clients it was restricted to", () => {
+    expect(
+      action("Create_|_Run_Record").inputs.parameters["item/riivo_canarycount"],
+    ).toBe("@length(outputs('Compose_|_Canary_Ids'))");
+    expect(RUN_TABLE_ATTRIBUTES.map((a) => a.logicalName)).toContain(
+      "riivo_canarycount",
+    );
+  });
+
+  it("leaves abortreason empty, because nothing was aborted", () => {
+    const reason = evaluate(composeInputs("Compose_|_Tripwire_Reason"), {
+      "outputs('Compose_|_Tripwire_Verdict')": "canary",
+      "outputs('Compose_|_Selected_Count')": 3,
+      "outputs('Compose_|_Previous_Count')": 600,
+      "outputs('Compose_|_Volume_Change_Percent')": 99,
+      "outputs('Compose_|_Volume_Threshold_Percent')": 40,
+    });
+    expect(reason).toBe("");
+  });
+
+  it("nags a human on every restricted run, and does not terminate", () => {
+    // The failure mode of an allowlist is not that it is set — that is
+    // deliberate — it is that it is LEFT set, turning a campaign into a
+    // private conversation with three people that shows up nowhere.
+    const branch = action("Condition_|_Canary_Run").actions;
+    expect(Object.keys(branch)).toEqual([
+      "Run_Child_|_Canary_Alert",
+      "Compose_|_Canary_Alert_Status",
+    ]);
+    expect(branch["Run_Child_|_Canary_Alert"].inputs.host.workflowReferenceName)
+      .toBe(ALERT_CHILD_FLOW_ID);
+    expect(JSON.stringify(branch)).not.toContain("Terminate");
+    expect(JSON.stringify(branch)).toContain(CANARY_VARIABLE);
+  });
+
+  it("cannot be failed by its own undeliverable notice", () => {
+    const branch = action("Condition_|_Canary_Run").actions;
+    expect(branch["Compose_|_Canary_Alert_Status"].runAfter).toEqual({
+      "Run_Child_|_Canary_Alert": [
+        "Succeeded",
+        "Failed",
+        "Skipped",
+        "TimedOut",
+      ],
+    });
+    expect(topLevel["Initialize_variable_|_Touches"].runAfter).toEqual({
+      "Condition_|_Canary_Run": ["Succeeded"],
+    });
+  });
+
+  it("names no client in the notice it sends the team", () => {
+    // The same rule #101's park alert follows: an alert is an operational
+    // message on a channel with a wider audience than the campaign has.
+    const alert = JSON.stringify(
+      action("Run_Child_|_Canary_Alert").inputs.body,
+    );
+    expect(alert).not.toMatch(/clientId|invoiceNumber|emailaddress/);
+    expect(alert).toContain("length(outputs('Compose_|_Canary_Ids'))");
+  });
+});
+
 describe("the definition is structurally deployable", () => {
   /** Every scope's own action map: the top level, and each nested branch. */
   const containers = (() => {

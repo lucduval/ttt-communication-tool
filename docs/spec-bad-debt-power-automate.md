@@ -56,6 +56,9 @@ These were settled in the scoping conversation and are the premises the plan res
 | D9 | **All build happens in the dev org** (`tttdevelopment.crm4.dynamics.com`). | Luc promotes dev → prod manually. No agent deploys or activates a flow. |
 | D10 | **R4 settled — chase the newest open invoice.** D3 stands as written. | The age band is derived from the newest invoice being chased, which **contradicts `CONTEXT.md` § Campaign key**, where the band is defined against the client's *oldest* In-scope invoice. The contradiction is accepted, not resolved: message, amount, PDF and Pay-now token all agree on one invoice, which is what a client can act on. The cost is accepted too — the oldest invoice keeps ageing toward the three-year prescription line while we message about fresher debt, and template firmness tracks the wrong invoice. Revisit if prescription starts biting. |
 | D11 | **R3 settled — the stop rule stays Paid-only.** No promise-to-pay brake in v1. | D6 is unchanged. A client who has promised to pay continues to be chased twice weekly until the payment actually lands and `Invoice - Automated - Close Bad Debt When Invoice Paid` closes the record. This is a **departure from stories 22–23 of `docs/spec-bad-debt-statements.md`**, which treat promise-to-pay suppression as a must; the Statement build owns that. Channel consent flags are still honoured unconditionally. Expect this to be the most likely source of a client complaint. |
+| D13 | **The email channel proves itself on a restricted population before a full one** — `riivo_BadDebtCanaryContactIds`, a list of contact ids that narrows the selection query. | Built in #102 because D5 (fully unattended) removed every human checkpoint, and "rehearse on colleagues, then canary on a few real clients" had no mechanism behind it otherwise. A restricted run **really sends** — it is not test mode, which sends nothing at all. It skips the volume tripwire, because three of six hundred is a 99% fall the tripwire could only ever park, and it is recorded as outcome `canary`, which no later run may use as a baseline: the mirror of the aborted-run rule, or the return to normal would park instead of the anomaly. **The risk it carries is being left set**, turning the campaign into a private conversation with a handful of clients, so every restricted run emails the team. |
+| D14 | **Email copy is keyed on the touch alone** — five rungs (Day 0/10/25/40, then D12) — not on age band × relationship. | Meta forces 24 WhatsApp templates because it approves each variant separately; email has no such constraint, and a 5 × 2 × 3 matrix is thirty pieces of copy to keep in step for a distinction the reader of one message cannot perceive. The band still selects the WhatsApp template and still decides nothing on email. The final-notice and closing paragraphs are taken verbatim from the live cadence flow `c430ace5` so the two dunning voices do not diverge. |
+| D15 | **The bad-debt email is sent as `variant: System`** — From is the service queue, and the child's CC-the-owning-consultant behaviour is off. | `Compose_|_Cc_Enabled` in the email child requires `variant: Consultant`, so System suppresses CC entirely. An unattended campaign should not CC a consultant on a few hundred dunning emails twice a week. The consequence to accept: the client sees "TTT Notifications", not their consultant, and a reply goes to the shared queue rather than to a person who knows them. |
 | D12 | **R2 settled — after touch 4, fall back to a single general template and keep sending.** | The four campaign-key templates run Day 0 → 10 → 25 → 40; from touch 5 onward every client gets one general reminder template, repeated, rather than the Day-40 final notice repeated or a wrap-around to touch 1. **No new Meta submissions are required** — `riivo_WhatsApp_Template_WithButton` (`ttt_invoice_reminder_paylink_v2`) is already approved and already carries a Pay-now button, so P5 is not blocked on template approval. Consequence to accept: its copy is a *general invoice reminder*, not an arrears message, so tone softens after the Day-40 final notice. The template name is read from an environment variable, never hardcoded, so swapping it for a purpose-written `bad_debt_wa_ongoing` later is a config change. |
 
 ## Existing Assets — confirmed in the dev org
@@ -262,6 +265,22 @@ D6 sets the *campaign* stop rule to Paid-only; channel consent is separate and e
 skip email on `donotemail`/`donotbulkemail`, skip WhatsApp unless `riivo_whatsappoptinout` is opted
 in with a valid mobile. A client failing one channel still receives the other.
 
+On email this is now checked **twice**, by two different readers at two different moments. The
+selection gate evaluates `donotemail`, `donotbulkemail` and "has an address" when the candidate is
+picked; the branded-email child re-reads the contact at send time and refuses on `donotemail` or a
+recorded bounced address, answering `skipped` with a reason rather than failing. The second check
+sees fresher data than the first, and the flow believes it: the touch bookkeeping advances only
+where the child reported an actual send.
+
+### `riivo_SendEmail` is org-wide, and off in dev
+
+The email child reads it; with it off, **every** caller's mail is created and saved as a draft
+instead of being sent — 71 flows in the org read this variable. That makes it the cheapest possible
+rehearsal (a real branded message, with its attachment and button, on the invoice timeline, sent to
+nobody) and a real hazard to turn on (16 event-triggered flows that call the child are live). The
+run report carries `emailSendingEnabled` and each touch row says so, because a rehearsal that
+correctly produced drafts is otherwise indistinguishable from one that silently failed.
+
 ## Data Model — `riivo_baddebt`
 
 **No new columns are required on `riivo_baddebt`.** Confirmed present in dev: `riivo_campaignlastsent` (DateTime),
@@ -286,9 +305,11 @@ so the column names the flow addresses as strings are the column names that exis
 | `riivo_previouscount` | Integer | What it was compared against. 0 when there was nothing. |
 | `riivo_changepercent` | Integer | The movement, truncated. Stored so a parked row explains itself. |
 | `riivo_thresholdpercent` | Integer | The threshold in force, so retuning the variable later does not make an old decision unreadable. |
-| `riivo_outcome` | String | `proceeded` \| `aborted` \| `accepted`. |
-| `riivo_abortreason` | String | The sentence the alert email carried. |
+| `riivo_outcome` | String | `proceeded` \| `aborted` \| `accepted` \| `canary`. Only the first two are baselines. |
+| `riivo_abortreason` | String | The sentence the alert email carried. Empty on a canary run: nothing was aborted. |
 | `riivo_testmode` | Boolean | Whether this was a rehearsal. Selection does not depend on it, so a rehearsal is a valid baseline; this is how a human tells them apart. |
+| `riivo_canarycount` | Integer | How many clients the canary list named (#102); 0 on an unrestricted run. The only way, later, to tell a run that was deliberately restricted from a run where three clients was all there was. |
+| `riivo_emailsentcount` | Integer | Clients the email child reported a send for (#102) — not merely a draft created. Resolved says ready; this says delivered to the mail system. |
 | `riivo_resolvedcount` / `riivo_heldcount` | Integer | Written after the per-client loop, so null on a parked run. |
 
 Three cheaper stores were considered and rejected. **An environment variable the flow writes
@@ -307,8 +328,13 @@ with exactly one option, "Document Decryption".
 - Campaign-key template selection over the 24 approved Meta templates.
 - Touch bookkeeping on the existing `riivo_baddebt` campaign columns.
 - A dry-run mode reusing the `riivo_ReminderTestMode` pattern.
-- Rehearsal against the three colleague test invoices (Luc, Nic, Roscoe) per
-  `bad-debt-merge-csv-handoff.md`, with `donotemail`/`donotphone` set, then reverted.
+- Rehearsal against three colleague test invoices (Luc, Nic, Roscoe), then a canary of a small
+  number of real clients, both restricted by `riivo_BadDebtCanaryContactIds` (D13).
+  **The `donotemail`/`donotphone` suppression step from `bad-debt-merge-csv-handoff.md` does NOT
+  transfer**: there the sender was the Convex comms tool, which ignores `donotemail`, so the flags
+  silenced the Dataverse orchestrator while the campaign mailed anyway. This flow honours
+  `donotemail` twice over, so setting it would suppress the rehearsal itself. `donotphone` and the
+  WhatsApp opt-out can still be set to keep the other orchestrator quiet, and reverted after.
 
 **Out of scope**
 - The Statement model, Statement Link page and Allocation (`docs/spec-bad-debt-statements.md`).

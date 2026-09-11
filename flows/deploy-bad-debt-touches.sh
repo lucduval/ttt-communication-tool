@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Deploys `Invoice - Scheduled - Send Bad Debt Recovery Touches` (issues #98 to
-# #101) into the TTT **dev** org, with the environment variables and the
+# #102) into the TTT **dev** org, with the environment variables and the
 # riivo_baddebtrun table it depends on. Creates the flow as a DRAFT (off) — per
 # D9, no agent and no script activates anything; Luc promotes dev -> prod by hand.
 #
@@ -109,6 +109,12 @@ ensure_env_var riivo_BadDebtVolumeChangeThresholdPercent \
   "Bad Debt Volume Change Threshold Percent" "40" \
   "How far the selected client count may move from the last acted-on run before the run parks itself and sends nothing, as a whole-number percentage in either direction (#101). 40 is the figure R5 of the spec recommends. Raise it to accept a permanently larger book; to let one parked run through, set that run's riivo_outcome to 'accepted' on its riivo_baddebtrun row instead, which leaves no loosened threshold behind."
 
+# Created EMPTY, which is the safe state: an empty list means the whole book,
+# and the run only narrows itself once a human deliberately puts ids in it.
+ensure_env_var riivo_BadDebtCanaryContactIds \
+  "Bad Debt Canary Contact Ids" "" \
+  "A JSON array of contact ids, e.g. [\"26372e5b-40db-f011-8543-7ced8d7556e1\"]. While it is non-empty the bad-debt recovery run speaks ONLY to those clients: the list narrows the selection query itself, so nobody else is fetched, minted for or rendered for (#102). Empty - the normal state - means the whole book. Used to rehearse the email channel on colleagues, then to canary a handful of real clients before the channel is trusted. A restricted run skips the volume tripwire, is recorded as outcome 'canary' so it can never become a later run's baseline, and emails the team every time it runs. CLEAR IT WHEN THE CANARY IS DONE: until it is empty, the campaign is only speaking to those clients."
+
 # ---------------------------------------------------- #100/#101 depend on ----
 # The flow reads five environment variables it does NOT create and calls two
 # child flows it does not own. A missing dependency is not a deploy-time error —
@@ -117,7 +123,8 @@ ensure_env_var riivo_BadDebtVolumeChangeThresholdPercent \
 echo "==> dependencies for the mint and PDF steps (#100) and the tripwire (#101)"
 MISSING=0
 for DEP in riivo_PaymentLink_BaseUrl riivo_PaymentLink_FunctionKey riivo_PaymentLinkEnabled \
-           riivo_EnvironmentAddress riivo_varFlowErrorTeamMail; do
+           riivo_EnvironmentAddress riivo_varFlowErrorTeamMail \
+           riivo_SharedSenderUserId riivo_SendEmail; do
   COUNT=$(api GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$DEP'" \
     | sed '$d' | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
   if [[ "$COUNT" == "0" ]]; then
@@ -131,7 +138,8 @@ done
 # references in the definition that cannot travel to prod unchanged. Both must
 # be ON — the PDF child holds every client if it is off, and the alert child is
 # how a parked run reaches a human.
-for CHILD in be610dd6-bf7b-f111-ab0f-000d3ada6ac0 6b0bff17-e79b-ed11-aad1-000d3ab479cf; do
+for CHILD in be610dd6-bf7b-f111-ab0f-000d3ada6ac0 6b0bff17-e79b-ed11-aad1-000d3ab479cf \
+             0d0bc4d6-7f74-f111-ab0e-000d3ada6ac0; do
   # statecode FIRST, name last: the name contains spaces, and `read` would
   # otherwise split it and report the state of a word.
   read -r CHILD_STATE CHILD_NAME < <(
@@ -146,6 +154,31 @@ for CHILD in be610dd6-bf7b-f111-ab0f-000d3ada6ac0 6b0bff17-e79b-ed11-aad1-000d3a
     echo "    child flow '$CHILD_NAME' ok (on)"
   fi
 done
+
+# The two switches that decide whether a run says anything at all. Neither is
+# an error in either position, and neither is this script's to change — but a
+# rehearsal that produced drafts and a rehearsal that silently failed look
+# identical afterwards unless someone knew which way these were set first.
+echo "==> the two switches that decide what a run does (#102)"
+for SWITCH in riivo_SendEmail riivo_BadDebtCanaryContactIds riivo_ReminderTestMode; do
+  VALUE=$(api GET "environmentvariabledefinitions?\$select=defaultvalue&\$filter=schemaname%20eq%20'$SWITCH'&\$expand=environmentvariabledefinition_environmentvariablevalue(\$select=value)" \
+    | sed '$d' | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)['value']
+if not rows:
+    print('(not created)'); raise SystemExit
+row = rows[0]
+values = row.get('environmentvariabledefinition_environmentvariablevalue') or []
+# The VALUE wins over the default wherever one exists — reading the default
+# alone is how an environment gets misreported as something it is not.
+print(repr(values[0]['value']) + '  (current value)' if values
+      else repr(row.get('defaultvalue')) + '  (default; no value set)')")
+  echo "    $SWITCH = $VALUE"
+done
+echo "    riivo_SendEmail off => the branded-email child creates every mail as a"
+echo "    DRAFT and sends nothing, org-wide. That is a fine way to inspect a"
+echo "    rendered message; it is not a send, and the run will say so."
+echo "    A non-empty canary list => the run speaks ONLY to those clients."
 
 # ------------------------------------------------------- run table (#101) ----
 # The tripwire reads its baseline from riivo_baddebtrun and records every run
@@ -290,13 +323,23 @@ print(json.dumps({
     # Modern cloud flow: category 5, type 1, scope 4, mode 0, primaryentity none.
     "category": 5, "type": 1, "scope": 4, "mode": 0, "primaryentity": "none",
     "description": (
-        "Bad-debt recovery selection, campaign key and message inputs (issues "
-        "#98, #99, #100). Selects one client per run from open riivo_baddebt "
-        "rows, resolves the campaign-key WhatsApp template for the touch that "
-        "is due, mints a payment token and renders the invoice PDF - holding "
-        "any client whose token or PDF cannot be produced - and SENDS "
-        "NOTHING: the touch bookkeeping is gated on a send outcome that is "
-        "false until #102/#103. Mon/Thu 09:45 SAST - 09:45 not 09:30 because "
+        "Bad-debt recovery: selection, campaign key, message inputs and the "
+        "email channel (issues #98-#102). Selects one client per run from "
+        "open riivo_baddebt rows, resolves the campaign-key WhatsApp template "
+        "for the touch that is due, mints a payment token and renders the "
+        "invoice PDF - holding any client whose token or PDF cannot be "
+        "produced - and EMAILS them through the house child 'Email - Child - "
+        "Build Branded HTML Email, Create or Send', which creates the "
+        "Dataverse email row, attaches the PDF and performs the bound "
+        "SendEmail. No Outlook connector anywhere. The touch bookkeeping is "
+        "gated on that child reporting a send, so a suppressed recipient, a "
+        "skipped send or a draft left by riivo_SendEmail advances no counter. "
+        "WhatsApp is still silent: that is #103. "
+        "riivo_BadDebtCanaryContactIds restricts a run to named clients for a "
+        "rehearsal or a canary; while it is set the run skips the volume "
+        "tripwire, records itself as 'canary' so it never becomes a baseline, "
+        "and emails the team to say it was restricted. "
+        "Mon/Thu 09:45 SAST - 09:45 not 09:30 because "
         "'Bad Debt Referral & Owner Digest' (dd5a766f) runs daily 09:30 and "
         "creates riivo_baddebt rows. The definition is generated and tested in "
         "flows/badDebtRecoveryTouches.ts; edit it there, not in the designer. "
@@ -364,3 +407,28 @@ echo "     threshold to 1) and run again. Expect: nothing minted, a Flow"
 echo "     Failure email carrying both counts, and a second row saying"
 echo "     outcome=aborted. Put the row back, or set it to accepted, and the"
 echo "     next run proceeds again."
+echo
+echo "  #102: the email channel, in four steps and in this order."
+echo "  7. DRAFT REHEARSAL. Put the three colleague contact ids in"
+echo "     riivo_BadDebtCanaryContactIds, set riivo_ReminderTestMode to false,"
+echo "     and leave riivo_SendEmail OFF. Run it. Nothing is sent; each"
+echo "     selected client gets a branded email row saved as a draft, with the"
+echo "     PDF attached and the Pay-now button rendered. Open one in Dataverse"
+echo "     and READ IT: the amount, the invoice number, the attachment, and"
+echo "     the button. Load the button's link and confirm it resolves to that"
+echo "     invoice's payment page. Expect outcome=canary, canarycount=3,"
+echo "     emailsSent=0, and every touch row carrying the note that"
+echo "     riivo_SendEmail is off."
+echo "  8. LIVE COLLEAGUE REHEARSAL. Same canary list, then switch"
+echo "     riivo_SendEmail ON, run, and SWITCH IT BACK OFF. It is org-wide:"
+echo "     71 flows read it and 16 event-triggered ones are on, so any record"
+echo "     edited in dev during that window can mail a real contact. Expect"
+echo "     real mail in the three mailboxes, the message on each client's"
+echo "     timeline, emailsSent=3, and riivo_campaignsendcount advanced by"
+echo "     exactly one on those three bad-debt rows and on no others."
+echo "  9. CANARY. Widen the list to a small number of real clients, repeat"
+echo "     step 8, and read what they received before going further."
+echo " 10. CLEAR riivo_BadDebtCanaryContactIds. Until it is empty the campaign"
+echo "     is only speaking to those clients — which is what the Flow Failure"
+echo "     email saying RESTRICTED on every run is there to keep nagging"
+echo "     about."

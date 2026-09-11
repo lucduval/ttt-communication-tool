@@ -61,9 +61,18 @@ export const RUN_OUTCOME = {
   PROCEEDED: "proceeded",
   ABORTED: "aborted",
   ACCEPTED: "accepted",
+  CANARY: "canary",
 } as const;
 
-/** Outcomes a later run is allowed to compare itself against. */
+/**
+ * Outcomes a later run is allowed to compare itself against.
+ *
+ * `CANARY` (#102) is excluded for the same reason `ABORTED` is, from the other
+ * direction. A canary run is restricted by hand to a named handful of clients,
+ * so its count is small BY CONSTRUCTION. Let it become the baseline and the
+ * next unrestricted run looks like a twentyfold explosion and parks — the
+ * tripwire firing on the return to normal rather than on the anomaly.
+ */
 export const BASELINE_OUTCOMES: string[] = [
   RUN_OUTCOME.PROCEEDED,
   RUN_OUTCOME.ACCEPTED,
@@ -126,7 +135,7 @@ export const RUN_TABLE_ATTRIBUTES: Attribute[] = [
     kind: "String",
     maxLength: 20,
     description:
-      "proceeded | aborted | accepted. Only proceeded and accepted runs are baselines for a later run, so an anomalous selection cannot disarm the tripwire by aborting once. Set aborted -> accepted by hand to bless a genuinely larger population.",
+      "proceeded | aborted | accepted | canary. Only proceeded and accepted runs are baselines for a later run, so neither an anomalous selection (by aborting once) nor a deliberately restricted canary (by selecting three people) can disarm the tripwire. Set aborted -> accepted by hand to bless a genuinely larger population.",
   },
   {
     schemaName: "riivo_AbortReason",
@@ -142,6 +151,20 @@ export const RUN_TABLE_ATTRIBUTES: Attribute[] = [
     kind: "Boolean",
     description:
       "riivo_ReminderTestMode as this run read it. Selection does not depend on it, so a rehearsal is a valid baseline for a live run — this column is what lets a human tell them apart afterwards.",
+  },
+  {
+    schemaName: "riivo_CanaryCount",
+    logicalName: "riivo_canarycount",
+    kind: "Integer",
+    description:
+      "How many clients riivo_BadDebtCanaryContactIds named when this run read it; 0 on an unrestricted run (#102). Recorded on the row because the variable is edited between runs, so a month later it is the only way to tell a small run that was deliberately restricted from a small run that was all there was.",
+  },
+  {
+    schemaName: "riivo_EmailSentCount",
+    logicalName: "riivo_emailsentcount",
+    kind: "Integer",
+    description:
+      "Clients this run actually emailed — the branded-email child reported the send, not merely that a draft was created (#102). Written with the after-the-loop counts, so null on a parked run. The figure the campaign is measured by: resolved says ready, this says delivered to the mail system.",
   },
   {
     schemaName: "riivo_ResolvedCount",

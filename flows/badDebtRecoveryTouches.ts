@@ -1,10 +1,38 @@
 /**
- * `Invoice - Scheduled - Send Bad Debt Recovery Touches` — issues #98–#101.
+ * `Invoice - Scheduled - Send Bad Debt Recovery Touches` — issues #98–#102.
  *
  * The selection half of the bad-debt cadence, the campaign key that says WHICH
- * message each selected client is due, the two inputs that message needs, and
- * the one brake that looks at the run as a whole — and deliberately nothing
- * else: this flow still sends nothing at all. The channels arrive in #102/#103.
+ * message each selected client is due, the two inputs that message needs, the
+ * one brake that looks at the run as a whole — and, from #102, the first
+ * channel that actually speaks: email.
+ *
+ * #102 turns on the email channel and adds the mechanism that makes turning it
+ * on survivable. Two halves:
+ *
+ * THE SEND is one call to the house child `Email - Child - Build Branded HTML
+ * Email, Create or Send` (0d0bc4d6), copied from the proven cadence flow
+ * c430ace5, which already calls it with an invoice PDF and a Pay-now button.
+ * Inspecting that child on 2026-09-11 settled the open question the issue
+ * flags as its main risk: it takes `buttonUrl`/`buttonLabel` AND
+ * `attachmentsJson` in the same call, and it creates the `activitymimeattachment`
+ * rows BEFORE it performs `SendEmail`, so the attachment is on the message the
+ * client receives rather than added to a sent mail afterwards. It is the house
+ * pattern in full — a Dataverse `email` row, the attachment, then the bound
+ * `SendEmail` — which is what keeps the message on the client's timeline and
+ * inside TTT's email statistics; the Office 365 Outlook connector bypasses both
+ * and is used nowhere in this path.
+ *
+ * THE CANARY is `riivo_BadDebtCanaryContactIds`. Until #102 there was no way to
+ * send to three people rather than the whole book, and "rehearse on colleagues,
+ * then canary on a few real clients" is most of what this issue asks for. The
+ * list restricts the SELECTION QUERY, not a later condition, so a client who is
+ * not on it is never fetched, never minted for, never rendered for. A canary run
+ * skips the tripwire (a run restricted by hand is anomalous by construction) and
+ * is recorded as outcome `canary`, which is NOT a baseline — otherwise the next
+ * unrestricted run would look like a twentyfold explosion and park. And every
+ * canary run alerts the team, because the failure mode of an allowlist is not
+ * that it is set, it is that it is left set: a campaign that quietly speaks to
+ * three people forever is worse than one that nags.
  *
  * #101 adds the volume tripwire. Every other guard here is per-recipient — no
  * message without its PDF, per-channel consent, the last-sent recency test —
@@ -30,12 +58,13 @@
  * as a held row naming the reason. One client's failure is contained by the
  * scope and cannot end the run for anyone else.
  *
- * #99 adds two halves of one mechanism. `riivo_campaignsendcount` chooses the
+ * #99 added two halves of one mechanism. `riivo_campaignsendcount` chooses the
  * template, and the touch increments it, so template resolution and touch
  * bookkeeping cannot be built apart. Both are built here; the bookkeeping
  * WRITE is gated on a send having succeeded, and this slice sends nothing, so
  * the counter cannot advance yet even if someone flips test mode off early.
- * `Compose_|_Send_Outcome` is the seam #102/#103 replace.
+ * `Compose_|_Send_Outcome` was the seam; #102 fills in its email half and
+ * leaves `whatsApp: false` for #103.
  *
  * WHY THIS IS AUTHORED AS CODE RATHER THAN CLICKED TOGETHER
  * The flow is unattended by decision (D5), so none of the comms tool's human
@@ -121,11 +150,79 @@ export const ALERT_CHILD_FLOW_ID = "6b0bff17-e79b-ed11-aad1-000d3ab479cf";
 const ENVIRONMENT_ADDRESS_VARIABLE = "riivo_EnvironmentAddress";
 const ENVIRONMENT_ADDRESS_PARAM = `Environment Address (${ENVIRONMENT_ADDRESS_VARIABLE})`;
 
-/** The three verdicts the tripwire can reach. Only `proceed` runs the loop. */
+/**
+ * `Email - Child - Build Branded HTML Email, Create or Send`, on in dev, read
+ * 2026-09-11. 39 flows in this org call it; 16 of them are on.
+ *
+ * It owns the entire house send pattern: it builds the branded HTML from
+ * subject + paragraph JSON, creates the Dataverse `email` row, writes each
+ * `activitymimeattachment`, and only THEN performs the bound `SendEmail`. It
+ * also re-reads the recipient at send time and refuses on `donotemail` or a
+ * recorded bounced address, answering `sent`/`skipped`/`skipReason` rather
+ * than failing — a second consent check behind our own, evaluated later and
+ * therefore against fresher data.
+ *
+ * Reimplementing any of that here would mean owning the branded template, the
+ * unsubscribe footer, the signature resolution and the attachment ordering,
+ * four things that already have one home.
+ *
+ * PROMOTION HAZARD: the third workflowid in this file that cannot travel to
+ * prod unchanged, with `PDF_CHILD_FLOW_ID` and `ALERT_CHILD_FLOW_ID`.
+ */
+export const EMAIL_CHILD_FLOW_ID = "0d0bc4d6-7f74-f111-ab0e-000d3ada6ac0";
+
+/**
+ * The sender the child is told about, and the switch it obeys.
+ *
+ * `variant: System` means the From party is the service queue
+ * (`riivo_ServiceQueue`, TTT Notifications) rather than a consultant, and it
+ * also disables the child's CC-the-owner behaviour entirely — which is what we
+ * want for an unattended collections run: no consultant is CC'd on a few
+ * hundred dunning emails twice a week. `senderUserId` is still REQUIRED by the
+ * child (it validates it non-empty and then reads that systemuser), so a value
+ * has to be supplied even though System variant does not send as them. The
+ * existing `riivo_SharedSenderUserId` — "Shared Sender User Id (fallback From)"
+ * — is exactly that value, already in the org, so this build adds no variable
+ * for it and no owner-resolution subtree of its own. c430ace5 passes the
+ * invoice's owner instead, which drags in a whole team-owner branch to answer
+ * a question System variant does not ask.
+ *
+ * `riivo_SendEmail` is an ORG-WIDE switch the child reads: with it off every
+ * caller's mail is created and saved as a draft instead of being sent. It is
+ * off in dev. Read here purely so the run can SAY so — a rehearsal that
+ * produces drafts otherwise looks identical to a rehearsal that silently
+ * failed. Nothing in this flow branches on it; the child's own `sent` answer
+ * is what gates the bookkeeping.
+ */
+const SENDER_USER_VARIABLE = "riivo_SharedSenderUserId";
+const SENDER_USER_PARAM = `Shared Sender User Id (fallback From) (${SENDER_USER_VARIABLE})`;
+const SEND_EMAIL_VARIABLE = "riivo_SendEmail";
+const SEND_EMAIL_PARAM = `Send Email (${SEND_EMAIL_VARIABLE})`;
+
+/**
+ * The canary list: a JSON array of contact ids that, when non-empty, is the
+ * only population this run may speak to.
+ *
+ * String rather than JSON type, following every other variable this build
+ * reads, and parsed with `json()`. A malformed value THROWS, which fails the
+ * run during selection — before a token is minted or a PDF rendered — rather
+ * than silently falling back to the whole book. That is the direction an
+ * allowlist must fail in: the cost of a broken restriction is an unintended
+ * mass send.
+ */
+export const CANARY_VARIABLE = "riivo_BadDebtCanaryContactIds";
+const CANARY_PARAM = `Bad Debt Canary Contact Ids (${CANARY_VARIABLE})`;
+
+/**
+ * The four verdicts the tripwire can reach. `proceed` and `canary` both run
+ * the loop; `canary` additionally alerts, and is recorded as an outcome no
+ * later run may use as a baseline.
+ */
 const VERDICT = {
   PROCEED: "proceed",
   VOLUME: "volume",
   EMPTY: "empty",
+  CANARY: "canary",
 } as const;
 
 /**
@@ -264,6 +361,109 @@ const touchDayExpression = (touch: string) =>
       (day, i) => [`equals(${touch}, ${i + 1})`, `'${day}'`] as [string, string],
     ),
     "''",
+  );
+
+/**
+ * The email ladder (#102), one rung per touch, escalating exactly as the
+ * campaign key does.
+ *
+ * KEYED ON TOUCH ONLY, not on the age band or the relationship. The 24
+ * WhatsApp templates are keyed on all three because Meta approves each variant
+ * separately and the band is baked into copy that cannot be assembled at send
+ * time. Email has no such constraint, and a 5 x 2 x 3 matrix of hand-written
+ * paragraphs is thirty pieces of copy to keep in step with one another for a
+ * distinction the reader of a single message cannot perceive. The band still
+ * decides which WhatsApp template goes out; on email it decides nothing, and
+ * saying so here is cheaper than a comment on every rung.
+ *
+ * The wording of the closing paragraph and of the final notice is taken from
+ * the live cadence flow c430ace5 rather than written fresh: that copy is
+ * already in front of clients, so matching it keeps the two dunning voices
+ * from diverging, and the final notice in particular is the sentence with
+ * consequences attached.
+ *
+ * `{invoice}` and `{amount}` are the only substitutions. Apostrophes are
+ * escaped into the WDL literal by `copyExpression`, but the copy avoids them
+ * anyway — a quote inside a generated expression is the kind of thing that
+ * only fails once it is deployed.
+ */
+type EmailCopy = { subject: string; paragraph: string };
+
+const EMAIL_LADDER: EmailCopy[] = [
+  {
+    subject: "Outstanding account: invoice {invoice}",
+    paragraph:
+      "<p>Our records show that invoice <strong>{invoice}</strong> has not been settled, and <strong>R {amount}</strong> remains outstanding on your account.</p>",
+  },
+  {
+    subject: "Reminder: invoice {invoice} is still outstanding",
+    paragraph:
+      "<p>We have not yet received payment of <strong>R {amount}</strong> on invoice <strong>{invoice}</strong>. We would appreciate settlement, or a call to arrange terms, at your earliest convenience.</p>",
+  },
+  {
+    subject: "Urgent: overdue invoice {invoice}",
+    paragraph:
+      "<p>Invoice <strong>{invoice}</strong> is now significantly overdue. An amount of <strong>R {amount}</strong> remains outstanding and requires your urgent attention.</p>",
+  },
+  {
+    subject: "Final notice: invoice {invoice}",
+    paragraph:
+      "<p>This is a <strong>final notice</strong> regarding invoice <strong>{invoice}</strong>, which has an outstanding balance of <strong>R {amount}</strong>. If the account is not settled, it will be handed over for further collections action.</p>",
+  },
+];
+
+/**
+ * D12 on email: past the ladder, one general reminder that keeps going.
+ *
+ * Softer than the final notice it follows, which is the same accepted
+ * departure D12 makes on WhatsApp — the alternative is either repeating a
+ * final notice that has visibly not been acted on, or wrapping back to an
+ * opening message after one.
+ */
+const EMAIL_ONGOING: EmailCopy = {
+  subject: "Outstanding invoice {invoice}",
+  paragraph:
+    "<p>Invoice <strong>{invoice}</strong> remains unpaid, with <strong>R {amount}</strong> outstanding. Please settle the account, or contact us so we can arrange terms with you.</p>",
+};
+
+/** The second paragraph of every rung — the attachment and the POP ask. */
+const EMAIL_CLOSING_PARAGRAPH =
+  "<p>Your invoice is attached for your records, including our banking details for EFT payment. If you have already settled this account, kindly send us your proof of payment so we can update our records.</p>";
+
+/** A WDL string literal: single quotes double, as WDL escapes them. */
+const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
+
+/** Copy carrying {invoice} and {amount}, as a WDL concat() over both. */
+const copyExpression = (text: string, invoice: string, amount: string) => {
+  const parts = text
+    .split(/(\{invoice\}|\{amount\})/)
+    .filter((part) => part !== "")
+    .map((part) =>
+      part === "{invoice}"
+        ? invoice
+        : part === "{amount}"
+          ? amount
+          : literal(part),
+    );
+  return parts.length === 1 ? parts[0] : `concat(${parts.join(", ")})`;
+};
+
+/** Rung N for touches 1..4, the D12 copy for anything past them. */
+const ladderExpression = (
+  field: keyof EmailCopy,
+  touch: string,
+  invoice: string,
+  amount: string,
+) =>
+  nestedIf(
+    EMAIL_LADDER.map(
+      (copy, i) =>
+        [
+          `equals(${touch}, ${i + 1})`,
+          copyExpression(copy[field], invoice, amount),
+        ] as [string, string],
+    ),
+    copyExpression(EMAIL_ONGOING[field], invoice, amount),
   );
 
 const DATAVERSE = {
@@ -469,6 +669,10 @@ export function buildBadDebtRecoveryTouchesFlow() {
    */
   const verdictExpression = nestedIf(
     [
+      // First, and short-circuiting every volume test below it: a run
+      // restricted to a named handful is anomalous BY CONSTRUCTION, so
+      // measuring it against a full-book baseline could only ever park it.
+      ["outputs('Compose_|_Canary_Active')", `'${VERDICT.CANARY}'`],
       ["not(outputs('Compose_|_Has_Previous_Run'))", `'${VERDICT.PROCEED}'`],
       [
         `and(equals(${selectedCount}, 0), greater(${previousCount}, 0))`,
@@ -555,6 +759,33 @@ export function buildBadDebtRecoveryTouchesFlow() {
                 "How far the selected client count may move from the last acted-on run before the run parks itself instead of sending, as a whole-number percentage in either direction. 40 is the figure R5 of the spec recommends. Raise it to accept a genuinely larger book; to bless one run only, set that parked run's riivo_outcome to 'accepted' instead, which does not leave a loosened threshold behind.",
             },
           },
+          [CANARY_PARAM]: {
+            defaultValue: "",
+            type: "String",
+            metadata: {
+              schemaName: CANARY_VARIABLE,
+              description:
+                "A JSON array of contact ids, e.g. [\"26372e5b-...\",\"50334bea-...\"]. While it is non-empty the run speaks ONLY to those clients: the list narrows the selection query itself, so nobody else is fetched, minted for or rendered for. Empty (the normal state) means the whole book. Used to rehearse on colleagues and then to canary on a handful of real clients before the channel is trusted. A canary run skips the volume tripwire and is recorded as outcome 'canary', which no later run may use as a baseline - and it emails the team every time, because an allowlist left set is a campaign that silently speaks to three people forever. CLEAR IT when the canary is done.",
+            },
+          },
+          [SENDER_USER_PARAM]: {
+            defaultValue: "",
+            type: "String",
+            metadata: {
+              schemaName: SENDER_USER_VARIABLE,
+              description:
+                "The systemuser the branded-email child is handed. With variant System the message is actually FROM the service queue, but the child validates this value and reads that user, so it must be a real, enabled one. Empty default: a user id is environment-specific, and a dev id travelling to prod would fail there rather than here.",
+            },
+          },
+          [SEND_EMAIL_PARAM]: {
+            defaultValue: false,
+            type: "Bool",
+            metadata: {
+              schemaName: SEND_EMAIL_VARIABLE,
+              description:
+                "The org-wide send switch the branded-email child obeys: with it off, every caller's mail is created and saved as a draft instead of being sent. Read here only so the run report can say which happened - a rehearsal that produced drafts otherwise looks exactly like one that failed. Nothing in this flow branches on it; the child's own 'sent' answer is what gates the touch bookkeeping, so an unsent draft advances no counter either way.",
+            },
+          },
           [ENVIRONMENT_ADDRESS_PARAM]: {
             defaultValue: "",
             type: "String",
@@ -635,8 +866,41 @@ export function buildBadDebtRecoveryTouchesFlow() {
             inputs: `@addDays(utcNow(), sub(0, int(coalesce(parameters('${TOUCH_GAP_PARAM}'), '2'))), 'yyyy-MM-ddTHH:mm:ssZ')`,
           },
 
-          "Initialize_variable_|_Candidates": {
+          // ---- #102: the canary list, applied to the QUERY ----
+          // Same principle as the cadence guard above: a client who is not on
+          // the list is never FETCHED, so no later branch can act on them by
+          // accident. json() on a malformed value throws and ends the run
+          // here, before anything has been minted or rendered — the only safe
+          // direction for a restriction whose failure mode is a mass send.
+          "Compose_|_Canary_Ids": {
             runAfter: { "Compose_|_Last_Sent_Cutoff": ["Succeeded"] },
+            type: "Compose",
+            inputs: `@if(empty(trim(coalesce(parameters('${CANARY_PARAM}'), ''))), json('[]'), json(trim(parameters('${CANARY_PARAM}'))))`,
+          },
+          "Compose_|_Canary_Active": {
+            runAfter: { "Compose_|_Canary_Ids": ["Succeeded"] },
+            type: "Compose",
+            inputs: "@greater(length(outputs('Compose_|_Canary_Ids')), 0)",
+          },
+          // WDL expressions have join() but no map, so the clauses are built
+          // by a Select action rather than inline.
+          "Select_|_Canary_Clauses": {
+            runAfter: { "Compose_|_Canary_Active": ["Succeeded"] },
+            type: "Select",
+            inputs: {
+              from: "@outputs('Compose_|_Canary_Ids')",
+              select: "@concat('_riivo_client_value eq ', item())",
+            },
+          },
+          "Compose_|_Canary_Filter": {
+            runAfter: { "Select_|_Canary_Clauses": ["Succeeded"] },
+            type: "Compose",
+            inputs:
+              "@if(outputs('Compose_|_Canary_Active'), concat(' and (', join(body('Select_|_Canary_Clauses'), ' or '), ')'), '')",
+          },
+
+          "Initialize_variable_|_Candidates": {
+            runAfter: { "Compose_|_Canary_Filter": ["Succeeded"] },
             type: "InitializeVariable",
             inputs: {
               variables: [{ name: "varCandidates", type: "array", value: [] }],
@@ -653,7 +917,7 @@ export function buildBadDebtRecoveryTouchesFlow() {
               $select:
                 "riivo_baddebtid,_riivo_invoice_value,_riivo_client_value,riivo_campaignlastsent,riivo_campaignsendcount,riivo_campaignfirstsent,riivo_outstandingamount",
               $filter:
-                "@concat('statecode eq 0 and (riivo_campaignlastsent eq null or riivo_campaignlastsent lt ', outputs('Compose_|_Last_Sent_Cutoff'), ')')",
+                "@concat('statecode eq 0 and (riivo_campaignlastsent eq null or riivo_campaignlastsent lt ', outputs('Compose_|_Last_Sent_Cutoff'), ')', outputs('Compose_|_Canary_Filter'))",
             }),
           },
 
@@ -782,6 +1046,11 @@ export function buildBadDebtRecoveryTouchesFlow() {
                               "@coalesce(items('Apply_to_each_|_BadDebt')?['riivo_campaignfirstsent'], '')",
                             emailAllowed: "@outputs('Compose_|_Email_Allowed')",
                             whatsAppAllowed: "@outputs('Compose_|_Wa_Allowed')",
+                            // Carried from the contact read that already
+                            // happened, so the send loop needs no second
+                            // GetItem to greet somebody by name. 'there' is
+                            // the same fallback c430ace5 uses.
+                            firstName: `@coalesce(${contact("firstname")}, 'there')`,
                           },
                         },
                       },
@@ -971,8 +1240,24 @@ export function buildBadDebtRecoveryTouchesFlow() {
               "item/riivo_previouscount": `@${previousCount}`,
               "item/riivo_changepercent": `@${changePercent}`,
               "item/riivo_thresholdpercent": `@${thresholdPercent}`,
-              "item/riivo_outcome": `@if(equals(${verdict}, '${VERDICT.PROCEED}'), '${RUN_OUTCOME.PROCEEDED}', '${RUN_OUTCOME.ABORTED}')`,
+              "item/riivo_outcome": `@${nestedIf(
+                [
+                  [
+                    `equals(${verdict}, '${VERDICT.CANARY}')`,
+                    `'${RUN_OUTCOME.CANARY}'`,
+                  ],
+                  [
+                    `equals(${verdict}, '${VERDICT.PROCEED}')`,
+                    `'${RUN_OUTCOME.PROCEEDED}'`,
+                  ],
+                ],
+                `'${RUN_OUTCOME.ABORTED}'`,
+              )}`,
+              // Empty on a canary run: nothing was aborted, and a column named
+              // abortreason carrying "this run was restricted" would be a
+              // small lie in a table people will read a year from now.
               "item/riivo_abortreason": "@outputs('Compose_|_Tripwire_Reason')",
+              "item/riivo_canarycount": "@length(outputs('Compose_|_Canary_Ids'))",
               "item/riivo_testmode": "@outputs('Compose_|_TestMode')",
             }),
           },
@@ -980,8 +1265,15 @@ export function buildBadDebtRecoveryTouchesFlow() {
           "Condition_|_Tripwire_Tripped": {
             runAfter: { "Create_|_Run_Record": ["Succeeded"] },
             type: "If",
+            // Two verdicts run the loop, so this is no longer "not proceed".
+            // Written as an explicit pair rather than as a negation of a list
+            // because getting it wrong in the permissive direction is a run
+            // that sends when it should have parked.
             expression: {
-              and: [{ not: { equals: [`@${verdict}`, VERDICT.PROCEED] } }],
+              and: [
+                { not: { equals: [`@${verdict}`, VERDICT.PROCEED] } },
+                { not: { equals: [`@${verdict}`, VERDICT.CANARY] } },
+              ],
             },
             actions: {
               // The house alert, in the shape 218 of this org's flows use it:
@@ -1033,11 +1325,64 @@ export function buildBadDebtRecoveryTouchesFlow() {
             else: { actions: {} },
           },
 
+          // ---- #102: a restricted run says so, every single time ----
+          // Not a park: this branch alerts and then carries straight on into
+          // the loop. The thing being guarded against is not setting the
+          // canary list, which is deliberate and safe — it is LEAVING it set,
+          // which turns a campaign into a private conversation with three
+          // people and shows up nowhere a human looks. Twice a week is exactly
+          // as annoying as it should be.
+          "Condition_|_Canary_Run": {
+            runAfter: { "Condition_|_Tripwire_Tripped": ["Succeeded"] },
+            type: "If",
+            expression: {
+              and: [{ equals: [`@${verdict}`, VERDICT.CANARY] }],
+            },
+            actions: {
+              // The house child again. Its subject is hardcoded to
+              // "Flow Failure: {text_1}", which this run is not — hence the
+              // parenthetical, which is the honest fix available without
+              // editing a child 218 other flows depend on.
+              "Run_Child_|_Canary_Alert": {
+                runAfter: {},
+                type: "Workflow",
+                inputs: {
+                  host: { workflowReferenceName: ALERT_CHILD_FLOW_ID },
+                  body: {
+                    text: `@{parameters('${ENVIRONMENT_ADDRESS_PARAM}')} - THIS RUN WAS RESTRICTED. ${CANARY_VARIABLE} names @{length(outputs('Compose_|_Canary_Ids'))} client(s), so the run selected @{outputs('Compose_|_Selected_Count')} of them and said nothing to anybody else - the volume tripwire was skipped, and this run is recorded as '${RUN_OUTCOME.CANARY}' so it cannot become the next run's baseline. That is correct while a canary is in progress. WHEN THE CANARY IS DONE, CLEAR ${CANARY_VARIABLE}: until it is empty the bad-debt campaign is only speaking to those clients. Run record: @{outputs('Compose_|_Run_Name')}. Test mode: @{outputs('Compose_|_TestMode')}.`,
+                    text_1: `@{workflow().tags.flowDisplayName} - RESTRICTED to a canary list of @{length(outputs('Compose_|_Canary_Ids'))} client(s), not a failure`,
+                    text_2: "@workflow().tags.environmentName",
+                    text_3: "@workflow().name",
+                    text_4: "@workflow().run.name",
+                  },
+                },
+              },
+              // Any status, so an undeliverable notice cannot fail the branch
+              // and with it a canary run that is otherwise fine. The status
+              // reaches the report, which is where someone would look to ask
+              // why no notice arrived.
+              "Compose_|_Canary_Alert_Status": {
+                runAfter: {
+                  "Run_Child_|_Canary_Alert": [
+                    "Succeeded",
+                    "Failed",
+                    "Skipped",
+                    "TimedOut",
+                  ],
+                },
+                type: "Compose",
+                inputs:
+                  "@coalesce(outputs('Run_Child_|_Canary_Alert')?['statusCode'], 0)",
+              },
+            },
+            else: { actions: {} },
+          },
+
           "Initialize_variable_|_Touches": {
             // Everything below is reached only by a run the tripwire cleared:
             // Terminate ends the run where it stands, so the loop is never
             // entered on a park. Nothing had to move into a branch for that.
-            runAfter: { "Condition_|_Tripwire_Tripped": ["Succeeded"] },
+            runAfter: { "Condition_|_Canary_Run": ["Succeeded"] },
             type: "InitializeVariable",
             inputs: { variables: [{ name: "varTouches", type: "array", value: [] }] },
           },
@@ -1364,8 +1709,195 @@ export function buildBadDebtRecoveryTouchesFlow() {
                       and: [{ equals: ["@outputs('Compose_|_Prepare_Ok')", true] }],
                     },
                     actions: {
-                      "Append_to_array_variable_|_Touch": {
+                      // ---- #102: the email, built and sent ----
+                      "Compose_|_Amount": {
                         runAfter: {},
+                        type: "Compose",
+                        inputs: `@formatNumber(${selected("outstanding")}, 'N2')`,
+                      },
+                      "Compose_|_Email_Subject": {
+                        runAfter: { "Compose_|_Amount": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: `@${ladderExpression(
+                          "subject",
+                          "outputs('Compose_|_Touch_Number')",
+                          selected("invoiceNumber"),
+                          "outputs('Compose_|_Amount')",
+                        )}`,
+                      },
+                      // string(createArray(...)) rather than a hand-built
+                      // JSON string: the child takes these as JSON text, and
+                      // letting WDL serialise it is what makes an apostrophe
+                      // in the copy a non-event instead of a malformed
+                      // payload discovered in production.
+                      "Compose_|_Email_Paragraphs": {
+                        runAfter: { "Compose_|_Email_Subject": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: `@string(createArray(${ladderExpression(
+                          "paragraph",
+                          "outputs('Compose_|_Touch_Number')",
+                          selected("invoiceNumber"),
+                          "outputs('Compose_|_Amount')",
+                        )}, ${literal(EMAIL_CLOSING_PARAGRAPH)}))`,
+                      },
+                      // Same reasoning, and it matters more here: c430ace5
+                      // concatenates the filename straight into a JSON
+                      // string, so a quote or a backslash in a generated
+                      // invoice name would produce a body the child cannot
+                      // parse. Composing the object and serialising it cannot
+                      // have that bug.
+                      "Compose_|_Email_Attachment": {
+                        runAfter: { "Compose_|_Email_Paragraphs": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: {
+                          name: "@outputs('Compose_|_Document')?['fileName']",
+                          contentBytes: "@outputs('Compose_|_Document')?['base64']",
+                          contentType: "application/pdf",
+                        },
+                      },
+
+                      // Test mode sends nothing at all, and creates no email
+                      // row — a departure from c430ace5, which redirects to
+                      // riivo_TestRecipient instead. Its population is a
+                      // handful of invoices; ours is the whole bad-debt book,
+                      // and a redirected rehearsal would mail one address
+                      // several hundred times. The dry-run report already
+                      // says who would get what; seeing the RENDERED message
+                      // is what the canary list is for, and with
+                      // riivo_SendEmail off the first canary run leaves
+                      // inspectable drafts rather than sent mail.
+                      "Condition_|_Send_Email": {
+                        runAfter: { "Compose_|_Email_Attachment": ["Succeeded"] },
+                        type: "If",
+                        expression: {
+                          and: [
+                            { equals: ["@outputs('Compose_|_TestMode')", false] },
+                            {
+                              equals: [
+                                `@coalesce(${selected("emailAllowed")}, false)`,
+                                true,
+                              ],
+                            },
+                          ],
+                        },
+                        actions: {
+                          // The house pattern, in one call: the child creates
+                          // the `email` row, writes the activitymimeattachment
+                          // and then performs the bound SendEmail. The Outlook
+                          // connector appears nowhere in this path — sending
+                          // as a Dataverse activity is what keeps the message
+                          // on the client's timeline and in TTT's email stats.
+                          "Run_Child_|_Send_Email": {
+                            runAfter: {},
+                            type: "Workflow",
+                            inputs: {
+                              host: {
+                                workflowReferenceName: EMAIL_CHILD_FLOW_ID,
+                              },
+                              body: {
+                                // System, not Consultant: the From party is
+                                // the service queue, and the child's
+                                // CC-the-owning-consultant behaviour is off
+                                // entirely — nobody is CC'd on a few hundred
+                                // dunning emails twice a week.
+                                variant: "System",
+                                // Transactional: a demand for payment on a
+                                // named invoice, not marketing. Our own
+                                // selection has already applied donotemail
+                                // AND donotbulkemail, so this loses no
+                                // suppression the Marketing category would
+                                // have added.
+                                category: "Transactional",
+                                audience: "Client",
+                                toRecipientEntitySet: "contacts",
+                                toRecipientId: selectedValue("clientId"),
+                                senderUserId: `@parameters('${SENDER_USER_PARAM}')`,
+                                subject: "@outputs('Compose_|_Email_Subject')",
+                                greetingName: selectedValue("firstName"),
+                                paragraphsJson:
+                                  "@outputs('Compose_|_Email_Paragraphs')",
+                                buttonUrl:
+                                  "@outputs('Compose_|_Payment_Link')?['url']",
+                                // The label is blanked with the URL: the child
+                                // renders the button only when it has both, so
+                                // a missing link cannot produce a button that
+                                // goes nowhere. (Prepare_Ok already refuses to
+                                // get here without a token; this is the second
+                                // lock on the same door.)
+                                buttonLabel:
+                                  "@if(empty(coalesce(outputs('Compose_|_Payment_Link')?['url'], '')), '', 'Pay now')",
+                                attachmentsJson:
+                                  "@string(createArray(outputs('Compose_|_Email_Attachment')))",
+                                // Regarding the invoice: that is what puts the
+                                // message on the timeline, and what makes the
+                                // Statement swap a change to Compose_|_Document
+                                // and these two lines alone.
+                                regardingEntitySet: "new_invoiceses",
+                                regardingId: selectedValue("invoiceId"),
+                              },
+                            },
+                          },
+                        },
+                        else: { actions: {} },
+                      },
+
+                      // Any status. A child that failed for this client — a
+                      // bad sender id, a Dataverse hiccup — must not end the
+                      // run for the clients behind them, and reading the
+                      // result on Failed is what handles that failure. Every
+                      // read is null-safe because a skipped or failed call
+                      // has no body.
+                      "Compose_|_Email_Result": {
+                        runAfter: {
+                          "Condition_|_Send_Email": [
+                            "Succeeded",
+                            "Failed",
+                            "Skipped",
+                            "TimedOut",
+                          ],
+                        },
+                        type: "Compose",
+                        inputs: {
+                          attempted: `@and(equals(outputs('Compose_|_TestMode'), false), equals(coalesce(${selected("emailAllowed")}, false), true))`,
+                          // The CHILD's answer, not ours. It re-reads the
+                          // contact at send time and refuses on donotemail or
+                          // a recorded bounce, and it reports false when the
+                          // org switch left the mail as a draft. So "sent"
+                          // here means the mail system took it — which is
+                          // exactly the condition the touch bookkeeping wants.
+                          sent: "@equals(coalesce(body('Run_Child_|_Send_Email')?['sent'], false), true)",
+                          emailId:
+                            "@coalesce(body('Run_Child_|_Send_Email')?['emailId'], '')",
+                          note: `@${nestedIf(
+                            [
+                              [
+                                "outputs('Compose_|_TestMode')",
+                                "'test mode: no email was created and none was sent'",
+                              ],
+                              [
+                                `not(equals(coalesce(${selected("emailAllowed")}, false), true))`,
+                                "'email suppressed for this client at selection: donotemail, donotbulkemail or no address'",
+                              ],
+                              [
+                                "equals(coalesce(body('Run_Child_|_Send_Email')?['sent'], false), true)",
+                                "''",
+                              ],
+                              [
+                                "equals(coalesce(body('Run_Child_|_Send_Email')?['skipped'], false), true)",
+                                "coalesce(body('Run_Child_|_Send_Email')?['skipReason'], 'the branded-email child skipped the send')",
+                              ],
+                              [
+                                "empty(coalesce(body('Run_Child_|_Send_Email')?['emailId'], ''))",
+                                "'the branded-email child did not answer - see this run in the run history'",
+                              ],
+                            ],
+                            `'the email was created but not sent, because ${SEND_EMAIL_VARIABLE} is off in this environment'`,
+                          )}`,
+                        },
+                      },
+
+                      "Append_to_array_variable_|_Touch": {
+                        runAfter: { "Compose_|_Email_Result": ["Succeeded"] },
                         type: "AppendToArrayVariable",
                         inputs: {
                           name: "varTouches",
@@ -1390,22 +1922,35 @@ export function buildBadDebtRecoveryTouchesFlow() {
                             // run's history and the report with it.
                             documentBytes:
                               "@length(coalesce(outputs('Compose_|_Document')?['base64'], ''))",
+                            // What the email channel actually did for this
+                            // client, carried on the row rather than counted
+                            // at the end: a client the run resolved but did
+                            // not reach is a silent client, and the same rule
+                            // the held rows follow applies here — never
+                            // silent without a reason attached.
+                            emailSent: "@outputs('Compose_|_Email_Result')?['sent']",
+                            emailNote: "@outputs('Compose_|_Email_Result')?['note']",
+                            emailId: "@outputs('Compose_|_Email_Result')?['emailId']",
                           },
                         },
                       },
 
-                      // THE SEAM #102/#103 REPLACE. Bookkeeping records a touch
-                      // that happened; this slice performs no send, so both
-                      // outcomes are literally false and no counter can move.
-                      // Left as data rather than a condition on test mode so
-                      // that flipping riivo_ReminderTestMode off before the
-                      // send slices land still advances nothing.
+                      // THE SEAM, now half filled in. Bookkeeping records a
+                      // touch that HAPPENED, so this composes what each
+                      // channel actually achieved rather than what was
+                      // attempted: a suppressed recipient, a skipped send and
+                      // a draft left by the org switch all read as false here
+                      // and advance no counter. #103 replaces the whatsApp
+                      // half the same way.
                       "Compose_|_Send_Outcome": {
                         runAfter: {
                           "Append_to_array_variable_|_Touch": ["Succeeded"],
                         },
                         type: "Compose",
-                        inputs: { email: false, whatsApp: false },
+                        inputs: {
+                          email: "@outputs('Compose_|_Email_Result')?['sent']",
+                          whatsApp: false,
+                        },
                       },
                       "Compose_|_Touch_Sent": {
                         runAfter: { "Compose_|_Send_Outcome": ["Succeeded"] },
@@ -1479,13 +2024,31 @@ export function buildBadDebtRecoveryTouchesFlow() {
           // written before the loop because the baseline must not depend on the
           // loop finishing; resolved and held can only be known after it, so
           // they arrive as a patch and stay null on a run that never got here.
-          "Update_|_Run_Record": {
+          // Counted from the touch rows rather than tallied in a variable
+          // inside the loop: a counter incremented per iteration would be one
+          // more piece of cross-iteration state resting on the sequential-loop
+          // assumption, and this asks the same question of data that is
+          // already there.
+          "Filter_|_Emails_Sent": {
             runAfter: { "Apply_to_each_|_Selected": ["Succeeded"] },
+            type: "Query",
+            inputs: {
+              from: "@variables('varTouches')",
+              where: "@equals(item()['emailSent'], true)",
+            },
+          },
+
+          "Update_|_Run_Record": {
+            runAfter: { "Filter_|_Emails_Sent": ["Succeeded"] },
             ...dataverse("UpdateRecord", {
               entityName: RUN_TABLE_SET,
               recordId: `@outputs('Create_|_Run_Record')?['body/${RUN_TABLE_ID}']`,
               "item/riivo_resolvedcount": "@length(variables('varTouches'))",
               "item/riivo_heldcount": "@length(variables('varHeld'))",
+              // Resolved says ready; this says the mail system took it. The
+              // gap between the two is the campaign's actual reach, and it is
+              // the number this table exists to make readable run over run.
+              "item/riivo_emailsentcount": "@length(body('Filter_|_Emails_Sent'))",
             }),
           },
 
@@ -1507,6 +2070,16 @@ export function buildBadDebtRecoveryTouchesFlow() {
               volumeThresholdPercent:
                 "@outputs('Compose_|_Volume_Threshold_Percent')",
               tripwireVerdict: "@outputs('Compose_|_Tripwire_Verdict')",
+              // The canary's whole state, in the report, because a run that
+              // spoke to three people and a run where three people was the
+              // whole book are indistinguishable from the counts alone.
+              canaryClients: "@length(outputs('Compose_|_Canary_Ids'))",
+              canaryAlertStatus: "@outputs('Compose_|_Canary_Alert_Status')",
+              // Whether the org switch was even on. Without this line a
+              // rehearsal that correctly produced drafts reads exactly like
+              // one that silently failed to send.
+              emailSendingEnabled: `@parameters('${SEND_EMAIL_PARAM}')`,
+              emailsSent: "@length(body('Filter_|_Emails_Sent'))",
               // Resolved rows are what #102/#103 will send — each now carries
               // a minted link and a rendered PDF, so "resolved" means ready,
               // not merely eligible. Held rows are clients this run
