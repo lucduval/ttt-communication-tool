@@ -1,10 +1,46 @@
 /**
- * `Invoice - Scheduled - Send Bad Debt Recovery Touches` — issues #98–#102.
+ * `Invoice - Scheduled - Send Bad Debt Recovery Touches` — issues #98–#103.
  *
  * The selection half of the bad-debt cadence, the campaign key that says WHICH
  * message each selected client is due, the two inputs that message needs, the
- * one brake that looks at the run as a whole — and, from #102, the first
- * channel that actually speaks: email.
+ * one brake that looks at the run as a whole, and both channels that speak:
+ * email from #102, WhatsApp from #103.
+ *
+ * #103 turns on WhatsApp, which is the channel the 24 approved templates were
+ * written for and the one the campaign key has been resolving a name for since
+ * #99. The send is lifted from the proven cadence flow c430ace5: upload the
+ * invoice PDF to Meta's media endpoint, take the media id as the template's
+ * document header, build body and button components, POST the template, and
+ * log the result to `riivo_whatsappcommunicationses`.
+ *
+ * Four things were read off the deployed org rather than assumed, and three of
+ * them changed the build:
+ *
+ *  - THE BUTTON TAKES THE BARE TOKEN. Meta stores the approved URL prefix and
+ *    rebuilds prefix + suffix, so a full URL yields a link to a link. #100
+ *    published both forms from one compose for exactly this; the email reads
+ *    `url`, this reads `token`, and nothing here builds a URL at all.
+ *  - THE TWO TEMPLATE FAMILIES TAKE DIFFERENT BODY PARAMETERS. The 24 campaign
+ *    templates are name + amount; the D12 fallback
+ *    `ttt_invoice_reminder_paylink_v2` is name + invoice number + amount. #99
+ *    could not have known, and sending two parameters to a three-parameter
+ *    template is a 400 — so every client who ever reached touch 5 would have
+ *    gone silent, months after the code that caused it shipped.
+ *  - THE MULTIPART BODY MUST NOT BE INTERPOLATED. `@base64ToBinary(x)` uploads
+ *    the PDF; `@{base64ToBinary(x)}` uploads its base64 TEXT, and Meta accepts
+ *    both. `[TEST] WhatsApp Invoice - Buggy vs Fixed PDF Upload` is still
+ *    deployed in dev as the record of someone finding that the hard way.
+ *  - PARAMETERS ARE SANITISED AND THEN CHECKED. Meta refuses a parameter
+ *    carrying a newline, a tab or four consecutive spaces, with a 400 rather
+ *    than a visibly broken message.
+ *
+ * AND ONE THING THAT IS NOT A CODE PROBLEM AT ALL: there is ONE TTT WhatsApp
+ * number, no sandbox of it, and no `riivo_SendEmail` equivalent to hold a
+ * message back. Dev and prod post to the same Meta phone number id, so a run
+ * in dev sends a real message from the live business number to a real handset.
+ * Test mode and the canary list are the whole of the safety envelope — which
+ * is why #103's rehearsal is canary-only and why the canary list matters more
+ * here than it did for email.
  *
  * #102 turns on the email channel and adds the mechanism that makes turning it
  * on survivable. Two halves:
@@ -61,10 +97,11 @@
  * #99 added two halves of one mechanism. `riivo_campaignsendcount` chooses the
  * template, and the touch increments it, so template resolution and touch
  * bookkeeping cannot be built apart. Both are built here; the bookkeeping
- * WRITE is gated on a send having succeeded, and this slice sends nothing, so
- * the counter cannot advance yet even if someone flips test mode off early.
- * `Compose_|_Send_Outcome` was the seam; #102 fills in its email half and
- * leaves `whatsApp: false` for #103.
+ * WRITE is gated on a send having succeeded. `Compose_|_Send_Outcome` was the
+ * seam; #102 filled in its email half and #103 the other. It is still an OR,
+ * which is the campaign's rule rather than an accident of the seam: a client
+ * reached on either channel has had their touch, because counting it twice
+ * would spend two rungs of a five-rung ladder in a single day.
  *
  * WHY THIS IS AUTHORED AS CODE RATHER THAN CLICKED TOGETHER
  * The flow is unattended by decision (D5), so none of the comms tool's human
@@ -200,6 +237,92 @@ const SEND_EMAIL_VARIABLE = "riivo_SendEmail";
 const SEND_EMAIL_PARAM = `Send Email (${SEND_EMAIL_VARIABLE})`;
 
 /**
+ * The Meta WhatsApp Cloud API contract, all three values read from
+ * `environmentvariabledefinitions` under the exact display names the proven
+ * cadence flow c430ace5 and the house child 5c025055 already bind to.
+ *
+ * `riivo_varMetaAccessToken` is a live bearer token held as a plaintext
+ * default on its environment variable — the same hazard as
+ * `riivo_PaymentLink_FunctionKey`, and the same treatment: EMPTY defaults
+ * here, so no secret reaches this file or any solution export of the flow.
+ *
+ * ONE NUMBER, NOT TWO. Dev's `riivo_varMetaURI` and prod's name the same Meta
+ * phone number id (1126852847178432), because there is one TTT WhatsApp
+ * Business number and Meta has no sandbox of it. So a WhatsApp send from the
+ * dev org is a REAL message from the live business number to a real handset.
+ * There is no `riivo_SendEmail` equivalent for WhatsApp — no draft mode, no
+ * redirect, nothing between a run and the client's phone but test mode and the
+ * canary list. That asymmetry is the single most important thing to know
+ * before switching this on, and it is why #103's rehearsal is canary-only.
+ */
+const META_SEND_URI_VARIABLE = "riivo_varMetaURI";
+const META_UPLOAD_URI_VARIABLE = "riivo_varMetaUploadURI";
+const META_TOKEN_VARIABLE = "riivo_varMetaAccessToken";
+const META_SEND_PARAM = `varMetaURI (${META_SEND_URI_VARIABLE})`;
+const META_UPLOAD_PARAM = `varMetaUploadURI (${META_UPLOAD_URI_VARIABLE})`;
+const META_TOKEN_PARAM = `varMetaAccessToken (${META_TOKEN_VARIABLE})`;
+
+/**
+ * `WhatsApp - Child - Sign and Post Outbound Template Send to Bot Webhook`
+ * (`5d353829`, on), called by both working references after every template
+ * send — c430ace5 as `Run_Child_|_Wa_Notify`, and the house invoice child
+ * 5c025055 as `Notify_Tina_Send_WhatsApp_Message`.
+ *
+ * It HMAC-signs the send and posts it to the conversational bot, which is how
+ * an inbound reply is threaded to the outbound template that prompted it
+ * rather than landing as a fresh conversation. That matters more here than
+ * anywhere else: every one of the 24 approved templates ends by inviting a
+ * reply ("reply here if you have any questions"), and a dunning message whose
+ * answer goes nowhere is worse than no message.
+ *
+ * Called last and NEVER allowed to fail the touch: by the time it runs the
+ * WhatsApp message has already been delivered, so failing here would roll back
+ * nothing and cost the client behind them their turn. The child says the same
+ * thing in its own comments, and dedupes on `sender_message_id`.
+ *
+ * PROMOTION HAZARD: the fourth workflowid in this file that cannot travel to
+ * prod unchanged.
+ */
+export const NOTIFY_CHILD_FLOW_ID = "5d353829-ae5d-f111-a826-002248a29481";
+
+/**
+ * The language every bad-debt template is approved in. Read off the WABA on
+ * 2026-09-11: all 24 campaign templates and the D12 fallback are `en`, and
+ * Meta matches a send on name + language, so a mismatch is a rejected send
+ * rather than a message in the wrong language.
+ */
+const TEMPLATE_LANGUAGE = "en";
+
+/**
+ * The Pay-now button's URL prefix, as Meta stores it on the approved
+ * templates. Published here for ONE reason: nothing in this flow may build it.
+ *
+ * Meta bakes the prefix into the template at approval time and rebuilds
+ * prefix + suffix itself, so the send supplies only the bare token. Passing a
+ * full URL yields `https://…/p/https://…/p/token` and a dead button — the
+ * single most likely thing to get wrong in this slice, which is why the button
+ * reads `Compose_|_Payment_Link`'s `token` and a test asserts the `url` half
+ * never reaches the WhatsApp path.
+ *
+ * IT IS ALSO A PROMOTION HAZARD OF A KIND CONFIGURATION CANNOT FIX. The prefix
+ * is fixed per approved template, while `riivo_PaymentLink_BaseUrl` is per
+ * environment, so the two can disagree and today they do:
+ *
+ *   - the 24 campaign templates carry `payment-link-ttt.azurewebsites.net/p/`
+ *   - the D12 fallback `ttt_invoice_reminder_paylink_v2` carries
+ *     `ttt-payment-link-huhhgzewb4hkdqdt.southafricanorth-01…/p/`, which IS
+ *     dev's `riivo_PaymentLink_BaseUrl`
+ *
+ * Verified on 2026-09-11: a token minted in dev resolves on the dev host and
+ * answers "Payment link not found" on the other. So in DEV a campaign-key
+ * WhatsApp button cannot open its invoice however correct this flow is, and in
+ * PROD the D12 button will not either until one of the two is re-approved.
+ * `--check` in the deploy script compares them and says so.
+ */
+export const APPROVED_BUTTON_URL_PREFIX =
+  "https://payment-link-ttt.azurewebsites.net/p/";
+
+/**
  * The canary list: a JSON array of contact ids that, when non-empty, is the
  * only population this run may speak to.
  *
@@ -238,6 +361,24 @@ const ONGOING_TEMPLATE_PARAM = `WhatsApp Reminder Template - With Pay-Now Button
 
 /** Invoice statuscode meaning the client has actually paid. */
 const PAID_STATUSCODE = 958140003;
+
+/**
+ * `riivo_whatsappcommunications` option-set values, read from the entity's
+ * metadata rather than copied from a flow that might itself be wrong.
+ *
+ * A FAILED send is logged too, which is a departure from both reference
+ * flows — they write a row only on success. The reason is this campaign's own
+ * rule, that a client the run went silent on always carries the reason why:
+ * the run report says so for 28 days and then the run history expires, while
+ * this row is the only durable place a consultant looking at the client's
+ * timeline can see that a WhatsApp touch was attempted and what Meta said. One
+ * row per attempt, with the status naming which happened, rather than two
+ * create actions.
+ */
+const WA_STATUS = { SENT: 463630001, FAILED: 463630003 } as const;
+const WA_DIRECTION_OUTBOUND = 463630001;
+/** `riivo_failurereason` is a 1000-character string; Meta's errors are not. */
+const WA_FAILURE_REASON_MAX = 900;
 
 /**
  * `Invoice - Child - Generate PDF`, on in dev, read 2026-09-11.
@@ -465,6 +606,107 @@ const ladderExpression = (
     ),
     copyExpression(EMAIL_ONGOING[field], invoice, amount),
   );
+
+/**
+ * What Meta refuses inside a template parameter, and how it is removed (#103).
+ *
+ * A template parameter may not contain a newline, a tab, or four consecutive
+ * spaces. Nothing upstream sanitises for this, and the failure mode is the
+ * quiet kind: Meta rejects the send with a 400 rather than producing an
+ * obviously broken message, so one client goes silent for a reason that never
+ * appears near the name that caused it.
+ *
+ * The characters are written as `decodeUriComponent('%0A')` rather than as
+ * literals because a raw newline inside a WDL string literal survives neither
+ * this file nor the JSON round-trip to Dataverse legibly, and a control
+ * character nobody can see in a diff is exactly the wrong thing to depend on.
+ *
+ * Four spaces collapse to one, THREE TIMES: `replace` is single-pass and
+ * non-overlapping, so one pass turns 16 spaces into 4 — still illegal. Three
+ * passes cover a run of 64, well past anything a contact name can hold; past
+ * that the runtime gate below holds the client instead of sending something
+ * Meta will bounce.
+ */
+const META_FORBIDDEN = {
+  NEWLINE: "decodeUriComponent('%0A')",
+  CARRIAGE_RETURN: "decodeUriComponent('%0D')",
+  TAB: "decodeUriComponent('%09')",
+  FOUR_SPACES: "'    '",
+} as const;
+
+const SPACE_COLLAPSE_PASSES = 3;
+
+/** A value made safe to hand Meta as a template parameter. */
+const metaParameter = (value: string) => {
+  let expression = value;
+  for (const character of [
+    META_FORBIDDEN.NEWLINE,
+    META_FORBIDDEN.CARRIAGE_RETURN,
+    META_FORBIDDEN.TAB,
+  ]) {
+    expression = `replace(${expression}, ${character}, ' ')`;
+  }
+  for (let pass = 0; pass < SPACE_COLLAPSE_PASSES; pass++) {
+    expression = `replace(${expression}, ${META_FORBIDDEN.FOUR_SPACES}, ' ')`;
+  }
+  return `trim(${expression})`;
+};
+
+/**
+ * A filename safe to put inside a `Content-Disposition` header.
+ *
+ * A double quote or a backslash ends the quoted field early, which is the
+ * multipart equivalent of the hand-built JSON #102 refused to write — and, as
+ * there, the input is a filename this flow does not generate. Both are named
+ * by code point (`%22`, `%5C`) so that neither this file nor the deployed JSON
+ * depends on an escape whose meaning differs between the two.
+ */
+const fileNameExpression = (value: string) => {
+  let expression = value;
+  for (const character of [
+    "decodeUriComponent('%22')",
+    "decodeUriComponent('%5C')",
+    META_FORBIDDEN.NEWLINE,
+    META_FORBIDDEN.CARRIAGE_RETURN,
+    META_FORBIDDEN.TAB,
+  ]) {
+    expression = `replace(${expression}, ${character}, '')`;
+  }
+  return `trim(${expression})`;
+};
+
+/** Asserted rather than assumed: what a clean parameter must not contain. */
+const metaParameterClean = (value: string) =>
+  `and(not(contains(${value}, ${META_FORBIDDEN.NEWLINE})), not(contains(${value}, ${META_FORBIDDEN.CARRIAGE_RETURN})), not(contains(${value}, ${META_FORBIDDEN.TAB})), not(contains(${value}, ${META_FORBIDDEN.FOUR_SPACES})), not(empty(${value})))`;
+
+/**
+ * The body parameters each template family takes, read off the WABA on
+ * 2026-09-11 rather than assumed from the issue.
+ *
+ * THE TWO FAMILIES DISAGREE, and #99 could not have known: the 24 campaign
+ * templates are `Hi {{1}}, … Amount due: {{2}}` — name and amount — while the
+ * D12 fallback `ttt_invoice_reminder_paylink_v2` is `Hi {{1}}, … invoice
+ * *{{2}}* … balance of *{{3}}*` and takes the invoice number in the middle.
+ * Sending two parameters to a three-parameter template is a 400 from Meta, so
+ * a client reaching touch 5 would have gone silent the first time the ladder
+ * ran out — months after the code that caused it shipped.
+ *
+ * The amount carries its own "R" because the templates do not: `Amount due:
+ * {{2}}` renders exactly what is passed.
+ */
+const CAMPAIGN_BODY_PARAMETERS = ["Wa_Name", "Wa_Amount"] as const;
+const ONGOING_BODY_PARAMETERS = [
+  "Wa_Name",
+  "Wa_Invoice",
+  "Wa_Amount",
+] as const;
+
+/** One `{ type: "text", text: … }` per compose, in template order. */
+const textParameters = (composes: readonly string[]) =>
+  composes.map((compose) => ({
+    type: "text",
+    text: `@{outputs('Compose_|_${compose}')}`,
+  }));
 
 const DATAVERSE = {
   connectionName: "shared_commondataserviceforapps",
@@ -786,6 +1028,37 @@ export function buildBadDebtRecoveryTouchesFlow() {
                 "The org-wide send switch the branded-email child obeys: with it off, every caller's mail is created and saved as a draft instead of being sent. Read here only so the run report can say which happened - a rehearsal that produced drafts otherwise looks exactly like one that failed. Nothing in this flow branches on it; the child's own 'sent' answer is what gates the touch bookkeeping, so an unsent draft advances no counter either way.",
             },
           },
+          // Empty defaults on all three, for the same reason the payment-link
+          // parameters carry them: the values belong to the environment, and
+          // one of them is a live bearer token that must never be written into
+          // a flow definition or a solution export.
+          [META_SEND_PARAM]: {
+            defaultValue: "",
+            type: "String",
+            metadata: {
+              schemaName: META_SEND_URI_VARIABLE,
+              description:
+                "Meta Cloud API messages endpoint for TTT's WhatsApp Business number. There is ONE such number and Meta offers no sandbox of it, so this value is the same in dev and prod: a run that sends here sends a real message from the live business number. Test mode and riivo_BadDebtCanaryContactIds are the only things between a run and a client's handset - there is no draft mode for WhatsApp the way riivo_SendEmail gives one for email.",
+            },
+          },
+          [META_UPLOAD_PARAM]: {
+            defaultValue: "",
+            type: "String",
+            metadata: {
+              schemaName: META_UPLOAD_URI_VARIABLE,
+              description:
+                "Meta Cloud API media endpoint. The invoice PDF is uploaded here per recipient and the returned media id becomes the template's document header, which is how the client receives the invoice itself rather than a link to it.",
+            },
+          },
+          [META_TOKEN_PARAM]: {
+            defaultValue: "",
+            type: "String",
+            metadata: {
+              schemaName: META_TOKEN_VARIABLE,
+              description:
+                "Bearer token for both Meta calls. Held as a plaintext default on its environment variable, which is worth reviewing separately alongside riivo_PaymentLink_FunctionKey; it is never written into a flow definition.",
+            },
+          },
           [ENVIRONMENT_ADDRESS_PARAM]: {
             defaultValue: "",
             type: "String",
@@ -1051,6 +1324,12 @@ export function buildBadDebtRecoveryTouchesFlow() {
                             // GetItem to greet somebody by name. 'there' is
                             // the same fallback c430ace5 uses.
                             firstName: `@coalesce(${contact("firstname")}, 'there')`,
+                            // Same reasoning as firstName, and the same read:
+                            // the WhatsApp send needs the number this consent
+                            // test already looked at, so carrying it costs
+                            // nothing and a second GetItem per client in the
+                            // send loop would cost one call each (#103).
+                            mobile: `@coalesce(${contact("icon_formattedmobilenumber")}, '')`,
                           },
                         },
                       },
@@ -1408,11 +1687,32 @@ export function buildBadDebtRecoveryTouchesFlow() {
               variables: [{ name: "varPdfDone", type: "boolean", value: true }],
             },
           },
+          // #103's two Meta calls, each its own Until and therefore its own
+          // flag. They live here for the same platform reason as the other
+          // two: Power Automate initialises variables at the top level only.
+          "Initialize_variable_|_Wa_Upload_Done": {
+            runAfter: { "Initialize_variable_|_Pdf_Done": ["Succeeded"] },
+            type: "InitializeVariable",
+            inputs: {
+              variables: [
+                { name: "varWaUploadDone", type: "boolean", value: true },
+              ],
+            },
+          },
+          "Initialize_variable_|_Wa_Send_Done": {
+            runAfter: { "Initialize_variable_|_Wa_Upload_Done": ["Succeeded"] },
+            type: "InitializeVariable",
+            inputs: {
+              variables: [
+                { name: "varWaSendDone", type: "boolean", value: true },
+              ],
+            },
+          },
 
           // ---- campaign key -> template, and the touch it records (#99) ----
           "Apply_to_each_|_Selected": {
             foreach: "@variables('varSelected')",
-            runAfter: { "Initialize_variable_|_Pdf_Done": ["Succeeded"] },
+            runAfter: { "Initialize_variable_|_Wa_Send_Done": ["Succeeded"] },
             type: "Foreach",
             runtimeConfiguration: capped,
             actions: {
@@ -1896,8 +2196,536 @@ export function buildBadDebtRecoveryTouchesFlow() {
                         },
                       },
 
-                      "Append_to_array_variable_|_Touch": {
+                      // ---- #103: the WhatsApp channel ----
+                      // Sequential after the email rather than beside it: two
+                      // concurrent sends to the same client would interleave
+                      // their failures in the run history, and nothing here is
+                      // slow enough to be worth that.
+                      //
+                      // Every value Meta receives is sanitised first, because a
+                      // parameter carrying a newline, a tab or four consecutive
+                      // spaces is refused with a 400 — a silent client, not an
+                      // obviously broken message.
+                      "Compose_|_Wa_To": {
                         runAfter: { "Compose_|_Email_Result": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: `@trim(coalesce(${selected("mobile")}, ''))`,
+                      },
+                      "Compose_|_Wa_Name": {
+                        runAfter: { "Compose_|_Wa_To": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: `@${metaParameter(
+                          `coalesce(${selected("firstName")}, 'there')`,
+                        )}`,
+                      },
+                      // Invoice numbers in this org carry trailing spaces
+                      // ("luc duval - WATEST83695332 "), which trim() removes.
+                      // Only the D12 template interpolates one, but it is
+                      // cleaned unconditionally so the two paths cannot differ.
+                      "Compose_|_Wa_Invoice": {
+                        runAfter: { "Compose_|_Wa_Name": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: `@${metaParameter(
+                          `coalesce(${selected("invoiceNumber")}, '')`,
+                        )}`,
+                      },
+                      // The templates render "Amount due: {{2}}" with no
+                      // currency of their own, so the "R" travels in the
+                      // parameter — the same shape c430ace5 sends.
+                      "Compose_|_Wa_Amount": {
+                        runAfter: { "Compose_|_Wa_Invoice": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: `@${metaParameter(
+                          "concat('R ', outputs('Compose_|_Amount'))",
+                        )}`,
+                      },
+
+                      // The filename travels inside a Content-Disposition
+                      // header, where a quote or a backslash ends the field
+                      // early — the multipart equivalent of the hand-built
+                      // JSON #102 refused to write. Both are removed by code
+                      // point rather than as literals, so nothing in this file
+                      // or the deployed JSON depends on a character a diff
+                      // cannot show.
+                      "Compose_|_Wa_File_Clean": {
+                        runAfter: { "Compose_|_Wa_Amount": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: `@${fileNameExpression(
+                          "coalesce(outputs('Compose_|_Document')?['fileName'], '')",
+                        )}`,
+                      },
+                      "Compose_|_Wa_File_Name": {
+                        runAfter: { "Compose_|_Wa_File_Clean": ["Succeeded"] },
+                        type: "Compose",
+                        inputs:
+                          "@if(empty(outputs('Compose_|_Wa_File_Clean')), 'invoice.pdf', outputs('Compose_|_Wa_File_Clean'))",
+                      },
+
+                      // The two shapes, composed separately and chosen
+                      // between — WDL cannot build an object inside an
+                      // expression, and this is how both reference flows do it.
+                      "Compose_|_Wa_Params_Campaign": {
+                        runAfter: { "Compose_|_Wa_File_Name": ["Succeeded"] },
+                        type: "Compose",
+                        inputs: textParameters(CAMPAIGN_BODY_PARAMETERS),
+                      },
+                      "Compose_|_Wa_Params_Ongoing": {
+                        runAfter: {
+                          "Compose_|_Wa_Params_Campaign": ["Succeeded"],
+                        },
+                        type: "Compose",
+                        inputs: textParameters(ONGOING_BODY_PARAMETERS),
+                      },
+
+                      // Asserted, not assumed — the issue's own instruction.
+                      // If sanitisation ever fails to produce a clean value,
+                      // this holds the client instead of handing Meta a send
+                      // it will refuse, and the report names them.
+                      "Compose_|_Wa_Params_Clean": {
+                        runAfter: {
+                          "Compose_|_Wa_Params_Ongoing": ["Succeeded"],
+                        },
+                        type: "Compose",
+                        inputs: `@and(${metaParameterClean(
+                          "outputs('Compose_|_Wa_Name')",
+                        )}, ${metaParameterClean(
+                          "outputs('Compose_|_Wa_Amount')",
+                        )}, if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), ${metaParameterClean(
+                          "outputs('Compose_|_Wa_Invoice')",
+                        )}, true))`,
+                      },
+
+                      "Condition_|_Send_WhatsApp": {
+                        runAfter: { "Compose_|_Wa_Params_Clean": ["Succeeded"] },
+                        type: "If",
+                        expression: {
+                          and: [
+                            { equals: ["@outputs('Compose_|_TestMode')", false] },
+                            {
+                              equals: [
+                                `@coalesce(${selected("whatsAppAllowed")}, false)`,
+                                true,
+                              ],
+                            },
+                            {
+                              not: { equals: ["@outputs('Compose_|_Wa_To')", ""] },
+                            },
+                            {
+                              equals: [
+                                "@outputs('Compose_|_Wa_Params_Clean')",
+                                true,
+                              ],
+                            },
+                          ],
+                        },
+                        actions: {
+                          // The scope exists for the same reason
+                          // Scope_|_Prepare_Documents does: its failure is
+                          // handled by the actions AFTER it, so one client's
+                          // refused send cannot end a sequential loop for the
+                          // clients behind them.
+                          "Scope_|_Send_WhatsApp": {
+                            runAfter: {},
+                            type: "Scope",
+                            actions: {
+                              ...untilNotThrottled({
+                                slug: "Wa_Upload",
+                                variable: "varWaUploadDone",
+                                call: "HTTP_|_Wa_Upload_Media",
+                                runAfter: {},
+                                callAction: {
+                                  type: "Http",
+                                  inputs: {
+                                    method: "POST",
+                                    uri: `@parameters('${META_UPLOAD_PARAM}')`,
+                                    headers: {
+                                      Authorization: `bearer @{parameters('${META_TOKEN_PARAM}')}`,
+                                    },
+                                    body: {
+                                      "$content-type": "multipart/form-data",
+                                      $multipart: [
+                                        {
+                                          headers: {
+                                            "Content-Disposition":
+                                              'form-data; name="messaging_product"',
+                                          },
+                                          body: "whatsapp",
+                                        },
+                                        {
+                                          headers: {
+                                            "Content-Disposition":
+                                              'form-data; name="type"',
+                                          },
+                                          body: "document",
+                                        },
+                                        {
+                                          headers: {
+                                            "Content-Disposition":
+                                              'form-data; name="file"; filename="@{outputs(\'Compose_|_Wa_File_Name\')}"',
+                                            "Content-Type": "application/pdf",
+                                          },
+                                          // NO BRACES. `@base64ToBinary(x)`
+                                          // passes the decoded bytes;
+                                          // `@{base64ToBinary(x)}` interpolates
+                                          // them back into a string, so Meta
+                                          // accepts the upload, returns a media
+                                          // id, and the client receives a PDF
+                                          // whose contents are base64 text.
+                                          // That exact pair is still deployed
+                                          // in dev as `[TEST] WhatsApp Invoice
+                                          // - Buggy vs Fixed PDF Upload`; this
+                                          // is the FIXED form, and a test pins
+                                          // it because nothing else would
+                                          // notice.
+                                          body: "@base64ToBinary(outputs('Compose_|_Document')?['base64'])",
+                                        },
+                                      ],
+                                    },
+                                    // The Until owns the retries, so the
+                                    // platform's own policy must not also
+                                    // retry on a schedule of its own.
+                                    retryPolicy: { type: "none" },
+                                  },
+                                },
+                              }),
+
+                              // The one Parse_JSON in this path, and it earns
+                              // its place by FAILING: `required: ["id"]` means
+                              // an upload that answered without a media id
+                              // ends the scope here rather than sending a
+                              // template whose document header points at
+                              // nothing. The send response is read straight off
+                              // the HTTP action instead, null-safely, because
+                              // there the status code is the verdict.
+                              "Parse_JSON_|_Wa_Media": {
+                                runAfter: { "Until_|_Wa_Upload": ["Succeeded"] },
+                                type: "ParseJson",
+                                inputs: {
+                                  content: "@body('HTTP_|_Wa_Upload_Media')",
+                                  schema: {
+                                    type: "object",
+                                    properties: { id: { type: "string" } },
+                                    required: ["id"],
+                                  },
+                                },
+                              },
+
+                              "Compose_|_Wa_Header": {
+                                runAfter: {
+                                  "Parse_JSON_|_Wa_Media": ["Succeeded"],
+                                },
+                                type: "Compose",
+                                inputs: {
+                                  type: "header",
+                                  parameters: [
+                                    {
+                                      type: "document",
+                                      document: {
+                                        id: "@{body('Parse_JSON_|_Wa_Media')?['id']}",
+                                        filename:
+                                          "@{outputs('Compose_|_Wa_File_Name')}",
+                                      },
+                                    },
+                                  ],
+                                },
+                              },
+                              "Compose_|_Wa_Body": {
+                                runAfter: { "Compose_|_Wa_Header": ["Succeeded"] },
+                                type: "Compose",
+                                inputs: {
+                                  type: "body",
+                                  parameters: `@if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), outputs('Compose_|_Wa_Params_Ongoing'), outputs('Compose_|_Wa_Params_Campaign'))`,
+                                },
+                              },
+                              // THE BARE TOKEN, never the URL. Meta stores the
+                              // approved prefix and rebuilds prefix + suffix,
+                              // so a full URL produces a link to a link. This
+                              // is why #100 published both forms from one
+                              // compose: the email takes `url`, and this is the
+                              // only reader of `token`.
+                              "Compose_|_Wa_Button": {
+                                runAfter: { "Compose_|_Wa_Body": ["Succeeded"] },
+                                type: "Compose",
+                                inputs: {
+                                  type: "button",
+                                  sub_type: "url",
+                                  index: "0",
+                                  parameters: [
+                                    {
+                                      type: "text",
+                                      text: "@{outputs('Compose_|_Payment_Link')?['token']}",
+                                    },
+                                  ],
+                                },
+                              },
+                              // Always all three. c430ace5 drops the button for
+                              // its no-button template; every template this
+                              // flow can resolve — the 24 campaign ones and the
+                              // D12 fallback — carries a document header and a
+                              // URL button, read off the WABA on 2026-09-11.
+                              "Compose_|_Wa_Components": {
+                                runAfter: { "Compose_|_Wa_Button": ["Succeeded"] },
+                                type: "Compose",
+                                inputs:
+                                  "@createArray(outputs('Compose_|_Wa_Header'), outputs('Compose_|_Wa_Body'), outputs('Compose_|_Wa_Button'))",
+                              },
+
+                              ...untilNotThrottled({
+                                slug: "Wa_Send",
+                                variable: "varWaSendDone",
+                                call: "HTTP_|_Wa_Send_Template",
+                                runAfter: {
+                                  "Compose_|_Wa_Components": ["Succeeded"],
+                                },
+                                callAction: {
+                                  type: "Http",
+                                  inputs: {
+                                    method: "POST",
+                                    uri: `@parameters('${META_SEND_PARAM}')`,
+                                    headers: {
+                                      "Content-Type": "application/json",
+                                      Authorization: `bearer @{parameters('${META_TOKEN_PARAM}')}`,
+                                    },
+                                    body: {
+                                      messaging_product: "whatsapp",
+                                      recipient_type: "individual",
+                                      to: "@{outputs('Compose_|_Wa_To')}",
+                                      type: "template",
+                                      template: {
+                                        // The resolved campaign key itself, not
+                                        // a second resolution of it.
+                                        name: "@{outputs('Compose_|_Template_Name')}",
+                                        language: { code: TEMPLATE_LANGUAGE },
+                                        components:
+                                          "@outputs('Compose_|_Wa_Components')",
+                                      },
+                                    },
+                                    retryPolicy: { type: "none" },
+                                  },
+                                },
+                              }),
+                            },
+                          },
+
+                          "Filter_|_Wa_Failures": {
+                            runAfter: {
+                              "Scope_|_Send_WhatsApp": [
+                                "Succeeded",
+                                "Failed",
+                                "Skipped",
+                                "TimedOut",
+                              ],
+                            },
+                            type: "Query",
+                            inputs: {
+                              from: "@result('Scope_|_Send_WhatsApp')",
+                              where: "@not(equals(item()['status'], 'Succeeded'))",
+                            },
+                          },
+                          "Select_|_Wa_Failure_Names": {
+                            runAfter: { "Filter_|_Wa_Failures": ["Succeeded"] },
+                            type: "Select",
+                            inputs: {
+                              from: "@body('Filter_|_Wa_Failures')",
+                              select: "@item()['name']",
+                            },
+                          },
+                          // `?[0]` rather than first(): a skipped action has no
+                          // body at all, and index access stays null-safe where
+                          // first() on null does not.
+                          "Compose_|_Wa_Message_Id": {
+                            runAfter: {
+                              "Select_|_Wa_Failure_Names": ["Succeeded"],
+                            },
+                            type: "Compose",
+                            inputs:
+                              "@coalesce(outputs('HTTP_|_Wa_Send_Template')?['body']?['messages']?[0]?['id'], '')",
+                          },
+                          // Meta's own receipt is the verdict, exactly as the
+                          // email channel defers to the child's `sent`. A 429
+                          // retried to exhaustion, a refused template and a
+                          // rejected parameter all read false here and advance
+                          // no counter, so the client is simply selected again.
+                          "Compose_|_Wa_Sent": {
+                            runAfter: { "Compose_|_Wa_Message_Id": ["Succeeded"] },
+                            type: "Compose",
+                            inputs:
+                              "@and(equals(length(body('Filter_|_Wa_Failures')), 0), not(empty(outputs('Compose_|_Wa_Message_Id'))))",
+                          },
+                          // Ordered so the FIRST thing that went wrong is what
+                          // the reason names: an upload that failed makes every
+                          // action after it fail too, and "the send was skipped"
+                          // would send a reader to the wrong call.
+                          "Compose_|_Wa_Failure_Reason": {
+                            runAfter: { "Compose_|_Wa_Sent": ["Succeeded"] },
+                            type: "Compose",
+                            inputs: `@${nestedIf(
+                              [
+                                ["outputs('Compose_|_Wa_Sent')", "''"],
+                                [
+                                  "not(equals(coalesce(outputs('Compose_|_Wa_Upload_Status'), 0), 200))",
+                                  "concat('the invoice PDF could not be uploaded to Meta: the media endpoint answered ', string(coalesce(outputs('Compose_|_Wa_Upload_Status'), 'nothing')))",
+                                ],
+                                [
+                                  "not(equals(coalesce(outputs('Compose_|_Wa_Send_Status'), 0), 200))",
+                                  `concat('Meta refused the template send with ', string(coalesce(outputs('Compose_|_Wa_Send_Status'), 'nothing')), ': ', string(coalesce(outputs('HTTP_|_Wa_Send_Template')?['body']?['error']?['message'], 'no message')), ' (template ', outputs('Compose_|_Template_Name'), ')')`,
+                                ],
+                                [
+                                  "empty(outputs('Compose_|_Wa_Message_Id'))",
+                                  "'Meta accepted the send but returned no message id'",
+                                ],
+                              ],
+                              "concat('the WhatsApp send failed at ', join(body('Select_|_Wa_Failure_Names'), ', '))",
+                            )}`,
+                          },
+
+                          // ONE row per attempt, sent or failed, because the
+                          // run report expires with the run history and this is
+                          // the only durable place a consultant sees that a
+                          // touch was tried at all.
+                          "Create_|_Wa_Comm": {
+                            runAfter: {
+                              "Compose_|_Wa_Failure_Reason": ["Succeeded"],
+                            },
+                            ...dataverse("CreateRecord", {
+                              entityName: "riivo_whatsappcommunicationses",
+                              "item/subject": `@concat('Bad debt recovery touch ', string(outputs('Compose_|_Touch_Number')), ' via WhatsApp - ', outputs('Compose_|_Wa_Invoice'))`,
+                              "item/activitypointer_activity_parties": [
+                                {
+                                  participationtypemask: 2,
+                                  "partyid@odata.bind": `contacts(@{${selected(
+                                    "clientId",
+                                  )}})`,
+                                },
+                              ],
+                              "item/description": `@concat('Bad debt recovery touch ', string(outputs('Compose_|_Touch_Number')), ' (template ', outputs('Compose_|_Template_Name'), '), outstanding ', outputs('Compose_|_Wa_Amount'), ' on invoice ', outputs('Compose_|_Wa_Invoice'), '. The invoice PDF was attached as the template document header and a Pay-now button carried the payment token.')`,
+                              "item/riivo_messagedirection": WA_DIRECTION_OUTBOUND,
+                              "item/riivo_clickatellstatus": `@if(outputs('Compose_|_Wa_Sent'), ${WA_STATUS.SENT}, ${WA_STATUS.FAILED})`,
+                              "item/riivo_apimessageid":
+                                "@outputs('Compose_|_Wa_Message_Id')",
+                              // Meta's errors are not bounded; the column is.
+                              "item/riivo_failurereason": `@if(greater(length(outputs('Compose_|_Wa_Failure_Reason')), ${WA_FAILURE_REASON_MAX}), substring(outputs('Compose_|_Wa_Failure_Reason'), 0, ${WA_FAILURE_REASON_MAX}), outputs('Compose_|_Wa_Failure_Reason'))`,
+                              "item/riivo_to": "@outputs('Compose_|_Wa_To')",
+                              "item/riivo_timestamp": "@utcNow()",
+                              "item/regardingobjectid_new_invoices_riivo_whatsappcommunications@odata.bind": `new_invoiceses(@{${selected(
+                                "invoiceId",
+                              )}})`,
+                            }),
+                          },
+
+                          "Condition_|_Wa_Notify": {
+                            // Any status: a log row that could not be written
+                            // must not cost the client behind this one their
+                            // turn, and the message has already gone out.
+                            runAfter: {
+                              "Create_|_Wa_Comm": [
+                                "Succeeded",
+                                "Failed",
+                                "Skipped",
+                                "TimedOut",
+                              ],
+                            },
+                            type: "If",
+                            expression: {
+                              and: [
+                                { equals: ["@outputs('Compose_|_Wa_Sent')", true] },
+                              ],
+                            },
+                            actions: {
+                              "Run_Child_|_Wa_Notify": {
+                                runAfter: {},
+                                type: "Workflow",
+                                inputs: {
+                                  host: {
+                                    workflowReferenceName: NOTIFY_CHILD_FLOW_ID,
+                                  },
+                                  body: {
+                                    phone: "@outputs('Compose_|_Wa_To')",
+                                    template_name:
+                                      "@outputs('Compose_|_Template_Name')",
+                                    template_language: TEMPLATE_LANGUAGE,
+                                    // The body parameters as sent, so the bot
+                                    // renders the same message it is threading
+                                    // a reply to.
+                                    template_variables: `@string(if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), createArray(outputs('Compose_|_Wa_Name'), outputs('Compose_|_Wa_Invoice'), outputs('Compose_|_Wa_Amount')), createArray(outputs('Compose_|_Wa_Name'), outputs('Compose_|_Wa_Amount'))))`,
+                                    template_header_variable: "",
+                                    sender_message_id:
+                                      "@outputs('Compose_|_Wa_Message_Id')",
+                                    sent_at: "@utcNow()",
+                                    sender: "power_automate_bad_debt_recovery",
+                                  },
+                                },
+                              },
+                            },
+                            else: { actions: {} },
+                          },
+                          // Terminal and always Succeeded, so neither an
+                          // undeliverable notice nor a failed log row can fail
+                          // the branch — and the status still reaches the
+                          // report, which is where someone would ask why the
+                          // bot never heard about a message.
+                          "Compose_|_Wa_Notify_Status": {
+                            runAfter: {
+                              "Condition_|_Wa_Notify": [
+                                "Succeeded",
+                                "Failed",
+                                "Skipped",
+                                "TimedOut",
+                              ],
+                            },
+                            type: "Compose",
+                            inputs:
+                              "@coalesce(outputs('Run_Child_|_Wa_Notify')?['statusCode'], 0)",
+                          },
+                        },
+                        else: { actions: {} },
+                      },
+
+                      "Compose_|_Wa_Result": {
+                        runAfter: {
+                          "Condition_|_Send_WhatsApp": [
+                            "Succeeded",
+                            "Failed",
+                            "Skipped",
+                            "TimedOut",
+                          ],
+                        },
+                        type: "Compose",
+                        inputs: {
+                          attempted: `@and(equals(outputs('Compose_|_TestMode'), false), equals(coalesce(${selected("whatsAppAllowed")}, false), true), not(equals(outputs('Compose_|_Wa_To'), '')), equals(outputs('Compose_|_Wa_Params_Clean'), true))`,
+                          sent: "@equals(coalesce(outputs('Compose_|_Wa_Sent'), false), true)",
+                          messageId:
+                            "@coalesce(outputs('Compose_|_Wa_Message_Id'), '')",
+                          note: `@${nestedIf(
+                            [
+                              [
+                                "outputs('Compose_|_TestMode')",
+                                "'test mode: nothing was uploaded to Meta and no template was sent'",
+                              ],
+                              [
+                                `not(equals(coalesce(${selected("whatsAppAllowed")}, false), true))`,
+                                "'WhatsApp suppressed for this client at selection: not opted in via riivo_whatsappoptinout, or no mobile number'",
+                              ],
+                              [
+                                "equals(outputs('Compose_|_Wa_To'), '')",
+                                "'no mobile number on the contact at send time'",
+                              ],
+                              [
+                                "not(equals(outputs('Compose_|_Wa_Params_Clean'), true))",
+                                "'held: a template parameter still carried a newline, a tab or four consecutive spaces after sanitisation, which Meta refuses'",
+                              ],
+                              [
+                                "equals(coalesce(outputs('Compose_|_Wa_Sent'), false), true)",
+                                "''",
+                              ],
+                            ],
+                            "coalesce(outputs('Compose_|_Wa_Failure_Reason'), 'the WhatsApp send did not answer - see this run in the run history')",
+                          )}`,
+                        },
+                      },
+
+                      "Append_to_array_variable_|_Touch": {
+                        runAfter: { "Compose_|_Wa_Result": ["Succeeded"] },
                         type: "AppendToArrayVariable",
                         inputs: {
                           name: "varTouches",
@@ -1931,17 +2759,30 @@ export function buildBadDebtRecoveryTouchesFlow() {
                             emailSent: "@outputs('Compose_|_Email_Result')?['sent']",
                             emailNote: "@outputs('Compose_|_Email_Result')?['note']",
                             emailId: "@outputs('Compose_|_Email_Result')?['emailId']",
+                            // The same three questions of the other channel.
+                            // Both are on the row rather than counted at the
+                            // end, because "who did we reach, and how" is
+                            // per-client and the counts cannot answer it.
+                            whatsAppSent: "@outputs('Compose_|_Wa_Result')?['sent']",
+                            whatsAppNote: "@outputs('Compose_|_Wa_Result')?['note']",
+                            whatsAppMessageId:
+                              "@outputs('Compose_|_Wa_Result')?['messageId']",
                           },
                         },
                       },
 
-                      // THE SEAM, now half filled in. Bookkeeping records a
-                      // touch that HAPPENED, so this composes what each
-                      // channel actually achieved rather than what was
-                      // attempted: a suppressed recipient, a skipped send and
-                      // a draft left by the org switch all read as false here
-                      // and advance no counter. #103 replaces the whatsApp
-                      // half the same way.
+                      // THE SEAM, filled in on both sides as of #103.
+                      // Bookkeeping records a touch that HAPPENED, so this
+                      // composes what each channel actually achieved rather
+                      // than what was attempted: a suppressed recipient, a
+                      // skipped send, a draft left by the org switch and a
+                      // template Meta refused all read as false here and
+                      // advance no counter.
+                      //
+                      // It stays an OR, which is the campaign's rule and not an
+                      // accident of the seam: a client reached on either
+                      // channel has had their touch, and counting it twice
+                      // would spend two rungs of a five-rung ladder on one day.
                       "Compose_|_Send_Outcome": {
                         runAfter: {
                           "Append_to_array_variable_|_Touch": ["Succeeded"],
@@ -1949,7 +2790,7 @@ export function buildBadDebtRecoveryTouchesFlow() {
                         type: "Compose",
                         inputs: {
                           email: "@outputs('Compose_|_Email_Result')?['sent']",
-                          whatsApp: false,
+                          whatsApp: "@outputs('Compose_|_Wa_Result')?['sent']",
                         },
                       },
                       "Compose_|_Touch_Sent": {
@@ -2038,8 +2879,20 @@ export function buildBadDebtRecoveryTouchesFlow() {
             },
           },
 
-          "Update_|_Run_Record": {
+          // Counted separately, never summed with the email count: the two
+          // channels fail for different reasons, and a run where WhatsApp
+          // collapsed while email held up is invisible in a single total.
+          "Filter_|_WhatsApps_Sent": {
             runAfter: { "Filter_|_Emails_Sent": ["Succeeded"] },
+            type: "Query",
+            inputs: {
+              from: "@variables('varTouches')",
+              where: "@equals(item()['whatsAppSent'], true)",
+            },
+          },
+
+          "Update_|_Run_Record": {
+            runAfter: { "Filter_|_WhatsApps_Sent": ["Succeeded"] },
             ...dataverse("UpdateRecord", {
               entityName: RUN_TABLE_SET,
               recordId: `@outputs('Create_|_Run_Record')?['body/${RUN_TABLE_ID}']`,
@@ -2049,6 +2902,8 @@ export function buildBadDebtRecoveryTouchesFlow() {
               // gap between the two is the campaign's actual reach, and it is
               // the number this table exists to make readable run over run.
               "item/riivo_emailsentcount": "@length(body('Filter_|_Emails_Sent'))",
+              "item/riivo_whatsappsentcount":
+                "@length(body('Filter_|_WhatsApps_Sent'))",
             }),
           },
 
@@ -2080,6 +2935,11 @@ export function buildBadDebtRecoveryTouchesFlow() {
               // one that silently failed to send.
               emailSendingEnabled: `@parameters('${SEND_EMAIL_PARAM}')`,
               emailsSent: "@length(body('Filter_|_Emails_Sent'))",
+              // There is no riivo_SendEmail for WhatsApp: one live business
+              // number, no draft mode, no redirect. So this line has no
+              // "enabled" twin to report — whatsAppsSent is either a number of
+              // real messages or a zero, and the touch rows say which.
+              whatsAppsSent: "@length(body('Filter_|_WhatsApps_Sent'))",
               // Resolved rows are what #102/#103 will send — each now carries
               // a minted link and a rendered PDF, so "resolved" means ready,
               // not merely eligible. Held rows are clients this run

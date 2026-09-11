@@ -51,6 +51,8 @@ import {
   DEFAULT_VOLUME_THRESHOLD_PERCENT,
   EMAIL_CHILD_FLOW_ID,
   FLOW_NAME,
+  NOTIFY_CHILD_FLOW_ID,
+  APPROVED_BUTTON_URL_PREFIX,
   ONGOING_TEMPLATE_VARIABLE,
   PDF_CHILD_FLOW_ID,
   VOLUME_THRESHOLD_VARIABLE,
@@ -195,7 +197,22 @@ function evaluate(expression: string, env: Record<string, unknown>): unknown {
       case "concat":
         return a.join("");
       case "contains":
-        return (a[0] as unknown[]).includes(a[1]);
+        // WDL's contains() reads a string OR a collection, and #103's
+        // sanitisation leans on the string form.
+        return typeof a[0] === "string"
+          ? a[0].includes(String(a[1]))
+          : (a[0] as unknown[]).includes(a[1]);
+      case "replace":
+        // Single-pass and non-overlapping, which is exactly why the space
+        // collapse runs three times.
+        return String(a[0]).split(String(a[1])).join(String(a[2]));
+      case "trim":
+        return String(a[0]).trim();
+      case "decodeUriComponent":
+        return decodeURIComponent(String(a[0]));
+      case "substring":
+        // WDL takes (text, startIndex, length), not (start, end).
+        return String(a[0]).substr(a[1] as number, a[2] as number);
       case "string":
         // WDL's string() on an array or object produces JSON, which is how
         // the email payloads are built — String() would give "a,b".
@@ -291,23 +308,51 @@ describe("what this flow still does not do itself", () => {
     }
   });
 
-  it("makes no outbound HTTP call except minting a payment token", () => {
-    // #98/#99 asserted zero. #100 adds exactly one, and it is an input to a
-    // message rather than a message: anything else appearing here is a send.
+  it("makes exactly three outbound HTTP calls, each one enumerated", () => {
+    // #98/#99 asserted zero. #100 added the mint; #103 adds the two Meta calls
+    // and nothing else. The list is exhaustive by name so a fourth endpoint
+    // cannot arrive quietly — an HTTP action in this flow is either an input to
+    // a message or a message, and both are worth noticing.
     const http = actions.filter(([, a]) => a.type === "Http");
-    expect(http.map(([n]) => n)).toEqual(["HTTP_|_Mint_Token"]);
-    expect(http[0][1].inputs.uri).toMatch(/\/mint-token$/);
+    expect(http.map(([n]) => n)).toEqual([
+      "HTTP_|_Mint_Token",
+      "HTTP_|_Wa_Upload_Media",
+      "HTTP_|_Wa_Send_Template",
+    ]);
+    expect(action("HTTP_|_Mint_Token").inputs.uri).toMatch(/\/mint-token$/);
   });
 
-  it("names no Meta, WhatsApp or SMS endpoint anywhere in the definition", () => {
-    expect(json).not.toMatch(/graph\.facebook\.com|bulksms|clickatell/i);
+  it("names no endpoint and no bearer token as a literal", () => {
+    // Before #103 this read "names no Meta endpoint anywhere", which the
+    // WhatsApp channel necessarily ends. The property that survives is the one
+    // that was always the point: every endpoint and every credential is an
+    // environment variable, so the definition in git carries neither.
+    expect(json).not.toMatch(/graph\.facebook\.com|bulksms|wa\.me|EAF8/i);
+    for (const parameter of [
+      "varMetaURI (riivo_varMetaURI)",
+      "varMetaUploadURI (riivo_varMetaUploadURI)",
+      "varMetaAccessToken (riivo_varMetaAccessToken)",
+    ]) {
+      expect(
+        (definition.parameters as Record<string, any>)[parameter].defaultValue,
+      ).toBe("");
+    }
+    // The one surviving "clickatell" is a column name on the WhatsApp
+    // communications table — a Dataverse status field that outlived the
+    // provider it was named for — not an endpoint of the old provider.
+    expect(json.match(/clickatell/gi)).toEqual(["clickatell"]);
+    expect(
+      JSON.stringify(action("Create_|_Wa_Comm").inputs.parameters),
+    ).toContain("item/riivo_clickatellstatus");
   });
 
-  it("writes nothing to Dataverse but the touch bookkeeping, a minted token and its own run history", () => {
+  it("writes nothing to Dataverse but the touch bookkeeping, a minted token, one WhatsApp log row and its own run history", () => {
     // #98 asserted zero writes. #99 added the first-touch and repeat-touch
     // patches; #100 adds the token write-back; #101 adds the two writes to its
     // own run table — which touch no client record and no client-facing field.
-    // Five, enumerated by name and table, so a sixth cannot arrive unnoticed.
+    // #103 adds ONE: the WhatsApp communication row, written once per attempt
+    // whether or not Meta took the message. Six, enumerated by name and table,
+    // so a seventh cannot arrive unnoticed.
     const writes = actions
       .filter(([, a]) =>
         ["CreateRecord", "UpdateRecord", "DeleteRecord"].includes(
@@ -322,16 +367,12 @@ describe("what this flow still does not do itself", () => {
 
     expect(writes.sort()).toEqual([
       ["Create_|_Run_Record", "CreateRecord", RUN_TABLE_SET],
+      ["Create_|_Wa_Comm", "CreateRecord", "riivo_whatsappcommunicationses"],
       ["Update_|_Invoice_Token", "UpdateRecord", "new_invoiceses"],
       ["Update_|_Run_Record", "UpdateRecord", RUN_TABLE_SET],
       ["Update_|_Touch_First", "UpdateRecord", "riivo_baddebts"],
       ["Update_|_Touch_Repeat", "UpdateRecord", "riivo_baddebts"],
     ]);
-  });
-
-  it("still says nothing over WhatsApp, which is #103", () => {
-    const outcome = actions.find(([n]) => n === "Compose_|_Send_Outcome")![1];
-    expect(outcome.inputs.whatsApp).toBe(false);
   });
 });
 
@@ -904,12 +945,12 @@ describe("payment token and PDF (#100)", () => {
     // safe only while every consumer reads these two composes.
     expect(json.split("body('Run_Child_|_Generate_PDF')?['pdfBase64']")).toHaveLength(2);
     expect(json.split("'/p/'")).toHaveLength(2);
-    // #101 and #102 each add a child reference, so the count is no longer 1 —
-    // but the property this test is really about still holds: every child flow
-    // is called from exactly one site, and every GUID is dev's. All three are
-    // re-pointed by hand on promotion (see the module's PROMOTION HAZARD note).
-    // The alert child is named twice because a park and a canary are different
-    // events; both are still the same one GUID.
+    // #101, #102 and #103 each add a child reference, so the count is no
+    // longer 1 — but the property this test is really about still holds: every
+    // child flow is called from exactly one site, and every GUID is dev's. All
+    // four are re-pointed by hand on promotion (see the module's PROMOTION
+    // HAZARD note). The alert child is named twice because a park and a canary
+    // are different events; both are still the same one GUID.
     const children = actions
       .filter(([, a]) => a.type === "Workflow")
       .map(([name, a]) => [name, a.inputs.host.workflowReferenceName]);
@@ -918,6 +959,7 @@ describe("payment token and PDF (#100)", () => {
       ["Run_Child_|_Canary_Alert", ALERT_CHILD_FLOW_ID],
       ["Run_Child_|_Generate_PDF", PDF_CHILD_FLOW_ID],
       ["Run_Child_|_Send_Email", EMAIL_CHILD_FLOW_ID],
+      ["Run_Child_|_Wa_Notify", NOTIFY_CHILD_FLOW_ID],
     ]);
     expect(json.split("workflowReferenceName")).toHaveLength(
       children.length + 1,
@@ -1387,6 +1429,7 @@ describe("the volume tripwire (#101)", () => {
         "item/riivo_resolvedcount",
         "item/riivo_heldcount",
         "item/riivo_emailsentcount",
+        "item/riivo_whatsappsentcount",
       ]);
     });
 
@@ -2015,6 +2058,591 @@ describe("the canary list (#102)", () => {
     );
     expect(alert).not.toMatch(/clientId|invoiceNumber|emailaddress/);
     expect(alert).toContain("length(outputs('Compose_|_Canary_Ids'))");
+  });
+});
+
+/**
+ * #103 turns on the channel the campaign was designed around — the 24 approved
+ * templates exist for WhatsApp, and #99 has been resolving a name for one since
+ * before anything could send it.
+ *
+ * The assertions here are weighted towards the three ways this send fails
+ * SILENTLY, because every one of them was found by reading the deployed org
+ * rather than by reasoning about the issue:
+ *
+ *  - a full URL in the Pay-now button produces a link to a link;
+ *  - `@{base64ToBinary(x)}` uploads the base64 text of a PDF and Meta accepts
+ *    it, so the client receives an unopenable document;
+ *  - the D12 fallback template takes THREE body parameters where the 24
+ *    campaign templates take two, so the first client ever to reach touch 5
+ *    would have been refused by Meta.
+ *
+ * None of the three produces an error anyone would see without a handset.
+ */
+describe("the WhatsApp channel (#103)", () => {
+  const scope = action("Scope_|_Send_WhatsApp");
+  const upload = action("HTTP_|_Wa_Upload_Media").inputs;
+  const send = action("HTTP_|_Wa_Send_Template").inputs;
+  const button = action("Compose_|_Wa_Button").inputs;
+  const header = action("Compose_|_Wa_Header").inputs;
+
+  it("is reached only through a scope whose failure is handled", () => {
+    expect(scope.type).toBe("Scope");
+    // The same containment #100 gives the preparation step: one client's
+    // refused send must not end a sequential loop for the clients behind them.
+    for (const name of [
+      "Filter_|_Wa_Failures",
+      "Compose_|_Wa_Result",
+      "Compose_|_Wa_Notify_Status",
+    ]) {
+      expect(Object.values(action(name).runAfter)[0]).toEqual(
+        expect.arrayContaining(["Succeeded", "Failed", "TimedOut"]),
+      );
+    }
+  });
+
+  it("uploads the PDF as bytes, not as the base64 text of a PDF", () => {
+    // The single most valuable line in this file. `@base64ToBinary(x)` sends
+    // the decoded document; `@{base64ToBinary(x)}` interpolates it back into a
+    // string and Meta accepts THAT too, returning a media id, so the failure
+    // surfaces only as an unopenable attachment on a client's phone. Both
+    // forms are still deployed side by side in dev as "[TEST] WhatsApp Invoice
+    // - Buggy vs Fixed PDF Upload".
+    const file = upload.body.$multipart[2];
+    expect(file.body).toBe(
+      "@base64ToBinary(outputs('Compose_|_Document')?['base64'])",
+    );
+    expect(json).not.toContain("@{base64ToBinary");
+    expect(file.headers["Content-Type"]).toBe("application/pdf");
+    expect(upload.body["$content-type"]).toBe("multipart/form-data");
+    expect(upload.body.$multipart[0].body).toBe("whatsapp");
+    expect(upload.body.$multipart[1].body).toBe("document");
+  });
+
+  it("reads the document from the one compose that publishes it", () => {
+    // The Statement swap changes Compose_|_Document and nothing else; a second
+    // reader of the child's response would quietly not travel with it.
+    expect(json.split("body('Run_Child_|_Generate_PDF')?['pdfBase64']")).toHaveLength(2);
+    expect(upload.body.$multipart[2].body).toContain("Compose_|_Document");
+  });
+
+  it("delivers that upload as the template's document header", () => {
+    const document = header.parameters[0];
+    expect(header.type).toBe("header");
+    expect(document.type).toBe("document");
+    expect(document.document.id).toBe("@{body('Parse_JSON_|_Wa_Media')?['id']}");
+    expect(document.document.filename).toBe(
+      "@{outputs('Compose_|_Wa_File_Name')}",
+    );
+  });
+
+  it("refuses to send a header pointing at nothing", () => {
+    // Parse_JSON earns its place by FAILING: an upload that answered without a
+    // media id ends the scope before the template goes out, rather than
+    // sending a document header that resolves to nothing.
+    const parse = action("Parse_JSON_|_Wa_Media");
+    expect(parse.type).toBe("ParseJson");
+    expect(parse.inputs.schema.required).toEqual(["id"]);
+    expect(Object.keys(action("Compose_|_Wa_Header").runAfter)).toEqual([
+      "Parse_JSON_|_Wa_Media",
+    ]);
+  });
+
+  it("sends the template the campaign key resolved, not a second resolution", () => {
+    expect(send.body.template.name).toBe(
+      "@{outputs('Compose_|_Template_Name')}",
+    );
+    // Every one of the 24 campaign templates and the D12 fallback is approved
+    // in `en` on the WABA (read 2026-09-11), and Meta matches a send on name
+    // AND language — a mismatch is a refusal, not a translation.
+    expect(send.body.template.language).toEqual({ code: "en" });
+    expect(send.body.messaging_product).toBe("whatsapp");
+    expect(send.body.to).toBe("@{outputs('Compose_|_Wa_To')}");
+  });
+
+  it("passes the BARE payment token to the button, never a URL", () => {
+    // Meta stores the approved prefix and rebuilds prefix + suffix. A full URL
+    // yields https://…/p/https://…/p/token — a dead button, and the issue's
+    // own "single most likely thing to get wrong here".
+    expect(button.type).toBe("button");
+    expect(button.sub_type).toBe("url");
+    expect(button.index).toBe("0");
+    expect(button.parameters).toEqual([
+      { type: "text", text: "@{outputs('Compose_|_Payment_Link')?['token']}" },
+    ]);
+    // The approved prefix is published by the module and built by nobody: the
+    // only place '/p/' is assembled remains the email's URL half.
+    expect(json).not.toContain(APPROVED_BUTTON_URL_PREFIX);
+    expect(json.split("'/p/'")).toHaveLength(2);
+  });
+
+  it("sends header, body and button together, always all three", () => {
+    // c430ace5 drops the button for its no-button template. Every template
+    // this flow can resolve carries a document header AND a URL button, so a
+    // conditional array here would only ever be a way to send a broken one.
+    expect(composeInputs("Compose_|_Wa_Components")).toBe(
+      "@createArray(outputs('Compose_|_Wa_Header'), outputs('Compose_|_Wa_Body'), outputs('Compose_|_Wa_Button'))",
+    );
+    expect(send.body.template.components).toBe(
+      "@outputs('Compose_|_Wa_Components')",
+    );
+  });
+
+  describe("body parameters, which are not the same for both templates", () => {
+    const parameters = (touch: number) =>
+      evaluate(action("Compose_|_Wa_Body").inputs.parameters, {
+        "outputs('Compose_|_Touch_Number')": touch,
+        "outputs('Compose_|_Wa_Params_Campaign')": ["name", "amount"],
+        "outputs('Compose_|_Wa_Params_Ongoing')": [
+          "name",
+          "invoice",
+          "amount",
+        ],
+      });
+
+    it("gives a campaign template the two it was approved with", () => {
+      // "Hi {{1}}, … Amount due: {{2}}" — name and amount, no invoice number.
+      expect(composeInputs("Compose_|_Wa_Params_Campaign")).toEqual([
+        { type: "text", text: "@{outputs('Compose_|_Wa_Name')}" },
+        { type: "text", text: "@{outputs('Compose_|_Wa_Amount')}" },
+      ]);
+      for (const touch of [1, 2, 3, 4]) {
+        expect(parameters(touch)).toEqual(["name", "amount"]);
+      }
+    });
+
+    it("gives the D12 fallback the THREE it was approved with", () => {
+      // ttt_invoice_reminder_paylink_v2 reads
+      // "Hi {{1}}, … invoice *{{2}}* … balance of *{{3}}*". Two parameters is
+      // a 400 from Meta, and touch 5 is months away from the code that sets it.
+      expect(composeInputs("Compose_|_Wa_Params_Ongoing")).toEqual([
+        { type: "text", text: "@{outputs('Compose_|_Wa_Name')}" },
+        { type: "text", text: "@{outputs('Compose_|_Wa_Invoice')}" },
+        { type: "text", text: "@{outputs('Compose_|_Wa_Amount')}" },
+      ]);
+      for (const touch of [5, 9, 40]) {
+        expect(parameters(touch)).toEqual(["name", "invoice", "amount"]);
+      }
+    });
+
+    it("switches at exactly the touch the template name does", () => {
+      // One boundary, read from one place: the touch where Compose_|_Template_Name
+      // stops building a campaign key and reads the D12 variable.
+      const templateName = composeInputs("Compose_|_Template_Name");
+      const boundary = /greater\(outputs\('Compose_\|_Touch_Number'\), (\d+)\)/;
+      expect(boundary.exec(templateName)![1]).toBe(
+        boundary.exec(action("Compose_|_Wa_Body").inputs.parameters)![1],
+      );
+    });
+  });
+
+  describe("what Meta refuses inside a parameter", () => {
+    /** One sanitising compose, run on hostile input. */
+    const sanitise = (compose: string, field: string, value: string) =>
+      evaluate(composeInputs(compose), {
+        [`items('Apply_to_each_|_Selected')?['${field}']`]: value,
+        "outputs('Compose_|_Amount')": "1 234.00",
+      });
+
+    it("removes newlines, carriage returns and tabs", () => {
+      expect(sanitise("Compose_|_Wa_Name", "firstName", "Th\nab\to")).toBe(
+        "Th ab o",
+      );
+      expect(sanitise("Compose_|_Wa_Name", "firstName", "A\r\nB")).toBe("A  B");
+    });
+
+    it("collapses four consecutive spaces, and keeps collapsing", () => {
+      // replace() is single-pass, so one collapse turns 16 spaces into 4 —
+      // still illegal. Three passes cover a run of 64.
+      expect(sanitise("Compose_|_Wa_Name", "firstName", `A${" ".repeat(4)}B`)).toBe(
+        "A B",
+      );
+      for (const spaces of [8, 16, 60]) {
+        const result = String(
+          sanitise("Compose_|_Wa_Name", "firstName", `A${" ".repeat(spaces)}B`),
+        );
+        expect(result, `${spaces} spaces survived`).not.toMatch(/ {4}/);
+      }
+    });
+
+    it("trims, which is not cosmetic on this org's invoice numbers", () => {
+      // Dev invoice names carry a trailing space: "luc duval - WATEST83695332 ".
+      expect(
+        sanitise("Compose_|_Wa_Invoice", "invoiceNumber", "WATEST83695332 "),
+      ).toBe("WATEST83695332");
+    });
+
+    it("carries the currency, because the template does not", () => {
+      // "Amount due: {{2}}" renders exactly what is passed.
+      expect(
+        evaluate(composeInputs("Compose_|_Wa_Amount"), {
+          "outputs('Compose_|_Amount')": "1234.00",
+        }),
+      ).toBe("R 1234.00");
+    });
+
+    it("asserts the result rather than assuming it", () => {
+      const clean = (name: string, amount: string, touch = 1) =>
+        evaluate(composeInputs("Compose_|_Wa_Params_Clean"), {
+          "outputs('Compose_|_Wa_Name')": name,
+          "outputs('Compose_|_Wa_Amount')": amount,
+          "outputs('Compose_|_Wa_Invoice')": "INV-1",
+          "outputs('Compose_|_Touch_Number')": touch,
+        });
+
+      expect(clean("Thabo", "R 1 234.00")).toBe(true);
+      expect(clean("Thabo\nMokoena", "R 1 234.00")).toBe(false);
+      expect(clean("Thabo\tM", "R 1 234.00")).toBe(false);
+      expect(clean("Thabo    Mokoena", "R 1 234.00")).toBe(false);
+      expect(clean("", "R 1 234.00")).toBe(false);
+      expect(clean("Thabo", "")).toBe(false);
+    });
+
+    it("checks the invoice number only on the template that uses it", () => {
+      const withInvoice = (invoice: string, touch: number) =>
+        evaluate(composeInputs("Compose_|_Wa_Params_Clean"), {
+          "outputs('Compose_|_Wa_Name')": "Thabo",
+          "outputs('Compose_|_Wa_Amount')": "R 1.00",
+          "outputs('Compose_|_Wa_Invoice')": invoice,
+          "outputs('Compose_|_Touch_Number')": touch,
+        });
+      expect(withInvoice("", 4)).toBe(true);
+      expect(withInvoice("", 5)).toBe(false);
+    });
+
+    it("holds the client rather than sending something Meta will refuse", () => {
+      const gate = (clean: boolean) =>
+        evaluateCondition(action("Condition_|_Send_WhatsApp").expression, {
+          "outputs('Compose_|_TestMode')": false,
+          "items('Apply_to_each_|_Selected')?['whatsAppAllowed']": true,
+          "outputs('Compose_|_Wa_To')": "27821234567",
+          "outputs('Compose_|_Wa_Params_Clean')": clean,
+        });
+      expect(gate(true)).toBe(true);
+      expect(gate(false)).toBe(false);
+    });
+
+    it("keeps a quote or a backslash out of the multipart filename", () => {
+      // Either one ends the Content-Disposition field early — the multipart
+      // equivalent of the hand-built JSON #102 refused to write.
+      const clean = (fileName: string) =>
+        evaluate(composeInputs("Compose_|_Wa_File_Clean"), {
+          "outputs('Compose_|_Document')?['fileName']": fileName,
+        });
+      expect(clean('in"voice.pdf')).toBe("invoice.pdf");
+      expect(clean("in\\voice.pdf")).toBe("invoice.pdf");
+      expect(clean("in\nvoice.pdf")).toBe("invoice.pdf");
+      // And trimmed: the header is ` filename="…"`, so surrounding whitespace
+      // is whitespace a client sees in the name of the document they saved.
+      expect(clean("  invoice.pdf  ")).toBe("invoice.pdf");
+      expect(
+        evaluate(composeInputs("Compose_|_Wa_File_Name"), {
+          "outputs('Compose_|_Wa_File_Clean')": "",
+        }),
+      ).toBe("invoice.pdf");
+    });
+  });
+
+  describe("who it will not message", () => {
+    const gate = (env: Record<string, unknown>) =>
+      evaluateCondition(action("Condition_|_Send_WhatsApp").expression, {
+        "outputs('Compose_|_TestMode')": false,
+        "items('Apply_to_each_|_Selected')?['whatsAppAllowed']": true,
+        "outputs('Compose_|_Wa_To')": "27821234567",
+        "outputs('Compose_|_Wa_Params_Clean')": true,
+        ...env,
+      });
+
+    it("sends nothing in test mode — there is no draft mode to fall back on", () => {
+      // riivo_SendEmail gives the email channel a free rehearsal. WhatsApp has
+      // no equivalent: one live business number, no sandbox, no redirect. Test
+      // mode and the canary list are the entire safety envelope.
+      expect(gate({ "outputs('Compose_|_TestMode')": true })).toBe(false);
+    });
+
+    it("sends nothing to a client suppressed at selection", () => {
+      expect(
+        gate({
+          "items('Apply_to_each_|_Selected')?['whatsAppAllowed']": false,
+        }),
+      ).toBe(false);
+    });
+
+    it("treats a row that says nothing about consent as suppressed", () => {
+      expect(
+        gate({
+          "items('Apply_to_each_|_Selected')?['whatsAppAllowed']": null,
+        }),
+      ).toBe(false);
+    });
+
+    it("sends nothing without a number to send to", () => {
+      expect(gate({ "outputs('Compose_|_Wa_To')": "" })).toBe(false);
+    });
+
+    it("is reached only by a client the preparation gate cleared", () => {
+      // No token and no PDF means no message on either channel: the WhatsApp
+      // block lives inside Condition_|_Prepare_Ok, not beside it.
+      const inside = JSON.stringify(
+        action("Condition_|_Prepare_Ok").actions ?? {},
+      );
+      expect(inside).toContain("Condition_|_Send_WhatsApp");
+      expect(JSON.stringify(action("Condition_|_Prepare_Ok").else)).not.toContain(
+        "Wa_",
+      );
+    });
+  });
+
+  describe("throttling and volume, which Meta polices harder than Dataverse", () => {
+    it("caps the loop that mints, renders and now uploads per client", () => {
+      expect(
+        action("Apply_to_each_|_Selected").runtimeConfiguration.concurrency
+          .repetitions,
+      ).toBe(1);
+    });
+
+    it("retries both Meta calls only while they answer 429", () => {
+      for (const slug of ["Wa_Upload", "Wa_Send"]) {
+        const until = action(`Until_|_${slug}`);
+        expect(until.type).toBe("Until");
+        expect(composeInputs(`Compose_|_${slug}_Status`)).toBe(
+          `@coalesce(outputs('HTTP_|_${slug === "Wa_Upload" ? "Wa_Upload_Media" : "Wa_Send_Template"}')?['statusCode'], 0)`,
+        );
+        expect(
+          JSON.stringify(until.actions[`Condition_|_${slug}_Throttled`].expression),
+        ).toContain("429");
+      }
+    });
+
+    it("waits for as long as Meta asked, on both calls", () => {
+      for (const call of ["HTTP_|_Wa_Upload_Media", "HTTP_|_Wa_Send_Template"]) {
+        const slug = call === "HTTP_|_Wa_Upload_Media" ? "Wa_Upload" : "Wa_Send";
+        const wait = action(`Delay_|_${slug}_Retry_After`).inputs.interval;
+        expect(wait.unit).toBe("Second");
+        expect(
+          evaluate(wait.count, {
+            [`outputs('${call}')?['headers']?['Retry-After']`]: "45",
+            [`outputs('${call}')?['headers']?['retry-after']`]: null,
+          }),
+        ).toBe(45);
+      }
+    });
+
+    it("leaves the retries to that loop, never to the platform's own policy", () => {
+      // The default policy retries on its own schedule and honours no
+      // Retry-After, which is the whole reason the Until exists.
+      expect(upload.retryPolicy).toEqual({ type: "none" });
+      expect(send.retryPolicy).toEqual({ type: "none" });
+    });
+  });
+
+  describe("what it records afterwards", () => {
+    const log = action("Create_|_Wa_Comm").inputs.parameters;
+
+    it("logs every attempt, whether or not Meta took it", () => {
+      // Both reference flows log only successes. The run report expires with
+      // the run history; this row is the only durable place a consultant sees
+      // that a touch was attempted at all — and this campaign's rule is that a
+      // silent client is never a silent failure.
+      expect(log.entityName).toBe("riivo_whatsappcommunicationses");
+      expect(log["item/riivo_clickatellstatus"]).toBe(
+        "@if(outputs('Compose_|_Wa_Sent'), 463630001, 463630003)",
+      );
+      expect(log["item/riivo_messagedirection"]).toBe(463630001);
+    });
+
+    it("carries Meta's own message id, and its refusal when there is one", () => {
+      expect(log["item/riivo_apimessageid"]).toBe(
+        "@outputs('Compose_|_Wa_Message_Id')",
+      );
+      // riivo_failurereason is a 1000-character column and Meta's errors are
+      // not bounded, so the write is truncated rather than rejected.
+      expect(log["item/riivo_failurereason"]).toContain("substring(");
+      expect(log["item/riivo_failurereason"]).toContain("900");
+    });
+
+    it("regards the invoice, which is what puts it on the timeline", () => {
+      expect(
+        log[
+          "item/regardingobjectid_new_invoices_riivo_whatsappcommunications@odata.bind"
+        ],
+      ).toContain("items('Apply_to_each_|_Selected')?['invoiceId']");
+      expect(
+        JSON.stringify(log["item/activitypointer_activity_parties"]),
+      ).toContain("items('Apply_to_each_|_Selected')?['clientId']");
+    });
+
+    it("names the first thing that went wrong, not the last", () => {
+      // An upload that failed makes every action after it fail too, so
+      // "the send was skipped" would send a reader to the wrong call.
+      const reason = (env: Record<string, unknown>) =>
+        evaluate(composeInputs("Compose_|_Wa_Failure_Reason"), {
+          "outputs('Compose_|_Wa_Sent')": false,
+          "outputs('Compose_|_Wa_Upload_Status')": 200,
+          "outputs('Compose_|_Wa_Send_Status')": 200,
+          "outputs('Compose_|_Wa_Message_Id')": "wamid.1",
+          "outputs('HTTP_|_Wa_Send_Template')?['body']?['error']?['message']":
+            "template does not exist",
+          "outputs('Compose_|_Template_Name')": "bad_debt_wa_30_90_never_paid_day0",
+          "body('Select_|_Wa_Failure_Names')": ["Scope_|_Send_WhatsApp"],
+          ...env,
+        });
+
+      expect(
+        String(reason({ "outputs('Compose_|_Wa_Upload_Status')": 413 })),
+      ).toContain("could not be uploaded");
+      expect(String(reason({ "outputs('Compose_|_Wa_Send_Status')": 400 }))).toContain(
+        "template does not exist",
+      );
+      expect(String(reason({ "outputs('Compose_|_Wa_Send_Status')": 400 }))).toContain(
+        "bad_debt_wa_30_90_never_paid_day0",
+      );
+      expect(
+        String(reason({ "outputs('Compose_|_Wa_Message_Id')": "" })),
+      ).toContain("no message id");
+      expect(reason({ "outputs('Compose_|_Wa_Sent')": true })).toBe("");
+    });
+
+    it("advances a counter only where META reported a send", () => {
+      const outcome = action("Compose_|_Send_Outcome").inputs;
+      expect(outcome.whatsApp).toBe("@outputs('Compose_|_Wa_Result')?['sent']");
+      expect(composeInputs("Compose_|_Wa_Sent")).toContain(
+        "not(empty(outputs('Compose_|_Wa_Message_Id')))",
+      );
+      // A 429 retried to exhaustion, a refused template and a rejected
+      // parameter all leave the bookkeeping untouched, so the client is simply
+      // selected again next run.
+      const sent = (whatsApp: unknown, email: unknown, testMode = false) =>
+        evaluate(composeInputs("Compose_|_Touch_Sent"), {
+          "outputs('Compose_|_TestMode')": testMode,
+          "outputs('Compose_|_Send_Outcome')?['whatsApp']": whatsApp,
+          "outputs('Compose_|_Send_Outcome')?['email']": email,
+        });
+      expect(sent(true, false)).toBe(true);
+      expect(sent(false, false)).toBe(false);
+      // The OR is the campaign's rule: one touch is one rung, however many
+      // channels carried it.
+      expect(sent(true, true)).toBe(true);
+      expect(sent(true, true, true)).toBe(false);
+    });
+
+    it("says why, whenever a resolved client was not messaged", () => {
+      const note = (env: Record<string, unknown>) =>
+        evaluate(action("Compose_|_Wa_Result").inputs.note, {
+          "outputs('Compose_|_TestMode')": false,
+          "items('Apply_to_each_|_Selected')?['whatsAppAllowed']": true,
+          "outputs('Compose_|_Wa_To')": "27821234567",
+          "outputs('Compose_|_Wa_Params_Clean')": true,
+          "outputs('Compose_|_Wa_Sent')": true,
+          "outputs('Compose_|_Wa_Failure_Reason')": "Meta refused it",
+          ...env,
+        });
+
+      expect(note({})).toBe("");
+      expect(String(note({ "outputs('Compose_|_TestMode')": true }))).toContain(
+        "test mode",
+      );
+      expect(
+        String(
+          note({
+            "items('Apply_to_each_|_Selected')?['whatsAppAllowed']": false,
+          }),
+        ),
+      ).toContain("riivo_whatsappoptinout");
+      expect(String(note({ "outputs('Compose_|_Wa_To')": "" }))).toContain(
+        "no mobile number",
+      );
+      expect(
+        String(note({ "outputs('Compose_|_Wa_Params_Clean')": false })),
+      ).toContain("four consecutive spaces");
+      expect(String(note({ "outputs('Compose_|_Wa_Sent')": false }))).toBe(
+        "Meta refused it",
+      );
+    });
+
+    it("reads every answer null-safely, because a skipped call has none", () => {
+      const result = action("Compose_|_Wa_Result").inputs;
+      for (const read of [
+        "outputs('Compose_|_Wa_Sent')",
+        "outputs('Compose_|_Wa_Message_Id')",
+      ]) {
+        expect(JSON.stringify(result)).toContain(`coalesce(${read}`);
+      }
+      // And `sent` is DERIVED, never asserted. It is the value the touch
+      // bookkeeping reads, so a constant here would advance a counter for a
+      // client who was never messaged — and a client whose counter moved is
+      // one the next run will not select again.
+      const sent = (value: unknown) =>
+        evaluate(result.sent, { "outputs('Compose_|_Wa_Sent')": value });
+      expect(sent(true)).toBe(true);
+      expect(sent(false)).toBe(false);
+      expect(sent(null)).toBe(false);
+    });
+
+    it("counts WhatsApp beside email rather than summed with it", () => {
+      // A run where WhatsApp collapsed while email held up is invisible in a
+      // single total.
+      expect(action("Filter_|_WhatsApps_Sent").inputs.where).toBe(
+        "@equals(item()['whatsAppSent'], true)",
+      );
+      const patched = action("Update_|_Run_Record").inputs.parameters;
+      expect(patched["item/riivo_whatsappsentcount"]).toBe(
+        "@length(body('Filter_|_WhatsApps_Sent'))",
+      );
+      const report = composeInputs("Compose_|_Dry_Run_Report") as any;
+      expect(report.whatsAppsSent).toBe("@length(body('Filter_|_WhatsApps_Sent'))");
+      expect(report.emailsSent).toBe("@length(body('Filter_|_Emails_Sent'))");
+      const touch = JSON.stringify(
+        action("Append_to_array_variable_|_Touch").inputs.value,
+      );
+      expect(touch).toContain("Compose_|_Wa_Result')?['sent']");
+      expect(touch).toContain("Compose_|_Wa_Result')?['note']");
+    });
+  });
+
+  describe("telling the bot what went out", () => {
+    const notify = action("Run_Child_|_Wa_Notify").inputs;
+
+    it("notifies only on a send that actually happened", () => {
+      expect(
+        evaluateCondition(action("Condition_|_Wa_Notify").expression, {
+          "outputs('Compose_|_Wa_Sent')": false,
+        }),
+      ).toBe(false);
+      expect(notify.body.sender_message_id).toBe(
+        "@outputs('Compose_|_Wa_Message_Id')",
+      );
+    });
+
+    it("describes the message it actually sent, both shapes of it", () => {
+      // The bot renders what it is told; a three-parameter template described
+      // with two would thread a reply to the wrong words.
+      const variables = (touch: number) =>
+        evaluate(notify.body.template_variables, {
+          "outputs('Compose_|_Touch_Number')": touch,
+          "outputs('Compose_|_Wa_Name')": "Thabo",
+          "outputs('Compose_|_Wa_Invoice')": "INV-1",
+          "outputs('Compose_|_Wa_Amount')": "R 1.00",
+        });
+      expect(variables(4)).toBe(JSON.stringify(["Thabo", "R 1.00"]));
+      expect(variables(5)).toBe(JSON.stringify(["Thabo", "INV-1", "R 1.00"]));
+      expect(notify.body.template_name).toBe(
+        "@outputs('Compose_|_Template_Name')",
+      );
+    });
+
+    it("can never cost a client their touch", () => {
+      // By the time it runs the message has been delivered, so failing here
+      // would roll back nothing and would end a sequential loop for everyone
+      // behind this client.
+      expect(
+        Object.values(action("Compose_|_Wa_Notify_Status").runAfter)[0],
+      ).toEqual(
+        expect.arrayContaining(["Succeeded", "Failed", "Skipped", "TimedOut"]),
+      );
+      const branch = action("Condition_|_Send_WhatsApp").actions;
+      expect(Object.keys(branch).at(-1)).toBe("Compose_|_Wa_Notify_Status");
+    });
   });
 });
 

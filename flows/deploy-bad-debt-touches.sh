@@ -124,7 +124,8 @@ echo "==> dependencies for the mint and PDF steps (#100) and the tripwire (#101)
 MISSING=0
 for DEP in riivo_PaymentLink_BaseUrl riivo_PaymentLink_FunctionKey riivo_PaymentLinkEnabled \
            riivo_EnvironmentAddress riivo_varFlowErrorTeamMail \
-           riivo_SharedSenderUserId riivo_SendEmail; do
+           riivo_SharedSenderUserId riivo_SendEmail \
+           riivo_varMetaURI riivo_varMetaUploadURI riivo_varMetaAccessToken; do
   COUNT=$(api GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$DEP'" \
     | sed '$d' | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
   if [[ "$COUNT" == "0" ]]; then
@@ -139,7 +140,7 @@ done
 # be ON — the PDF child holds every client if it is off, and the alert child is
 # how a parked run reaches a human.
 for CHILD in be610dd6-bf7b-f111-ab0f-000d3ada6ac0 6b0bff17-e79b-ed11-aad1-000d3ab479cf \
-             0d0bc4d6-7f74-f111-ab0e-000d3ada6ac0; do
+             0d0bc4d6-7f74-f111-ab0e-000d3ada6ac0 5d353829-ae5d-f111-a826-002248a29481; do
   # statecode FIRST, name last: the name contains spaces, and `read` would
   # otherwise split it and report the state of a word.
   read -r CHILD_STATE CHILD_NAME < <(
@@ -179,6 +180,46 @@ echo "    riivo_SendEmail off => the branded-email child creates every mail as a
 echo "    DRAFT and sends nothing, org-wide. That is a fine way to inspect a"
 echo "    rendered message; it is not a send, and the run will say so."
 echo "    A non-empty canary list => the run speaks ONLY to those clients."
+echo "    THERE IS NO riivo_SendEmail FOR WHATSAPP (#103). One TTT WhatsApp"
+echo "    number, no sandbox of it, no draft mode: dev and prod post to the same"
+echo "    Meta phone number id, so a run that is not in test mode sends a REAL"
+echo "    message from the live business number. Test mode and the canary list"
+echo "    are the whole of the safety envelope."
+
+# ---------------------------------------------------------- #103: the button --
+# Meta bakes the Pay-now URL prefix into each template at APPROVAL time and
+# rebuilds prefix + suffix itself, while riivo_PaymentLink_BaseUrl is
+# per-environment. So the two can disagree, and in dev today they do — which no
+# amount of correctness in the flow can fix, and which is invisible until
+# somebody taps the button on a handset.
+echo "==> the Pay-now button prefix (#103)"
+APPROVED_PREFIX=$(npx --yes tsx -e '
+import { APPROVED_BUTTON_URL_PREFIX } from "./flows/badDebtRecoveryTouches";
+process.stdout.write(APPROVED_BUTTON_URL_PREFIX);
+')
+BASE_URL=$(api GET "environmentvariabledefinitions?\$select=defaultvalue&\$filter=schemaname%20eq%20'riivo_PaymentLink_BaseUrl'&\$expand=environmentvariabledefinition_environmentvariablevalue(\$select=value)" \
+  | sed '$d' | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)['value']
+if not rows:
+    print(''); raise SystemExit
+values = rows[0].get('environmentvariabledefinition_environmentvariablevalue') or []
+print(values[0]['value'] if values else rows[0].get('defaultvalue') or '')")
+echo "    the 24 approved campaign templates rebuild: ${APPROVED_PREFIX}{token}"
+echo "    riivo_PaymentLink_BaseUrl mints against:    ${BASE_URL}/p/{token}"
+if [[ "${APPROVED_PREFIX%/p/}" != "$BASE_URL" ]]; then
+  echo "    MISMATCH. A token minted here will NOT resolve at the address Meta"
+  echo "    rebuilds, so the Pay-now button on a campaign-key WhatsApp message"
+  echo "    cannot open its invoice in this environment however correct the"
+  echo "    flow is. Verified 2026-09-11: a dev token answers 200 on the dev"
+  echo "    host and 'Payment link not found' on the approved one."
+  echo "    The D12 fallback template (ttt_invoice_reminder_paylink_v2) is"
+  echo "    approved against the DEV host, so it is the mirror image and will"
+  echo "    break in prod. Fixing this means re-approving templates in Meta, or"
+  echo "    pointing both environments at one payment-link app — not a change"
+  echo "    to this flow. Inspect the button by reading the token out of the"
+  echo "    run report and loading ${BASE_URL}/p/{token} by hand."
+fi
 
 # ------------------------------------------------------- run table (#101) ----
 # The tripwire reads its baseline from riivo_baddebtrun and records every run
@@ -331,10 +372,20 @@ print(json.dumps({
         "produced - and EMAILS them through the house child 'Email - Child - "
         "Build Branded HTML Email, Create or Send', which creates the "
         "Dataverse email row, attaches the PDF and performs the bound "
-        "SendEmail. No Outlook connector anywhere. The touch bookkeeping is "
-        "gated on that child reporting a send, so a suppressed recipient, a "
-        "skipped send or a draft left by riivo_SendEmail advances no counter. "
-        "WhatsApp is still silent: that is #103. "
+        "SendEmail. No Outlook connector anywhere. It also sends the WhatsApp "
+        "template the campaign key resolved (#103): the invoice PDF is "
+        "uploaded to Meta per client and delivered as the template's document "
+        "header, the body carries the client's first name and the outstanding "
+        "amount - three parameters, with the invoice number, on the D12 "
+        "fallback template, which is approved with a different body - and the "
+        "Pay-now button is passed the BARE payment token, because Meta rebuilds "
+        "the approved URL prefix itself. Every attempt is logged to "
+        "riivo_whatsappcommunicationses, sent or refused. The touch bookkeeping "
+        "is gated on a channel reporting a send, so a suppressed recipient, a "
+        "skipped send, a draft left by riivo_SendEmail and a template Meta "
+        "refused all advance no counter. There is no riivo_SendEmail for "
+        "WhatsApp: dev and prod post to the same Meta phone number id, so any "
+        "run not in test mode sends real messages from the live TTT number. "
         "riivo_BadDebtCanaryContactIds restricts a run to named clients for a "
         "rehearsal or a canary; while it is set the run skips the volume "
         "tripwire, records itself as 'canary' so it never becomes a baseline, "
@@ -432,3 +483,32 @@ echo " 10. CLEAR riivo_BadDebtCanaryContactIds. Until it is empty the campaign"
 echo "     is only speaking to those clients — which is what the Flow Failure"
 echo "     email saying RESTRICTED on every run is there to keep nagging"
 echo "     about."
+echo
+echo "  #103: the WhatsApp channel. READ THIS BEFORE RUNNING ANYTHING."
+echo "  There is no draft mode. Dev and prod post to the SAME Meta phone number"
+echo "  id, so the first run with test mode off and a canary list set sends a"
+echo "  real WhatsApp from the live TTT business number to a real handset."
+echo "  There is no step 7 equivalent here — no free rehearsal — so the canary"
+echo "  list is not a convenience, it is the only thing standing between a run"
+echo "  and the whole book."
+echo " 11. COLLEAGUE REHEARSAL. Canary list = contacts whose mobile numbers are"
+echo "     yours (Luc, Nic, Roscoe), riivo_ReminderTestMode false. Run it."
+echo "     On each handset check: the document opens and is the right invoice"
+echo "     (not a file of base64 text — that failure mode is real and is why"
+echo "     the upload passes bytes rather than an interpolated string); the"
+echo "     greeting names the client; the amount matches ttt_outstanding; and"
+echo "     the Pay-now button opens the right invoice's payment page. If the"
+echo "     button 404s, check the prefix mismatch reported above before"
+echo "     assuming the flow is wrong — in dev it is expected."
+echo " 12. Confirm the bookkeeping: whatsAppsSent in the report equals the"
+echo "     number of handsets that buzzed, riivo_campaignsendcount advanced by"
+echo "     exactly one on those bad-debt rows and no others, and each client"
+echo "     has ONE riivo_whatsappcommunications row with status sent (463630001)"
+echo "     regarding the invoice. A row with status failed (463630003) carries"
+echo "     Meta's own words in riivo_failurereason — read it rather than"
+echo "     guessing."
+echo " 13. Opt one colleague OUT (riivo_whatsappoptinout false) and re-run:"
+echo "     they must receive nothing, and their touch row must say so."
+echo " 14. CANARY on a small number of real clients, then read what they got."
+echo " 15. CLEAR riivo_BadDebtCanaryContactIds — step 10, again, and it matters"
+echo "     more now that both channels speak."

@@ -167,6 +167,13 @@ export const RUN_TABLE_ATTRIBUTES: Attribute[] = [
       "Clients this run actually emailed — the branded-email child reported the send, not merely that a draft was created (#102). Written with the after-the-loop counts, so null on a parked run. The figure the campaign is measured by: resolved says ready, this says delivered to the mail system.",
   },
   {
+    schemaName: "riivo_WhatsAppSentCount",
+    logicalName: "riivo_whatsappsentcount",
+    kind: "Integer",
+    description:
+      "Clients this run actually reached on WhatsApp — Meta accepted the template send and returned a message id (#103). Written with the after-the-loop counts, so null on a parked run. Kept beside riivo_emailsentcount rather than summed with it: the two channels fail for different reasons, and a run where WhatsApp collapsed while email held up is invisible in a single total.",
+  },
+  {
     schemaName: "riivo_ResolvedCount",
     logicalName: "riivo_resolvedcount",
     kind: "Integer",

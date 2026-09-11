@@ -18,14 +18,15 @@ against the dev org on 2026-09-11 unless it says otherwise.
 | #100 Token minting + PDF | **Open but built.** Rides the same replace-deploy and human run as #99. |
 | #101 Volume tripwire | **Open but built.** Rides the same replace-deploy; also needs one new environment variable and one new table, both of which the deploy script creates. |
 | #102 Email live | **Open but built.** Rides the same replace-deploy; adds one environment variable and two columns to the run table, both of which the deploy script creates. The rehearsal and the canary are human runs. |
-| #103–#104 | **#103 is the next one** (WhatsApp live). |
+| #103 WhatsApp live | **Open but built.** Rides the same replace-deploy; adds one more run-table column and reads three Meta environment variables that already exist. The rehearsal and the canary are human runs — and unlike email there is **no draft mode**, so the first one sends real messages. |
+| #104 | **The next one** (switch on the twice-weekly recurrence and observe two cycles). |
 
 **What is actually deployed in dev right now is the #99 definition.** Checked
 byte-for-byte on 2026-09-11: the flow in dev (`3c600c0b-c5ad-f111-aaab-002248a35b45`,
 draft/off) matches the rendered `#99` module exactly, so **#100's replace-deploy
 was never run**. One `--replace` therefore carries dev from #99 straight to
-#102 — the mint/PDF scope, the tripwire, the email channel and the canary land
-together, and the workflowid changes again when it does.
+#103 — the mint/PDF scope, the tripwire, the email channel, the canary and the
+WhatsApp channel land together, and the workflowid changes again when it does.
 
 **#99, #100 and #101 all say "Blocked by #98".** That dependency is satisfied:
 #98's build is deployed and verified. Only its two human-verification ACs
@@ -482,6 +483,150 @@ read it. So:
 
 ---
 
+## What #103 added: the WhatsApp channel
+
+The channel the 24 approved templates were written for, and the one the
+campaign key has been resolving a name for since #99. The send is lifted from
+`c430ace5` as the issue asks: upload the invoice PDF to Meta's media endpoint,
+take the media id as the template's document header, build body and button
+components, POST the template, log the result.
+
+### Read before you switch it on: there is no draft mode
+
+`riivo_SendEmail` gave the email channel a free rehearsal — a real branded
+message, real attachment, real button, sent to nobody. **WhatsApp has no
+equivalent.** There is one TTT WhatsApp Business number, Meta offers no sandbox
+of it, and dev's `riivo_varMetaURI` names the **same phone number id as prod's**
+(`1126852847178432`). So a dev run that is not in test mode sends a real
+message from the live business number to a real handset.
+
+Test mode and `riivo_BadDebtCanaryContactIds` are the entire safety envelope.
+That is not a gap in the build — it is the shape of the platform — but it
+inverts the rehearsal: for email the canary list was a convenience, and here it
+is the only thing between a run and the whole book.
+
+### Three things read off the deployed org that changed the build
+
+Each would have failed silently. None produces an error anyone sees without a
+handset in their hand.
+
+**1. The D12 fallback template takes a different body.** The 24 campaign
+templates are `Hi {{1}}, … Amount due: {{2}}` — name and amount. The D12
+fallback `ttt_invoice_reminder_paylink_v2` is `Hi {{1}}, … invoice *{{2}}* …
+balance of *{{3}}*` and takes the invoice number in the middle. #99 chose that
+fallback for a good reason (already approved, no Meta submission blocks the
+cadence) and could not have known it was a different shape. Sending two
+parameters to a three-parameter template is a 400 from Meta, so **the first
+client ever to reach touch 5 would have gone silent**, months after the code
+that caused it shipped. `Compose_|_Wa_Body` now switches on the same touch
+boundary `Compose_|_Template_Name` does, and a test asserts the two boundaries
+are the same number.
+
+**2. `@{base64ToBinary(x)}` uploads the base64 text of a PDF, and Meta accepts
+it.** The braces interpolate the decoded bytes back into a string. The upload
+succeeds, a media id comes back, the template sends — and the client receives a
+document that will not open. `[TEST] WhatsApp Invoice - Buggy vs Fixed PDF
+Upload` (`d94a477f`, on) is still deployed in dev as the record of someone
+finding that the hard way; `c430ace5` carries the fixed form. This build uses
+`@base64ToBinary(…)` with no braces, and a test pins it, because nothing else
+would notice.
+
+**3. The Pay-now button prefix is baked into the template, and dev's is
+wrong.** Meta stores the approved URL prefix and rebuilds prefix + suffix, so
+the send passes the **bare token** — the issue's "single most likely thing to
+get wrong", and the reason #100 published `token` and `url` from one compose.
+But the prefix is fixed per template while `riivo_PaymentLink_BaseUrl` is
+per-environment, and they disagree:
+
+| Template | Button prefix |
+|---|---|
+| the 24 `bad_debt_wa_*` | `https://payment-link-ttt.azurewebsites.net/p/` |
+| D12 `ttt_invoice_reminder_paylink_v2` | `https://ttt-payment-link-huhhgzewb4hkdqdt.southafricanorth-01…/p/` |
+
+Dev's `riivo_PaymentLink_BaseUrl` is the second one. Verified by loading a real
+dev token against both: the dev host answers 200, the approved host answers
+`Payment link not found`. **So in dev a campaign-key WhatsApp button cannot open
+its invoice, however correct this flow is** — and in prod the D12 button will
+not, for the mirror-image reason. No code change fixes it: either the templates
+are re-approved against one host, or both environments point at one
+payment-link app. `--check` now prints both and says so. AC 4 is therefore
+verifiable in dev only by reading the token out of the run report and loading
+`{riivo_PaymentLink_BaseUrl}/p/{token}` by hand; the button *itself* can only be
+proved in an environment where the two agree.
+
+### The rest of it
+
+- **Parameters are sanitised and then checked.** Meta refuses a parameter
+  carrying a newline, a tab or four consecutive spaces — with a 400, not a
+  visibly broken message. Newline, carriage return and tab are replaced by
+  code point (`decodeUriComponent('%0A')`) rather than as literals, because a
+  control character nobody can see in a diff is the wrong thing to depend on.
+  Four spaces collapse **three times**: `replace` is single-pass, so one pass
+  turns 16 spaces into 4, still illegal. Then `Compose_|_Wa_Params_Clean`
+  asserts the result and holds the client if it is somehow still dirty — the
+  issue's own instruction to assert rather than assume.
+- **The filename is sanitised too.** It travels inside a `Content-Disposition`
+  header, where a quote or a backslash ends the field early — the multipart
+  equivalent of the hand-built JSON #102 refused to write, on a filename this
+  flow does not generate.
+- **Trimming is not cosmetic here.** Invoice numbers in this org carry trailing
+  spaces (`"luc duval - WATEST83695332 "`), and the D12 template interpolates
+  one.
+- **All 24 campaign templates are APPROVED in Meta**, in `en`, read off the
+  WABA on 2026-09-11 — worth knowing because our own `whatsappTemplates` table
+  still says 12 of them are `pending`. The app's status column is display-only
+  and gates nothing, so this is stale local data rather than a blocker;
+  `npx convex run actions/whatsappTemplateAdmin:reconcileMetaStatuses` would
+  realign it.
+- **Every attempt is logged, sent or refused.** One `riivo_whatsappcommunications`
+  row per attempt, status `sent` (463630001) or `failed` (463630003), with
+  Meta's own words in `riivo_failurereason` (truncated to 900 of the column's
+  1000 characters). Both reference flows log only successes; this campaign's
+  rule is that a silent client is never a silent failure, and the run report
+  expires with the run history while the row stays on the client's timeline.
+- **The bot is told what went out.** `WhatsApp - Child - Sign and Post Outbound
+  Template Send to Bot Webhook` (`5d353829`), called by both reference flows,
+  HMAC-signs the send and posts it to the conversational bot so an inbound
+  reply is threaded to the message that prompted it. That matters here more
+  than anywhere: every approved template ends by inviting a reply. It is called
+  last, only on a real send, and can never fail the touch.
+- **Both Meta calls sit in the same `Until` the mint call does**, retried only
+  while the endpoint answers 429 and waiting exactly as long as `Retry-After`
+  asks, with the platform's own retry policy switched off. Loop concurrency was
+  already capped at 1 (R8).
+- **Bookkeeping stays an OR.** A client reached on either channel has had their
+  touch. Counting it twice would spend two rungs of a five-rung ladder in one
+  day. A 429 retried to exhaustion, a refused template and a rejected parameter
+  all read false and advance no counter, so those clients are simply selected
+  again next run.
+- **Counts are kept side by side, never summed.** `riivo_whatsappsentcount`
+  joins `riivo_emailsentcount` on the run row (13 columns now) and
+  `whatsAppsSent` joins `emailsSent` in the report: a run where WhatsApp
+  collapsed while email held up is invisible in a single total.
+
+### One asymmetry, deliberately left
+
+The email child re-reads the contact at send time and refuses on `donotemail`,
+so email gets a second consent check against fresher data for free. **WhatsApp
+does not.** Consent is read once, in the selection loop, and the send loop
+trusts it. Closing the gap means one extra `GetItem` per eligible client per
+run; the exposure it would close is one message to somebody who opted out
+*during* the run, and they are excluded from the next one anyway. Beyond what
+the issue asks, so not built — but it is a real difference between the two
+channels and should be a deliberate choice rather than a discovery.
+
+### Still needed for #103
+
+1. `bash flows/deploy-bad-debt-touches.sh --replace` — the same one command,
+   now carrying dev from #99 all the way to #103. The run table gains
+   `riivo_whatsappsentcount` (13 columns); the three Meta variables already
+   exist and are only checked for.
+2. The human steps the script prints as 11–15: colleague rehearsal on real
+   handsets → check the bookkeeping and the log rows → prove an opt-out is
+   honoured → canary on real clients → **clear the canary list**.
+
+---
+
 ## Open threads worth not losing
 
 - **#96 prod half is unanswered and blocks prod promotion.** The daily
@@ -510,6 +655,14 @@ read it. So:
   its own ticket next to the `2b89f0b5` one.
 - **`riivo_PaymentLink_FunctionKey` is stored as a plaintext default value** on
   the environment variable. Flagged in the spec, not actioned.
+  `riivo_varMetaAccessToken` — a live Meta bearer token — is stored the same
+  way, and so is `riivo_HmacFunctionKey`. Same ticket, wider than one key.
+- **The WhatsApp button prefix and `riivo_PaymentLink_BaseUrl` disagree in both
+  directions** (see #103 above). The campaign templates point at
+  `payment-link-ttt.azurewebsites.net`, the D12 fallback at dev's host. Neither
+  is fixable in the flow, and one of the two will be wrong in whichever
+  environment goes live first. **This blocks AC 4 of #103 from being proved in
+  dev**, and it is the first thing to settle before prod.
 - Two #98 ACs still need a human in the maker portal: the same-day re-run check
   and the dry-run diff against the comms tool's list.
 
