@@ -150,6 +150,32 @@ never-paid) × **touch number** → `bad_debt_wa_{band}_{relationship}_day{N}`. 
 derives from the newest invoice rather than the oldest — a departure from CONTEXT.md's Campaign
 key. See R4.
 
+Built in #99. Three things the build settled that the issue did not spell out:
+
+- **Age is recomputed from the invoice's `createdon` on every run**, the same basis the proven
+  cadence flow `c430ace5` uses for its step ladder. `riivo_baddebt.riivo_invoiceage` is *not* used:
+  it is stamped when the row is created and does not age, so banding on it would freeze a debtor in
+  the band they entered at.
+- **Relationship is asked as a top-1 existence query** — "does this client have any invoice at
+  `statuscode 958140003` (Paid)" — so a client with hundreds of paid invoices costs the same as one
+  with a single one. Partially Paid deliberately does **not** count as having paid: the paid-before
+  copy opens "it's been great having you as a client", which a part-payment does not earn.
+- **An invoice outside the In-scope window has no band, and the client is HELD, not banded into the
+  nearest neighbour.** `CONTEXT.md` § In-scope invoice puts the window at older than 30 days and
+  younger than three years, and #98's selection query enforces neither bound. Guessing a band would
+  put a *prescribed* debt into the 1–3y final-notice copy — precisely the population where an
+  acknowledgement revives the debt. Held rows are named in the dry-run report with their reason, so
+  a silent client is never a silent failure. **This is the remaining gap in #98's selection query**:
+  the hold catches it downstream rather than the query excluding it upstream. Worth closing when the
+  prod book (which is mostly legacy debt) comes into view.
+
+**Touch bookkeeping** writes `riivo_campaignsendcount` (read + 1, never a recount) and
+`riivo_campaignlastsent` on every touch, and `riivo_campaignfirstsent` on the first only — from a
+separate branch, so a later touch's patch cannot carry the field at all. `riivo_campaignbounced` and
+`riivo_campaignlastreply` are owned by the bounce and reply paths and appear in neither patch. The
+write is gated on a **send outcome**, not on test mode: until #102/#103 land, both channel outcomes
+are literally `false`, so turning `riivo_ReminderTestMode` off early advances no counter.
+
 ### Consent is not optional
 
 D6 sets the *campaign* stop rule to Paid-only; channel consent is separate and enforced regardless:
@@ -260,8 +286,9 @@ measurement of a run has to account for both plus the new flow.
 - **P1 — Clone and select.** Clone the cadence orchestrator, swap in the bad-debt population and
   the twice-weekly recurrence, run in test mode. Verify its selection against a recipient list the
   tool produces for the same day. No sends.
-- **P2 — Template selection.** Campaign-key mapping to the 24 templates, plus touch bookkeeping.
-  Still test mode.
+- **P2 — Template selection.** ✅ Built (#99): campaign-key mapping to the 24 templates, the D12
+  fallback past touch 4, and touch bookkeeping gated on a send outcome. Still test mode, still no
+  sends. Awaiting the dev replace-deploy and a human test run.
 - **P3 — Email live.** To colleague addresses, then a small canary.
 - **P4 — WhatsApp live.** Same progression.
 - **P5 — Schedule and hand over.** Recurrence on in dev, observe two cycles, hand to Luc for prod.

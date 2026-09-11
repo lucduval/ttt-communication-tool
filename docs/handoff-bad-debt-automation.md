@@ -14,8 +14,8 @@ against the dev org on 2026-09-11 unless it says otherwise.
 | #96 Prod flow inventory + SP permissions | **Open.** Dev half done and commented on the issue; prod half untouched. |
 | #97 Cadence policy | **Closed.** Decisions recorded as D10–D12 in the spec. |
 | #98 Selection, dry run only | **Open but built and deployed.** Two ACs need a human run. |
-| #99 Template resolution + touch bookkeeping | **Ready to start — this is the next one.** |
-| #100 Token minting + PDF | Ready. Blocked-by #98 is satisfied in practice. |
+| #99 Template resolution + touch bookkeeping | **Open but built.** Needs the replace-deploy and a human run. |
+| #100 Token minting + PDF | **Ready to start — this is the next one.** Blocked-by #98 is satisfied in practice. |
 | #101 Volume tripwire | Ready. |
 | #102–#104 | Human-gated (live sends, recurrence). |
 
@@ -60,7 +60,7 @@ back as `7229f676-afd5-f011-8544-000d3adca789` from `WhoAmI`.
 
 | Flow | GUID | State |
 |---|---|---|
-| `Invoice - Scheduled - Send Bad Debt Recovery Touches` **(ours, #98)** | `7d112cdb-bcad-f111-aaab-002248a35b45` | draft / **off** |
+| `Invoice - Scheduled - Send Bad Debt Recovery Touches` **(ours, #98+#99)** | `7d112cdb-bcad-f111-aaab-002248a35b45` | draft / **off** — carries the #98 definition; #99 replaces it and mints a NEW guid |
 | `Invoice - Scheduled - Payment Reminder & Link Cadence` | `c430ace5-c57b-f111-ab0f-000d3ada6ac0` | off |
 | `Invoice - Scheduled - Bad Debt Referral & Owner Digest` | `dd5a766f-d67d-f111-ab0f-002248a29481` | off |
 | `Invoice - Child - Generate PDF` | `be610dd6-bf7b-f111-ab0f-000d3ada6ac0` | **on** |
@@ -74,7 +74,7 @@ Environment variables that matter:
 |---|---|
 | `riivo_PaymentLink_BaseUrl` | `https://payment-link-ttt.azurewebsites.net` |
 | `riivo_PaymentLink_FunctionKey` | (secret, plaintext default value — review separately) |
-| `riivo_WhatsApp_Template_WithButton` | `ttt_invoice_reminder_paylink_v2` |
+| `riivo_WhatsApp_Template_WithButton` | `ttt_invoice_reminder_paylink_v2` — also the D12 touch-5+ fallback, read by #99 |
 | `riivo_WhatsApp_Template_NoButton` | `ttt_invoice_reminder` |
 | `riivo_ReminderTestMode` | `true` |
 | `riivo_BadDebtMinDaysBetweenTouches` | `2` — created for #98 |
@@ -98,23 +98,30 @@ Environment variables that matter:
 
 ---
 
-## The #98 artifact, and how to extend it
+## The #98/#99 artifact, and how to extend it
 
 The flow definition is **authored as tested code**, not clicked together:
 
 | File | What it is |
 |---|---|
 | `flows/badDebtRecoveryTouches.ts` | Builds the definition. Edit here, never in the designer. |
-| `flows/__tests__/badDebtRecoveryTouches.test.ts` | 29 tests pinning the expensive-to-get-wrong properties. |
-| `flows/deploy-bad-debt-touches.sh` | Idempotent deploy. `--check` reads only. |
+| `flows/__tests__/badDebtRecoveryTouches.test.ts` | 81 tests pinning the expensive-to-get-wrong properties. |
+| `flows/deploy-bad-debt-touches.sh` | Idempotent deploy. `--check` reads only; `--replace` re-deploys a changed definition. |
 
-Verified at handoff: the `clientdata` in Dataverse is **byte-for-byte identical**
-to what the module renders, so the tested definition and the deployed one cannot
-have drifted.
+`--check` compares the rendered definition against the `clientdata` in
+Dataverse byte-for-byte, so "the tested artifact is the deployed artifact" is a
+command, not a claim.
+
+**Updating a deployed flow is a REPLACE.** `clientdata` cannot be PATCHed, so
+`--replace` POSTs the new definition, verifies the stored bytes match, and only
+then DELETEs the old row — which mints a **new `workflowid`**, so update any
+reference to the guid afterwards. It refuses to replace a flow that is switched
+on, and refuses to act at all if two flows share the name.
 
 ```
-npx vitest run flows/                              # 29 tests
+npx vitest run flows/                              # 81 tests
 bash flows/deploy-bad-debt-touches.sh --check      # read-only state report
+bash flows/deploy-bad-debt-touches.sh --replace    # re-deploy after an edit
 ```
 
 ### Facts the tests encode — do not re-derive them by guessing
@@ -137,33 +144,61 @@ bash flows/deploy-bad-debt-touches.sh --check      # read-only state report
   a go-live `createdon` floor that would silently exclude the legacy bad debt
   making up most of the book.
 - **WDL has no `sort()`.** "Newest" is resolved by `max()` over `ticks()`.
+- **Action names must be unique across the WHOLE definition**, not per scope,
+  and scopes nest at most 8 deep. The module renders 46 actions at depth 6.
+- **`ttt_customer` on `new_invoices` is polymorphic** (account *or* contact),
+  so `_ttt_customer_value eq {guid}` is the right filter either way.
+  `riivo_baddebt.riivo_client` is contact-only.
 
 ---
 
-## Next issue: #99 — template resolution and touch bookkeeping
+## What #99 added, and the seam it left
 
-Template name is `bad_debt_wa_{band}_{relationship}_day{N}`, N ∈ {0,10,25,40}.
-Band comes from the invoice being chased (the **newest**, per D10);
-relationship is paid-before / never-paid and is a property of the **client**,
-not the invoice.
+The campaign key resolves in `Apply_to_each_|_Selected`: relationship from a
+top-1 "has this client ever paid" query, age band recomputed from the chased
+invoice's `createdon`, touch number from `riivo_campaignsendcount + 1`, and the
+name assembled as `bad_debt_wa_{band}_{relationship}_day{N}` — then **checked
+against the 24 approved names** before it counts as sendable. Past touch 4, D12
+hands over to `riivo_WhatsApp_Template_WithButton`; it never wraps to touch 1.
 
-Bookkeeping lives on `riivo_baddebt` — all columns already exist:
-`riivo_campaignsendcount`, `riivo_campaignlastsent`, `riivo_campaignfirstsent`,
-`riivo_campaignbounced`, `riivo_campaignlastreply`.
+**The seam #102/#103 replace is `Compose_|_Send_Outcome`.** Bookkeeping records
+a touch that *happened*, so the write is gated on a send outcome rather than on
+test mode. This slice sends nothing, so both outcomes are literally `false` and
+no counter can move — flipping `riivo_ReminderTestMode` off early is safe.
+Replace that compose with the real channel results and the gate starts working
+as intended; the test named "cannot advance a counter" is the one that will
+fail and must be updated when you do.
 
-Three things to be careful about:
+**Holds are the other thing to know.** A client whose chased invoice is younger
+than 30 days or older than three years has **no** age band and is held, not
+banded into the nearest neighbour — guessing would put a prescribed debt into
+the 1–3y final-notice copy. #98's selection query enforces neither bound, so the
+hold is where it is caught. Held rows appear in the dry-run report with a
+reason.
 
-1. **Merge monotonically.** A blind overwrite erases earlier runs' figures.
-   This has already happened once on this table.
-2. **`riivo_campaignsendcount` both selects the template and is incremented by
-   the touch** — bookkeeping and selection are two halves of one mechanism.
-3. **Past touch 4, follow D12** (general template, keep sending). Never wrap to
-   touch 1.
+The tests **evaluate** the deployed WDL rather than string-matching it (there is
+a small expression reader in the test file), and the 24 approved names are
+cross-checked against `convex/seedWhatsappTemplates.ts`, which mirrors what is
+approved in Meta.
 
-Note: #98's module deliberately does **not** read or write
-`riivo_campaignsendcount` — a test asserts its absence, because that field
-belongs to #99. Expect to relax that specific test when you add bookkeeping,
-and keep the "no send" tests untouched.
+### Still needed for #99
+
+1. `bash flows/deploy-bad-debt-touches.sh --replace` — a Dataverse write, which
+   the agent permission classifier blocks; Luc ran the #98 deploy for the same
+   reason. Note the new `workflowid` it prints.
+2. A human test-mode run, reading `Compose_|_Dry_Run_Report`: every touch row
+   carries `ageBand`, `relationship`, `touch` and `templateName`; every held row
+   carries a `reason`. In dev today that is 5 clients, all `90d_1y`, two of them
+   on touch 2 (`riivo_campaignsendcount = 1`), so the Day-0 and Day-10 paths are
+   both exercisable without touching data.
+
+## Next issue: #100 — token minting and PDF generation
+
+Mint per client (skip an invoice that already has `riivo_paymenttoken`), call
+`Invoice - Child - Generate PDF` (`be610dd6`) rather than the generator endpoint
+directly, and abort that client cleanly if either fails — no message without its
+document. Both blocks are lifted from the cadence flow `c430ace5`. The
+`resolvedTouches` rows in the dry-run report are the input shape it consumes.
 
 ---
 
