@@ -33,15 +33,35 @@
  * left alone so the next run retries them, and that their failure stays theirs
  * instead of ending the run for everyone behind them in a sequential loop.
  */
+/* eslint-disable @typescript-eslint/no-explicit-any --
+ * Every assertion here walks a Workflow Definition Language tree: a
+ * heterogeneous JSON shape the platform defines and TypeScript cannot, where
+ * each node's fields depend on its `type`. `any` at the walk is honest, and
+ * modelling the WDL schema to satisfy the rule would mean maintaining a second,
+ * unverified description of Microsoft's format. Declared once here rather than
+ * left as the 25 individual errors this file used to report.
+ */
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   buildBadDebtRecoveryTouchesFlow,
+  ALERT_CHILD_FLOW_ID,
   APPROVED_CAMPAIGN_TEMPLATES,
+  DEFAULT_VOLUME_THRESHOLD_PERCENT,
   FLOW_NAME,
   ONGOING_TEMPLATE_VARIABLE,
   PDF_CHILD_FLOW_ID,
+  VOLUME_THRESHOLD_VARIABLE,
 } from "../badDebtRecoveryTouches";
+import {
+  BASELINE_OUTCOMES,
+  RUN_OUTCOME,
+  RUN_TABLE_ATTRIBUTES,
+  RUN_TABLE_ID,
+  RUN_TABLE_SET,
+  buildRunTableMetadata,
+  buildRunTableAttributeMetadata,
+} from "../badDebtRunTable";
 
 const flow = buildBadDebtRecoveryTouchesFlow();
 const json = JSON.stringify(flow);
@@ -156,6 +176,14 @@ function evaluate(expression: string, env: Record<string, unknown>): unknown {
         return a.some(Boolean);
       case "add":
         return (a[0] as number) + (a[1] as number);
+      case "sub":
+        return (a[0] as number) - (a[1] as number);
+      case "mul":
+        return (a[0] as number) * (a[1] as number);
+      case "div":
+        // WDL's div() on two integers is integer division: it truncates. The
+        // tripwire's percentage leans on that, so the reader must too.
+        return Math.trunc((a[0] as number) / (a[1] as number));
       case "coalesce":
         return a.find((x) => x !== null && x !== undefined);
       case "empty":
@@ -248,10 +276,11 @@ describe("the flow sends nothing at all", () => {
     expect(json).not.toMatch(/graph\.facebook\.com|bulksms|clickatell/i);
   });
 
-  it("writes nothing to Dataverse but the touch bookkeeping and a minted token", () => {
+  it("writes nothing to Dataverse but the touch bookkeeping, a minted token and its own run history", () => {
     // #98 asserted zero writes. #99 added the first-touch and repeat-touch
-    // patches; #100 adds the token write-back. Three, enumerated by name and
-    // table, so a fourth write cannot arrive unnoticed.
+    // patches; #100 adds the token write-back; #101 adds the two writes to its
+    // own run table — which touch no client record and no client-facing field.
+    // Five, enumerated by name and table, so a sixth cannot arrive unnoticed.
     const writes = actions
       .filter(([, a]) =>
         ["CreateRecord", "UpdateRecord", "DeleteRecord"].includes(
@@ -265,7 +294,9 @@ describe("the flow sends nothing at all", () => {
       ]);
 
     expect(writes.sort()).toEqual([
+      ["Create_|_Run_Record", "CreateRecord", RUN_TABLE_SET],
       ["Update_|_Invoice_Token", "UpdateRecord", "new_invoiceses"],
+      ["Update_|_Run_Record", "UpdateRecord", RUN_TABLE_SET],
       ["Update_|_Touch_First", "UpdateRecord", "riivo_baddebts"],
       ["Update_|_Touch_Repeat", "UpdateRecord", "riivo_baddebts"],
     ]);
@@ -853,7 +884,20 @@ describe("payment token and PDF (#100)", () => {
     // safe only while every consumer reads these two composes.
     expect(json.split("body('Run_Child_|_Generate_PDF')?['pdfBase64']")).toHaveLength(2);
     expect(json.split("'/p/'")).toHaveLength(2);
-    expect(json.split("workflowReferenceName")).toHaveLength(2);
+    // #101 adds the second child reference, so the count is no longer 1 — but
+    // the property this test is really about still holds: every child flow is
+    // named exactly once, at one call site, and both GUIDs are dev's. Both are
+    // re-pointed by hand on promotion (see the module's PROMOTION HAZARD note).
+    const children = actions
+      .filter(([, a]) => a.type === "Workflow")
+      .map(([name, a]) => [name, a.inputs.host.workflowReferenceName]);
+    expect(children).toEqual([
+      ["Run_Child_|_Volume_Alert", ALERT_CHILD_FLOW_ID],
+      ["Run_Child_|_Generate_PDF", PDF_CHILD_FLOW_ID],
+    ]);
+    expect(json.split("workflowReferenceName")).toHaveLength(
+      children.length + 1,
+    );
   });
 
   it("carries the PDF's size into the report, never its bytes", () => {
@@ -997,6 +1041,530 @@ describe("throttling, handled rather than hoped for (#100)", () => {
     ).toBe(1);
     for (const slug of ["Mint", "Pdf"]) {
       expect(action(`Set_variable_|_${slug}_Pending`).inputs.value).toBe(false);
+    }
+  });
+});
+
+/**
+ * The volume tripwire (#101).
+ *
+ * Every other guard in this flow is per-recipient, so none of them can see the
+ * three run-level faults that matter: a filter regression that matches ten
+ * times the usual population, an upstream change that empties the selection,
+ * and a bad-debt creation flow that floods the table overnight. The tests here
+ * pin the four properties that make this brake worth having — that it is
+ * consulted BEFORE anything is produced, that its baseline cannot be poisoned
+ * by the very run it parked, that a park produces nothing at all, and that a
+ * human hears about it with the numbers in hand.
+ */
+describe("the volume tripwire (#101)", () => {
+  const topLevel = definition.actions as Record<string, any>;
+
+  /** Does `later` run only once `earlier` has, following runAfter? */
+  const runsAfter = (later: string, earlier: string): boolean => {
+    const seen = new Set<string>();
+    const walk = (name: string): boolean => {
+      if (name === earlier) return true;
+      if (seen.has(name)) return false;
+      seen.add(name);
+      return Object.keys(topLevel[name]?.runAfter ?? {}).some(walk);
+    };
+    return walk(later);
+  };
+
+  /** Every action nested anywhere inside the parked branch. */
+  const parkedBranch = (() => {
+    const found: Array<[string, any]> = [];
+    const walk = (actions: Record<string, any>) => {
+      for (const [name, act] of Object.entries<any>(actions ?? {})) {
+        found.push([name, act]);
+        walk(act.actions);
+        walk(act.else?.actions);
+      }
+    };
+    walk(action("Condition_|_Tripwire_Tripped").actions);
+    return found;
+  })();
+
+  /**
+   * Runs the two deployed expressions in order — the percentage, then the
+   * verdict that reads it — so these cases exercise the WDL that will run in
+   * Power Automate rather than a TypeScript restatement of it.
+   */
+  const judge = ({
+    selected,
+    previous,
+    hasPrevious = true,
+    threshold = DEFAULT_VOLUME_THRESHOLD_PERCENT,
+  }: {
+    selected: number;
+    previous: number;
+    hasPrevious?: boolean;
+    threshold?: number;
+  }) => {
+    const change = evaluate(composeInputs("Compose_|_Volume_Change_Percent"), {
+      "outputs('Compose_|_Selected_Count')": selected,
+      "outputs('Compose_|_Previous_Count')": previous,
+    }) as number;
+    const verdict = evaluate(composeInputs("Compose_|_Tripwire_Verdict"), {
+      "outputs('Compose_|_Has_Previous_Run')": hasPrevious,
+      "outputs('Compose_|_Selected_Count')": selected,
+      "outputs('Compose_|_Previous_Count')": previous,
+      "outputs('Compose_|_Volume_Change_Percent')": change,
+      "outputs('Compose_|_Volume_Threshold_Percent')": threshold,
+    }) as string;
+    return { change, verdict };
+  };
+
+  describe("what it lets through, and what it parks", () => {
+    it.each([
+      ["an unchanged run", { selected: 40, previous: 40 }, "proceed"],
+      ["a 30% rise", { selected: 52, previous: 40 }, "proceed"],
+      ["a 25% fall", { selected: 30, previous: 40 }, "proceed"],
+      // 56/40 is exactly 40%, which is not MORE than the threshold.
+      ["a move to exactly the threshold", { selected: 56, previous: 40 }, "proceed"],
+      ["a 42% rise", { selected: 57, previous: 40 }, "volume"],
+      ["a 42% fall", { selected: 23, previous: 40 }, "volume"],
+      ["a tenfold rise", { selected: 400, previous: 40 }, "volume"],
+      ["an emptied selection", { selected: 0, previous: 40 }, "empty"],
+    ])("parks %s as '%s'", (_label, counts: any, expected) => {
+      expect(judge(counts).verdict).toBe(expected);
+    });
+
+    it("proceeds on the first ever run, whatever it selected", () => {
+      // No baseline must never mean deadlock: a campaign that cannot start is
+      // indistinguishable from one that is broken.
+      for (const selected of [0, 5, 4000]) {
+        expect(judge({ selected, previous: 0, hasPrevious: false }).verdict).toBe(
+          "proceed",
+        );
+      }
+    });
+
+    it("reports an emptied selection as empty rather than as a 100% fall", () => {
+      // Both are true; only one of them tells the operator what happened.
+      expect(judge({ selected: 0, previous: 40 })).toEqual({
+        change: 100,
+        verdict: "empty",
+      });
+    });
+
+    it("proceeds from a zero baseline, which is the gap it cannot close", () => {
+      // A previous run that legitimately selected nobody leaves no proportion
+      // to measure against, so growth from zero is unguarded. Documented, not
+      // fixed: the alternative is parking every restart.
+      expect(judge({ selected: 500, previous: 0 }).verdict).toBe("proceed");
+    });
+
+    it("measures the move in both directions with no abs()", () => {
+      // WDL has no abs(): the documented math set is add, div, max, min, mod,
+      // mul, pow, rand, range and sub. max(a-b, b-a) is the absolute
+      // difference, and a rise and an equal fall must read the same.
+      expect(composeInputs("Compose_|_Volume_Change_Percent")).not.toContain("abs(");
+      expect(judge({ selected: 60, previous: 40 }).change).toBe(
+        judge({ selected: 20, previous: 40 }).change,
+      );
+    });
+
+    it("never divides by zero, and does not rely on if() to avoid it", () => {
+      // if() takes values, not branches: both arms are evaluated, so a
+      // "guarded" div() would still divide. The divisor is max(previous, 1).
+      expect(composeInputs("Compose_|_Volume_Change_Percent")).toContain(
+        "max(outputs('Compose_|_Previous_Count'), 1)",
+      );
+      expect(() => judge({ selected: 7, previous: 0 })).not.toThrow();
+    });
+  });
+
+  describe("the threshold is configuration, not a literal", () => {
+    const param = Object.entries<any>(definition.parameters).find(
+      ([, p]) => p.metadata?.schemaName === VOLUME_THRESHOLD_VARIABLE,
+    )!;
+
+    it("reads the environment variable, under its display name", () => {
+      expect(param).toBeDefined();
+      expect(composeInputs("Compose_|_Volume_Threshold_Percent")).toContain(
+        `parameters('${param[0]}')`,
+      );
+    });
+
+    it("changes the verdict when the threshold changes", () => {
+      // The one assertion that proves the comparison consults the variable
+      // rather than a baked-in number.
+      const counts = { selected: 48, previous: 40 }; // a 20% move
+      expect(judge({ ...counts, threshold: 10 }).verdict).toBe("volume");
+      expect(judge({ ...counts, threshold: 40 }).verdict).toBe("proceed");
+    });
+
+    it("falls back to the documented default when the variable is unset", () => {
+      const read = (value: unknown) =>
+        evaluate(composeInputs("Compose_|_Volume_Threshold_Percent"), {
+          [`parameters('${param[0]}')`]: value,
+        });
+      expect(read(null)).toBe(DEFAULT_VOLUME_THRESHOLD_PERCENT);
+      expect(read("15")).toBe(15);
+      // int() throws on a non-numeric value, which fails the run at this
+      // compose — upstream of everything — rather than sending with a
+      // threshold nobody meant.
+      expect(() => read("forty")).toThrow();
+    });
+  });
+
+  describe("the baseline cannot be poisoned by the run it parked", () => {
+    const previous = action("List_rows_|_Previous_Run").inputs.parameters;
+
+    it("compares only against a run that was acted on", () => {
+      // THE safety property. A tenfold selection that set the baseline would
+      // park once and then look normal for ever after.
+      for (const outcome of BASELINE_OUTCOMES) {
+        expect(previous["$filter"]).toContain(`riivo_outcome eq '${outcome}'`);
+      }
+      expect(previous["$filter"]).not.toContain(RUN_OUTCOME.ABORTED);
+    });
+
+    it("reads exactly the latest one", () => {
+      expect(previous["$orderby"]).toBe("createdon desc");
+      expect(previous["$top"]).toBe(1);
+    });
+
+    it("records the outcome the verdict implies", () => {
+      const outcome = (verdict: string) =>
+        evaluate(
+          action("Create_|_Run_Record").inputs.parameters["item/riivo_outcome"],
+          { "outputs('Compose_|_Tripwire_Verdict')": verdict },
+        );
+      expect(outcome("proceed")).toBe(RUN_OUTCOME.PROCEEDED);
+      expect(outcome("volume")).toBe(RUN_OUTCOME.ABORTED);
+      expect(outcome("empty")).toBe(RUN_OUTCOME.ABORTED);
+    });
+
+    it("offers the human the one-field way to bless a real change", () => {
+      // Raising the threshold to let one run through is the change that never
+      // gets put back; marking that run accepted expires on its own.
+      expect(action("Run_Child_|_Volume_Alert").inputs.body.text).toContain(
+        RUN_OUTCOME.ACCEPTED,
+      );
+    });
+
+    it("treats a rehearsal as a baseline, and records which it was", () => {
+      // Selection does not read test mode — only the bookkeeping gate does —
+      // so a dry run selects exactly what a live run would and is a valid
+      // comparison. The column is what lets a human tell them apart later.
+      expect(
+        action("Create_|_Run_Record").inputs.parameters["item/riivo_testmode"],
+      ).toBe("@outputs('Compose_|_TestMode')");
+      expect(previous["$filter"]).not.toContain("riivo_testmode");
+    });
+  });
+
+  describe("a parked run produces nothing", () => {
+    it("is consulted before anything is minted, rendered or recorded", () => {
+      // Not merely "before any send": the per-client loop mints tokens, writes
+      // them back and renders PDFs in BOTH modes, so the gate has to sit in
+      // front of the loop, and the only route to any of it is through the loop.
+      expect(runsAfter("Apply_to_each_|_Selected", "Condition_|_Tripwire_Tripped")).toBe(
+        true,
+      );
+      for (const costly of [
+        "HTTP_|_Mint_Token",
+        "Run_Child_|_Generate_PDF",
+        "Update_|_Invoice_Token",
+        "Update_|_Touch_First",
+        "Update_|_Touch_Repeat",
+      ]) {
+        expect(Object.keys(topLevel), `${costly} is reachable without the gate`)
+          .not.toContain(costly);
+      }
+    });
+
+    it("does nothing in the parked branch but alert and terminate", () => {
+      expect(parkedBranch.map(([name]) => name)).toEqual([
+        "Run_Child_|_Volume_Alert",
+        "Terminate_|_Parked",
+      ]);
+      for (const [name, act] of parkedBranch) {
+        expect(
+          act.inputs?.host?.operationId,
+          `${name} touches Dataverse on a parked run`,
+        ).toBeUndefined();
+      }
+    });
+
+    it("terminates once, as a failure, and only from here", () => {
+      const terminates = actions.filter(([, a]) => a.type === "Terminate");
+      expect(terminates.map(([n]) => n)).toEqual(["Terminate_|_Parked"]);
+      expect(terminates[0][1].inputs.runStatus).toBe("Failed");
+      // Failed rather than Succeeded so the park is red in run history and
+      // reaches the platform's own failure notification — a second path to a
+      // human if the email does not arrive.
+      expect(terminates[0][1].inputs.runError.message).toContain(
+        "outputs('Compose_|_Tripwire_Reason')",
+      );
+    });
+
+    it("terminates even if the alert could not be delivered", () => {
+      // The park is the guarantee; the email is a courtesy. An undeliverable
+      // courtesy must not leave the run alive to send.
+      expect(action("Terminate_|_Parked").runAfter).toEqual({
+        "Run_Child_|_Volume_Alert": ["Succeeded", "Failed", "Skipped", "TimedOut"],
+      });
+    });
+  });
+
+  describe("the run history, written whatever the outcome", () => {
+    const created = action("Create_|_Run_Record").inputs.parameters;
+    const patched = action("Update_|_Run_Record").inputs.parameters;
+
+    it("records the count before the verdict is acted on", () => {
+      // Two reasons it is not deferred to the end: a run that dies mid-loop
+      // has still selected what it selected, and a parked run is exactly the
+      // one whose count a human needs.
+      expect(runsAfter("Condition_|_Tripwire_Tripped", "Create_|_Run_Record")).toBe(
+        true,
+      );
+      expect(created["item/riivo_selectedcount"]).toBe(
+        "@outputs('Compose_|_Selected_Count')",
+      );
+    });
+
+    it("keeps the evidence a later reader needs to judge the decision", () => {
+      // The threshold is stored because retuning the environment variable
+      // afterwards would otherwise make an old decision unreadable.
+      for (const field of [
+        "item/riivo_previouscount",
+        "item/riivo_changepercent",
+        "item/riivo_thresholdpercent",
+        "item/riivo_abortreason",
+      ]) {
+        expect(created[field], `${field} is not recorded`).toBeDefined();
+      }
+    });
+
+    it("patches the after-the-loop counts onto the row it created", () => {
+      expect(patched.recordId).toBe(
+        `@outputs('Create_|_Run_Record')?['body/${RUN_TABLE_ID}']`,
+      );
+      expect(Object.keys(patched).filter((k) => k.startsWith("item/"))).toEqual([
+        "item/riivo_resolvedcount",
+        "item/riivo_heldcount",
+      ]);
+    });
+
+    it("names every column it reads and writes on the declared table", () => {
+      // The flow addresses columns as strings, so a typo is invisible until a
+      // live run fails. These are the names the deploy script creates.
+      const declared = new Set(RUN_TABLE_ATTRIBUTES.map((a) => a.logicalName));
+      const platform = new Set(["createdon", "statecode", RUN_TABLE_ID]);
+      const referenced = new Set<string>();
+      for (const [, act] of actions) {
+        const params = act.inputs?.parameters ?? {};
+        if (params.entityName !== RUN_TABLE_SET) continue;
+        for (const key of Object.keys(params)) {
+          if (key.startsWith("item/")) referenced.add(key.slice(5));
+        }
+        for (const field of String(params["$select"] ?? "").split(",")) {
+          if (field) referenced.add(field.trim());
+        }
+        for (const field of String(params["$filter"] ?? "").match(/riivo_\w+/g) ??
+          []) {
+          referenced.add(field);
+        }
+        const order = String(params["$orderby"] ?? "").split(" ")[0];
+        if (order) referenced.add(order);
+      }
+
+      expect(referenced.size).toBeGreaterThan(8);
+      for (const field of referenced) {
+        expect(
+          declared.has(field) || platform.has(field),
+          `${field} is not a column on ${RUN_TABLE_SET}`,
+        ).toBe(true);
+      }
+    });
+  });
+
+  describe("the alert reaches a human with the numbers", () => {
+    const alert = action("Run_Child_|_Volume_Alert");
+
+    it("uses the house failed-flow child rather than sending its own email", () => {
+      // 218 of this org's 322 modern flows alert in exactly this shape. The
+      // child owns the recipient (riivo_varFlowErrorTeamMail), the sender and
+      // the run link — and using it keeps this build's strongest guarantee
+      // intact: that the flow creates no email row and performs no SendEmail
+      // until #102/#103 deliberately add one.
+      expect(alert.type).toBe("Workflow");
+      expect(alert.inputs.host.workflowReferenceName).toBe(ALERT_CHILD_FLOW_ID);
+      expect(ALERT_CHILD_FLOW_ID).not.toBe(PDF_CHILD_FLOW_ID);
+    });
+
+    it("carries the selected count, the previous count and the threshold", () => {
+      const reason = evaluate(composeInputs("Compose_|_Tripwire_Reason"), {
+        "outputs('Compose_|_Tripwire_Verdict')": "volume",
+        "outputs('Compose_|_Selected_Count')": 412,
+        "outputs('Compose_|_Previous_Count')": 38,
+        "outputs('Compose_|_Volume_Change_Percent')": 984,
+        "outputs('Compose_|_Volume_Threshold_Percent')": 40,
+      }) as string;
+      expect(reason).toContain("412");
+      expect(reason).toContain("38");
+      expect(reason).toContain("984%");
+      expect(reason).toContain("40%");
+      expect(alert.inputs.body.text).toContain("outputs('Compose_|_Tripwire_Reason')");
+    });
+
+    it("says which client was emptied out, when that is the fault", () => {
+      const reason = evaluate(composeInputs("Compose_|_Tripwire_Reason"), {
+        "outputs('Compose_|_Tripwire_Verdict')": "empty",
+        "outputs('Compose_|_Selected_Count')": 0,
+        "outputs('Compose_|_Previous_Count')": 38,
+        "outputs('Compose_|_Volume_Change_Percent')": 100,
+        "outputs('Compose_|_Volume_Threshold_Percent')": 40,
+      }) as string;
+      expect(reason).toContain("no clients at all");
+      expect(reason).toContain("38");
+    });
+
+    it("says nothing at all on a run that proceeded", () => {
+      expect(
+        evaluate(composeInputs("Compose_|_Tripwire_Reason"), {
+          "outputs('Compose_|_Tripwire_Verdict')": "proceed",
+          "outputs('Compose_|_Selected_Count')": 40,
+          "outputs('Compose_|_Previous_Count')": 40,
+          "outputs('Compose_|_Volume_Change_Percent')": 0,
+          "outputs('Compose_|_Volume_Threshold_Percent')": 40,
+        }),
+      ).toBe("");
+    });
+
+    it("passes the run identifiers the child needs for a working link", () => {
+      expect(alert.inputs.body.text_2).toBe("@workflow().tags.environmentName");
+      expect(alert.inputs.body.text_3).toBe("@workflow().name");
+      expect(alert.inputs.body.text_4).toBe("@workflow().run.name");
+      expect(alert.inputs.body.text_1).toContain("workflow().tags.flowDisplayName");
+      expect(alert.inputs.body.text_1).toContain("volume tripwire");
+    });
+
+    it("names no client in the alert", () => {
+      // The alert is counts only. The population is in the run record and the
+      // dry-run report, which are not a channel email address away from a
+      // debtor list landing in a Teams channel.
+      const body = JSON.stringify(alert.inputs.body);
+      expect(body).not.toContain("varSelected");
+      expect(body).not.toContain("varTouches");
+      expect(body).not.toContain("items(");
+    });
+  });
+
+  describe("the table the tripwire depends on", () => {
+    it("pins its own entity set name rather than trusting pluralisation", () => {
+      // The flow addresses the table by this exact string; a surprise
+      // ("riivo_baddebtrunses") would only surface in a live run.
+      expect(buildRunTableMetadata().EntitySetName).toBe(RUN_TABLE_SET);
+      expect(action("List_rows_|_Previous_Run").inputs.parameters.entityName).toBe(
+        RUN_TABLE_SET,
+      );
+    });
+
+    it("derives every logical name from its schema name, as Dataverse does", () => {
+      // The cross-check above is only meaningful if these agree.
+      for (const attribute of RUN_TABLE_ATTRIBUTES) {
+        expect(attribute.logicalName).toBe(attribute.schemaName.toLowerCase());
+      }
+    });
+
+    it("creates the table with its primary name column and nothing else", () => {
+      const meta = buildRunTableMetadata();
+      expect(meta.Attributes).toHaveLength(1);
+      expect((meta.Attributes[0] as any).IsPrimaryName).toBe(true);
+      expect(buildRunTableAttributeMetadata()).toHaveLength(
+        RUN_TABLE_ATTRIBUTES.length - 1,
+      );
+    });
+
+    it("gives the boolean column the option set Dataverse requires", () => {
+      const testMode = buildRunTableAttributeMetadata().find(
+        (a: any) => a.SchemaName === "riivo_TestMode",
+      ) as any;
+      expect(testMode["@odata.type"]).toBe(
+        "Microsoft.Dynamics.CRM.BooleanAttributeMetadata",
+      );
+      expect(testMode.OptionSet.TrueOption.Value).toBe(1);
+      expect(testMode.OptionSet.FalseOption.Value).toBe(0);
+    });
+  });
+});
+
+/**
+ * Structural invariants Power Automate enforces at deploy time.
+ *
+ * These caught nothing when they were written and are here because a mutation
+ * survived: re-pointing one `runAfter` produced a definition whose ordering
+ * assertions all still passed while the graph had become circular — something
+ * Dataverse would have accepted and the Flow service would have rejected, at
+ * the cost of a human's deploy attempt. The cheapest place to notice is here.
+ */
+describe("the definition is structurally deployable", () => {
+  /** Every scope's own action map: the top level, and each nested branch. */
+  const containers = (() => {
+    const found: Array<[string, Record<string, any>]> = [];
+    const walk = (path: string, map: Record<string, any>) => {
+      if (!map) return;
+      found.push([path, map]);
+      for (const [name, act] of Object.entries<any>(map)) {
+        walk(`${path}/${name}`, act.actions);
+        walk(`${path}/${name}:else`, act.else?.actions);
+      }
+    };
+    walk("", definition.actions);
+    return found;
+  })();
+
+  it("orders every action against siblings that exist in its own scope", () => {
+    // runAfter is scoped: naming an action from an enclosing scope is not a
+    // dependency, it is a definition the service refuses.
+    for (const [path, map] of containers) {
+      const siblings = new Set(Object.keys(map));
+      for (const [name, act] of Object.entries<any>(map)) {
+        for (const dependency of Object.keys(act.runAfter ?? {})) {
+          expect(
+            siblings.has(dependency),
+            `${path}/${name} runs after ${dependency}, which is not in its scope`,
+          ).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("has no circular ordering anywhere", () => {
+    for (const [path, map] of containers) {
+      const state = new Map<string, "open" | "done">();
+      const visit = (name: string, trail: string[]) => {
+        if (state.get(name) === "done") return;
+        expect(
+          state.get(name),
+          `cycle in ${path}: ${[...trail, name].join(" -> ")}`,
+        ).not.toBe("open");
+        state.set(name, "open");
+        for (const dependency of Object.keys(map[name]?.runAfter ?? {})) {
+          visit(dependency, [...trail, name]);
+        }
+        state.set(name, "done");
+      };
+      for (const name of Object.keys(map)) visit(name, []);
+    }
+  });
+
+  it("starts each scope from exactly one action", () => {
+    // Every scope here is written as a strict sequence, so a second action
+    // with an empty runAfter is not a parallel branch anyone intended — it is
+    // an action somebody forgot to thread, running immediately and reading
+    // outputs that do not exist yet. Empty else-branches have no root at all.
+    for (const [path, map] of containers) {
+      const roots = Object.entries<any>(map)
+        .filter(([, act]) => Object.keys(act.runAfter ?? {}).length === 0)
+        .map(([name]) => name);
+      expect(roots, `${path || "(top level)"} starts from ${roots.length}`)
+        .toHaveLength(Object.keys(map).length === 0 ? 0 : 1);
     }
   });
 });

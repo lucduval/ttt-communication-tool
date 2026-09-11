@@ -16,8 +16,15 @@ against the dev org on 2026-09-11 unless it says otherwise.
 | #98 Selection, dry run only | **Open but built and deployed.** Two ACs need a human run. |
 | #99 Template resolution + touch bookkeeping | **Open but built.** Needs the replace-deploy and a human run. |
 | #100 Token minting + PDF | **Open but built.** Rides the same replace-deploy and human run as #99. |
-| #101 Volume tripwire | **Ready to start — this is the next one.** |
-| #102–#104 | Human-gated (live sends, recurrence). |
+| #101 Volume tripwire | **Open but built.** Rides the same replace-deploy; also needs one new environment variable and one new table, both of which the deploy script creates. |
+| #102–#104 | **#102 is the next one.** Human-gated (live sends, recurrence). |
+
+**What is actually deployed in dev right now is the #99 definition.** Checked
+byte-for-byte on 2026-09-11: the flow in dev (`3c600c0b-c5ad-f111-aaab-002248a35b45`,
+draft/off) matches the rendered `#99` module exactly, so **#100's replace-deploy
+was never run**. One `--replace` therefore carries dev from #99 straight to
+#101 — the mint/PDF scope and the tripwire land together, and the workflowid
+changes again when it does.
 
 **#99, #100 and #101 all say "Blocked by #98".** That dependency is satisfied:
 #98's build is deployed and verified. Only its two human-verification ACs
@@ -60,13 +67,14 @@ back as `7229f676-afd5-f011-8544-000d3adca789` from `WhoAmI`.
 
 | Flow | GUID | State |
 |---|---|---|
-| `Invoice - Scheduled - Send Bad Debt Recovery Touches` **(ours, #98+#99)** | `7d112cdb-bcad-f111-aaab-002248a35b45` | draft / **off** — carries the #98 definition; #99 replaces it and mints a NEW guid |
+| `Invoice - Scheduled - Send Bad Debt Recovery Touches` **(ours)** | `3c600c0b-c5ad-f111-aaab-002248a35b45` | draft / **off** — carries the **#99** definition; #100+#101 replace it and mint a NEW guid. (`7d112cdb-…`, the #98 row, is gone.) |
 | `Invoice - Scheduled - Payment Reminder & Link Cadence` | `c430ace5-c57b-f111-ab0f-000d3ada6ac0` | off |
 | `Invoice - Scheduled - Bad Debt Referral & Owner Digest` | `dd5a766f-d67d-f111-ab0f-002248a29481` | off |
 | `Invoice - Child - Generate PDF` | `be610dd6-bf7b-f111-ab0f-000d3ada6ac0` | **on** |
 | `Email - Child - Build Branded HTML Email, Create or Send` | `0d0bc4d6-7f74-f111-ab0e-000d3ada6ac0` | **on** |
 | `Invoice - Automated - Close Bad Debt When Invoice Paid` | `fa37bef7-668a-f111-ab10-002248a29481` | **on** |
 | `Invoice - Scheduled - Send Overdue Payment SMS Reminders...` | `2b89f0b5-a9c7-eb11-bacc-000d3ab7951b` | **on** |
+| `Utility - Child - Email Team a Failed-Flow Alert with Run Link` | `6b0bff17-e79b-ed11-aad1-000d3ab479cf` | **on** — the house alert child, used by 218 of 322 flows; #101's park notifies through it |
 
 Environment variables that matter:
 
@@ -78,6 +86,9 @@ Environment variables that matter:
 | `riivo_WhatsApp_Template_NoButton` | `ttt_invoice_reminder` |
 | `riivo_ReminderTestMode` | `true` |
 | `riivo_BadDebtMinDaysBetweenTouches` | `2` — created for #98 |
+| `riivo_BadDebtVolumeChangeThresholdPercent` | **not created yet** — #101's only knob, default 40. `ensure_env_var` in the deploy script creates it |
+| `riivo_varFlowErrorTeamMail` | `233fd44c.riivo.io@za.teams.ms` — the alert child's recipient, i.e. where a parked run lands |
+| `riivo_EnvironmentAddress` | `https://ttt-financial-group2.crm4.dynamics.com/` (the legacy dev alias) — passed to the alert child so the email names the environment |
 
 ---
 
@@ -98,15 +109,16 @@ Environment variables that matter:
 
 ---
 
-## The #98/#99 artifact, and how to extend it
+## The artifact, and how to extend it
 
 The flow definition is **authored as tested code**, not clicked together:
 
 | File | What it is |
 |---|---|
 | `flows/badDebtRecoveryTouches.ts` | Builds the definition. Edit here, never in the designer. |
-| `flows/__tests__/badDebtRecoveryTouches.test.ts` | 81 tests pinning the expensive-to-get-wrong properties. |
-| `flows/deploy-bad-debt-touches.sh` | Idempotent deploy. `--check` reads only; `--replace` re-deploys a changed definition. |
+| `flows/badDebtRunTable.ts` | Declares the `riivo_baddebtrun` table (#101) and renders its metadata POSTs. The flow imports its names from here, so the two cannot drift. |
+| `flows/__tests__/badDebtRecoveryTouches.test.ts` | 143 tests pinning the expensive-to-get-wrong properties. |
+| `flows/deploy-bad-debt-touches.sh` | Idempotent deploy. `--check` reads only; `--replace` re-deploys a changed definition. Also creates the two environment variables this build owns and the run table, column by column. |
 
 `--check` compares the rendered definition against the `clientdata` in
 Dataverse byte-for-byte, so "the tested artifact is the deployed artifact" is a
@@ -119,7 +131,8 @@ reference to the guid afterwards. It refuses to replace a flow that is switched
 on, and refuses to act at all if two flows share the name.
 
 ```
-npx vitest run flows/                              # 81 tests
+npx vitest run flows/                              # 143 tests
+npx eslint flows/ && npx tsc --noEmit              # both clean for flows/
 bash flows/deploy-bad-debt-touches.sh --check      # read-only state report
 bash flows/deploy-bad-debt-touches.sh --replace    # re-deploy after an edit
 ```
@@ -145,7 +158,10 @@ bash flows/deploy-bad-debt-touches.sh --replace    # re-deploy after an edit
   making up most of the book.
 - **WDL has no `sort()`.** "Newest" is resolved by `max()` over `ticks()`.
 - **Action names must be unique across the WHOLE definition**, not per scope,
-  and scopes nest at most 8 deep. The module renders 46 actions at depth 6.
+  and scopes nest at most 8 deep. The module renders **90 actions at depth 7**.
+  `runAfter` is scoped, though: it may only name siblings in the same scope. A
+  test now pins both — plus that no scope's ordering is circular, which is a
+  definition Dataverse accepts and the Flow service rejects.
 - **`ttt_customer` on `new_invoices` is polymorphic** (account *or* contact),
   so `_ttt_customer_value eq {guid}` is the right filter either way.
   `riivo_baddebt.riivo_client` is contact-only.
@@ -244,10 +260,66 @@ Nothing separate: it rides #99's replace-deploy. Two additions to the checks —
    proof the environment-variable bindings actually resolve. A blank
    `paymentLink` means the binding failed, not the endpoint.
 
-## Next issue: #101 — volume tripwire
+## What #101 added: the run-level brake
 
-Abort an anomalous run before it sends. The counts it needs are already in
-`Compose_|_Dry_Run_Report` (`selectedClients`, `resolvedTouches`, `heldTouches`).
+Between selection and the per-client loop. A run that does not look like the
+last one parks itself, having produced nothing.
+
+- **It gates the loop, not the send.** The loop mints tokens, writes them back
+  and renders PDFs in *both* modes, so a gate in front of the send would still
+  let an anomalous run make hundreds of function calls. `Terminate` ends the run
+  where it stands, so nothing had to be re-nested to achieve this.
+- **An aborted run is never a baseline.** The previous count comes from the most
+  recent run whose `riivo_outcome` is `proceeded` **or** `accepted`. Without
+  that the tripwire disarms itself after one park. A population that stays
+  anomalous therefore keeps parking, which is the point; `accepted` is the way
+  out, and deliberately a one-field edit on the parked row rather than a
+  threshold change, because a loosened threshold is the temporary fix that
+  becomes permanent.
+- **Rehearsals count as baselines.** Selection does not read
+  `riivo_ReminderTestMode` — only the bookkeeping gate does — so a dry run
+  selects exactly what a live run would. `riivo_testmode` on the row is how a
+  human tells them apart afterwards. This is also what makes the tripwire
+  exercisable in dev without sending anything.
+- **The alert is the house child** (`6b0bff17`), not an `email` row of our own.
+  It owns the recipient, the sender and the run link; its `text`/`text_1` inputs
+  are free text, which is how the two counts and the threshold reach the reader
+  and how the reason reaches the subject. This keeps the suite's strongest
+  assertion intact: **this flow still creates no `email` row and performs no
+  `SendEmail`**. The park terminates as **Failed** so it is red in run history,
+  and the `Terminate` runs after the alert on *any* status — an undeliverable
+  email must not keep a parked run alive.
+- **Two accepted holes**, both in the code as comments: growth from a zero
+  baseline is unguarded (there is no proportion of zero, and parking every
+  restart is worse), and the percentage is integer-truncated, so the comparison
+  is coarse by a fraction of a percent in the direction of proceeding.
+
+### Still needed for #101
+
+1. `bash flows/deploy-bad-debt-touches.sh --replace`. In deploy mode it also
+   creates `riivo_BadDebtVolumeChangeThresholdPercent` and the
+   `riivo_baddebtrun` table (10 columns, from `flows/badDebtRunTable.ts`, into
+   the `2Tables` solution). Both are Dataverse writes, which the agent
+   permission classifier blocks — and the table metadata POST is the one piece
+   of this that has never been executed, so if it errors, paste the body back.
+   `--check` confirmed on 2026-09-11 that everything else it depends on exists.
+2. The first run writes the first row and **must proceed**: no baseline must
+   never mean deadlock. Expect `outcome=proceeded`, `previouscount=0`,
+   `tripwireVerdict=proceed` in the report.
+3. To see it park, take a second run after editing the first row's
+   `riivo_selectedcount` far from the live count (or drop the threshold to 1).
+   Expect: nothing minted, a "Flow Failure" email carrying both counts and the
+   threshold, a row with `outcome=aborted`, and no change to any
+   `riivo_campaign*` field. Then set that row to `accepted` and the next run
+   proceeds — which is the AC about re-running after review.
+
+## Next issue: #102 — email live
+
+The seam to replace is still `Compose_|_Send_Outcome`. Note the test named
+"cannot advance a counter, because nothing is sent to advance it" is the one
+that must fail and be updated when you do, and that the two assertions about
+this flow creating no `email` row and performing no `SendEmail` are the ones
+#102 deliberately breaks.
 
 ---
 
@@ -265,7 +337,13 @@ Abort an anomalous run before it sends. The counts it needs are already in
   `Invoice - Scheduled - Send Overdue Payment SMS Reminders...` (`2b89f0b5`,
   **on**) filters on `statecode eq 0` with no `statuscode` clause, so it reaches
   `463630002` Pending Settlement clients. Pre-existing, unrelated to this build,
-  **not yet filed as a bug.**
+  **not yet filed as a bug** — asked twice, still unanswered.
+- **The house failed-flow alert child cannot be switched off.** `6b0bff17`
+  branches on `riivo_varFlowErrorSendBool` and then **sends in both branches** —
+  `Send_Mail` and `Do_not_Send_Mail` are identical `SendEmail` calls. Setting
+  that variable to `no` suppresses nothing, org-wide, in 218 flows. For a safety
+  alert that is the fail-safe direction, so #101 does not work around it. Worth
+  its own ticket next to the `2b89f0b5` one.
 - **`riivo_PaymentLink_FunctionKey` is stored as a plaintext default value** on
   the environment variable. Flagged in the spec, not actioned.
 - Two #98 ACs still need a human in the maker portal: the same-day re-run check

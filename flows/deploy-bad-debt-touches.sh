@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 #
-# Deploys `Invoice - Scheduled - Send Bad Debt Recovery Touches` (issues #98,
-# #99) into the TTT **dev** org. Creates the flow as a DRAFT (off) — per D9, no
-# agent and no script activates anything; Luc promotes dev -> prod by hand.
+# Deploys `Invoice - Scheduled - Send Bad Debt Recovery Touches` (issues #98 to
+# #101) into the TTT **dev** org, with the environment variables and the
+# riivo_baddebtrun table it depends on. Creates the flow as a DRAFT (off) — per
+# D9, no agent and no script activates anything; Luc promotes dev -> prod by hand.
 #
-# Idempotent: re-running skips anything that already exists. Safe to run twice.
+# Idempotent: re-running skips anything that already exists, column by column
+# as well as wholesale, so a run that died halfway can simply be repeated.
 #
 #   bash flows/deploy-bad-debt-touches.sh            # deploy
 #   bash flows/deploy-bad-debt-touches.sh --check    # report only, write nothing
@@ -25,6 +27,7 @@ ENV_FILE="${ENV_FILE:-$HOME/ttt-automations-update/.env}"
 DYN_URL="https://tttdevelopment.crm4.dynamics.com"
 SOLUTION_FLOWS="6Automations"
 SOLUTION_VARS="4Variables"
+SOLUTION_TABLES="2Tables"
 CHECK_ONLY=false
 REPLACE=false
 case "${1:-}" in
@@ -61,48 +64,60 @@ api() { # api METHOD PATH [BODY] [EXTRA_HEADER]
   curl "${args[@]}"
 }
 
-# ---------------------------------------------------------------- env var ----
-VAR_NAME="riivo_BadDebtMinDaysBetweenTouches"
-echo "==> environment variable $VAR_NAME"
-EXISTING=$(api GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$VAR_NAME'" \
-  | sed '$d' | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
-if [[ "$EXISTING" != "0" ]]; then
-  echo "    already exists — skipping"
-elif $CHECK_ONLY; then
-  echo "    MISSING (would create)"
-else
-  VAR_BODY=$(python3 -c '
-import json
-print(json.dumps({
-  "schemaname": "riivo_BadDebtMinDaysBetweenTouches",
-  "displayname": "Bad Debt Min Days Between Touches",
-  "type": 100000000,
-  "defaultvalue": "2",
-  "description": (
-    "Minimum whole days between two bad-debt recovery touches to the same "
-    "riivo_baddebt record. Guards the Monday/Thursday cadence against a "
-    "same-day re-run or a Power Automate retry, which would otherwise "
-    "double-send: Power Automate has no transactions, so this recency test is "
-    "the only duplicate defence. Default 2 blocks same-day and next-day "
-    "repeats while leaving the 3-day Mon->Thu gap intact."),
-}))')
-  RESP=$(api POST "environmentvariabledefinitions" "$VAR_BODY" "MSCRM.SolutionUniqueName: $SOLUTION_VARS")
-  CODE=$(tail -n1 <<<"$RESP")
-  if [[ "$CODE" =~ ^2 ]]; then
-    echo "    created (HTTP $CODE)"
-  else
-    echo "    FAILED (HTTP $CODE): $(sed '$d' <<<"$RESP" | head -c 400)"; exit 1
+# --------------------------------------------------------------- env vars ----
+# The two variables this build owns and creates. Everything else it reads
+# (payment link, test mode, the flow-error channel) belongs to another build and
+# is only checked for below. Both are typed String, following every other
+# numeric variable in this org, and read through int().
+ensure_env_var() { # ensure_env_var SCHEMANAME DISPLAYNAME DEFAULT DESCRIPTION
+  local schema="$1" display="$2" default="$3" description="$4"
+  echo "==> environment variable $schema"
+  local existing
+  existing=$(api GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$schema'" \
+    | sed '$d' | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
+  if [[ "$existing" != "0" ]]; then
+    echo "    already exists — skipping"; return
   fi
-fi
+  if $CHECK_ONLY; then echo "    MISSING (would create)"; return; fi
+  local body
+  body=$(python3 - "$schema" "$display" "$default" "$description" <<'PY'
+import json, sys
+print(json.dumps({
+    "schemaname": sys.argv[1],
+    "displayname": sys.argv[2],
+    "type": 100000000,  # String
+    "defaultvalue": sys.argv[3],
+    "description": sys.argv[4],
+}))
+PY
+)
+  local resp code
+  resp=$(api POST "environmentvariabledefinitions" "$body" "MSCRM.SolutionUniqueName: $SOLUTION_VARS")
+  code=$(tail -n1 <<<"$resp")
+  if [[ "$code" =~ ^2 ]]; then
+    echo "    created (HTTP $code)"
+  else
+    echo "    FAILED (HTTP $code): $(sed '$d' <<<"$resp" | head -c 400)"; exit 1
+  fi
+}
 
-# --------------------------------------------------------- #100 depends on ----
-# The flow reads three environment variables it does NOT create, and calls one
-# child flow it does not own. A missing dependency is not a deploy-time error —
-# Dataverse accepts the definition happily — it is a runtime failure for every
-# client in the run, so it is checked here instead.
-echo "==> dependencies for the mint and PDF steps (#100)"
+ensure_env_var riivo_BadDebtMinDaysBetweenTouches \
+  "Bad Debt Min Days Between Touches" "2" \
+  "Minimum whole days between two bad-debt recovery touches to the same riivo_baddebt record. Guards the Monday/Thursday cadence against a same-day re-run or a Power Automate retry, which would otherwise double-send: Power Automate has no transactions, so this recency test is the only duplicate defence. Default 2 blocks same-day and next-day repeats while leaving the 3-day Mon->Thu gap intact."
+
+ensure_env_var riivo_BadDebtVolumeChangeThresholdPercent \
+  "Bad Debt Volume Change Threshold Percent" "40" \
+  "How far the selected client count may move from the last acted-on run before the run parks itself and sends nothing, as a whole-number percentage in either direction (#101). 40 is the figure R5 of the spec recommends. Raise it to accept a permanently larger book; to let one parked run through, set that run's riivo_outcome to 'accepted' on its riivo_baddebtrun row instead, which leaves no loosened threshold behind."
+
+# ---------------------------------------------------- #100/#101 depend on ----
+# The flow reads five environment variables it does NOT create and calls two
+# child flows it does not own. A missing dependency is not a deploy-time error —
+# Dataverse accepts the definition happily — it is a runtime failure, so it is
+# checked here instead.
+echo "==> dependencies for the mint and PDF steps (#100) and the tripwire (#101)"
 MISSING=0
-for DEP in riivo_PaymentLink_BaseUrl riivo_PaymentLink_FunctionKey riivo_PaymentLinkEnabled; do
+for DEP in riivo_PaymentLink_BaseUrl riivo_PaymentLink_FunctionKey riivo_PaymentLinkEnabled \
+           riivo_EnvironmentAddress riivo_varFlowErrorTeamMail; do
   COUNT=$(api GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$DEP'" \
     | sed '$d' | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
   if [[ "$COUNT" == "0" ]]; then
@@ -112,28 +127,107 @@ for DEP in riivo_PaymentLink_BaseUrl riivo_PaymentLink_FunctionKey riivo_Payment
   fi
 done
 
-# Addressed by workflowid, which differs per environment: this is the one
-# reference in the definition that cannot travel to prod unchanged.
-PDF_CHILD="be610dd6-bf7b-f111-ab0f-000d3ada6ac0"
-# statecode FIRST, name last: the name contains spaces, and `read` would
-# otherwise split it and report the state of a word.
-read -r PDF_STATE PDF_NAME < <(
-  api GET "workflows($PDF_CHILD)?\$select=name,statecode" | sed '$d' \
-    | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('statecode','-'),d.get('name','-'))" 2>/dev/null \
-    || echo "- -")
-if [[ "$PDF_STATE" == "-" ]]; then
-  echo "    MISSING child flow $PDF_CHILD (Invoice - Child - Generate PDF)"; MISSING=1
-elif [[ "$PDF_STATE" != "1" ]]; then
-  echo "    child flow '$PDF_NAME' is OFF — every PDF call will fail"; MISSING=1
+# Addressed by workflowid, which differs per environment: these are the two
+# references in the definition that cannot travel to prod unchanged. Both must
+# be ON — the PDF child holds every client if it is off, and the alert child is
+# how a parked run reaches a human.
+for CHILD in be610dd6-bf7b-f111-ab0f-000d3ada6ac0 6b0bff17-e79b-ed11-aad1-000d3ab479cf; do
+  # statecode FIRST, name last: the name contains spaces, and `read` would
+  # otherwise split it and report the state of a word.
+  read -r CHILD_STATE CHILD_NAME < <(
+    api GET "workflows($CHILD)?\$select=name,statecode" | sed '$d' \
+      | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('statecode','-'),d.get('name','-'))" 2>/dev/null \
+      || echo "- -")
+  if [[ "$CHILD_STATE" == "-" ]]; then
+    echo "    MISSING child flow $CHILD"; MISSING=1
+  elif [[ "$CHILD_STATE" != "1" ]]; then
+    echo "    child flow '$CHILD_NAME' is OFF — the call to it will fail"; MISSING=1
+  else
+    echo "    child flow '$CHILD_NAME' ok (on)"
+  fi
+done
+
+# ------------------------------------------------------- run table (#101) ----
+# The tripwire reads its baseline from riivo_baddebtrun and records every run
+# there. The table is created from the same module the flow reads its column
+# names out of, so the two cannot drift; the creation is idempotent per column,
+# which matters because a half-created table is otherwise a puzzle.
+#
+# A missing table is NOT a soft failure: the List that reads it sits upstream of
+# everything the run produces, so the run ends having minted nothing. That is
+# the fail-closed direction, and it is still a broken campaign — hence the abort
+# below rather than a warning.
+RUN_TABLE_LOGICAL=$(npx --yes tsx -e '
+import { RUN_TABLE_LOGICAL } from "./flows/badDebtRunTable";
+process.stdout.write(RUN_TABLE_LOGICAL);
+')
+echo "==> table $RUN_TABLE_LOGICAL"
+TABLE_STATE=$(api GET "EntityDefinitions(LogicalName='$RUN_TABLE_LOGICAL')?\$select=LogicalName,EntitySetName" \
+  | sed '$d' | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(d.get('EntitySetName', 'missing'))" 2>/dev/null || echo "missing")
+
+if [[ "$TABLE_STATE" == "missing" ]]; then
+  if $CHECK_ONLY; then
+    echo "    MISSING (would create, with $(npx --yes tsx -e '
+import { RUN_TABLE_ATTRIBUTES } from "./flows/badDebtRunTable";
+process.stdout.write(String(RUN_TABLE_ATTRIBUTES.length));') columns)"
+    MISSING=1
+  else
+    echo "    creating"
+    TABLE_BODY=$(npx --yes tsx -e '
+import { buildRunTableMetadata } from "./flows/badDebtRunTable";
+process.stdout.write(JSON.stringify(buildRunTableMetadata()));
+')
+    RESP=$(api POST "EntityDefinitions" "$TABLE_BODY" "MSCRM.SolutionUniqueName: $SOLUTION_TABLES")
+    CODE=$(tail -n1 <<<"$RESP")
+    [[ "$CODE" =~ ^2 ]] || {
+      echo "    FAILED (HTTP $CODE): $(sed '$d' <<<"$RESP" | head -c 600)" >&2; exit 1; }
+    echo "    created (HTTP $CODE)"
+    TABLE_STATE="created"
+  fi
 else
-  echo "    child flow '$PDF_NAME' ok (on)"
+  echo "    exists, entity set '$TABLE_STATE'"
+fi
+
+if [[ "$TABLE_STATE" != "missing" ]]; then
+  HAVE=$(api GET "EntityDefinitions(LogicalName='$RUN_TABLE_LOGICAL')/Attributes?\$select=LogicalName" \
+    | sed '$d' | python3 -c "
+import sys, json
+print(' '.join(a['LogicalName'] for a in json.load(sys.stdin)['value']))")
+  # One POST per declared column that is not there yet.
+  npx --yes tsx -e '
+import { RUN_TABLE_ATTRIBUTES, buildAttributeMetadata } from "./flows/badDebtRunTable";
+const have = new Set(process.argv[2].split(" "));
+for (const attribute of RUN_TABLE_ATTRIBUTES) {
+  if (have.has(attribute.logicalName)) continue;
+  console.log(attribute.logicalName + "\t" + JSON.stringify(buildAttributeMetadata(attribute)));
+}
+' -- "$HAVE" | while IFS=$'\t' read -r COLUMN BODY; do
+    if $CHECK_ONLY; then
+      echo "    MISSING column $COLUMN (would create)"; continue
+    fi
+    RESP=$(api POST "EntityDefinitions(LogicalName='$RUN_TABLE_LOGICAL')/Attributes" "$BODY" \
+      "MSCRM.SolutionUniqueName: $SOLUTION_TABLES")
+    CODE=$(tail -n1 <<<"$RESP")
+    if [[ "$CODE" =~ ^2 ]]; then
+      echo "    created column $COLUMN (HTTP $CODE)"
+    else
+      echo "    FAILED column $COLUMN (HTTP $CODE): $(sed '$d' <<<"$RESP" | head -c 400)" >&2
+      exit 1
+    fi
+  done
+  $CHECK_ONLY || echo "    all declared columns present"
 fi
 
 if [[ "$MISSING" != "0" ]]; then
   if $CHECK_ONLY; then
-    echo "    ^ would deploy a flow that holds every client until these exist"
+    echo "    ^ until these exist, every run either holds every client (a"
+    echo "      missing payment-link variable) or fails at the tripwire before"
+    echo "      it produces anything (a missing run table)"
   else
-    echo "    ABORT: deploying now would hold every client in every run." >&2
+    echo "    ABORT: deploying now would break every run." >&2
     exit 1
   fi
 fi
@@ -205,7 +299,13 @@ print(json.dumps({
         "false until #102/#103. Mon/Thu 09:45 SAST - 09:45 not 09:30 because "
         "'Bad Debt Referral & Owner Digest' (dd5a766f) runs daily 09:30 and "
         "creates riivo_baddebt rows. The definition is generated and tested in "
-        "flows/badDebtRecoveryTouches.ts; edit it there, not in the designer."),
+        "flows/badDebtRecoveryTouches.ts; edit it there, not in the designer. "
+        "#101 adds the volume tripwire: after selection and before anything is "
+        "minted or rendered, the run compares its selected client count "
+        "against the last run that was acted on (riivo_baddebtrun) and, if "
+        "they disagree by more than "
+        "riivo_BadDebtVolumeChangeThresholdPercent - or the selection has "
+        "emptied - alerts the team and terminates having produced nothing."),
 }))
 PY
 )
@@ -254,3 +354,13 @@ echo "     The parameters are declared with EMPTY defaults so no key reaches"
 echo "     git, which makes that run the proof the environment variables"
 echo "     actually resolve: a blank paymentLink means the binding, not the"
 echo "     endpoint, is what failed."
+echo "  6. #101: that run writes the first riivo_baddebtrun row, and with no"
+echo "     earlier one to compare against it must PROCEED — check the row says"
+echo "     outcome=proceeded, previouscount=0, and the report carries"
+echo "     tripwireVerdict=proceed. A second run then has a baseline, which is"
+echo "     what makes the tripwire exercisable: to see it park, set that"
+echo "     row's riivo_selectedcount far from the live count (or drop the"
+echo "     threshold to 1) and run again. Expect: nothing minted, a Flow"
+echo "     Failure email carrying both counts, and a second row saying"
+echo "     outcome=aborted. Put the row back, or set it to accepted, and the"
+echo "     next run proceeds again."

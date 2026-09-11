@@ -72,6 +72,7 @@ All GUIDs and states below were read from `tttdevelopment.crm4.dynamics.com` on 
 | `Invoice - Scheduled - Create Bad Debt Records for Unpaid Aged Invoices` (`4b3d43cd-…`) | off in dev | The mystery daily `riivo_baddebt` creator. Identified. |
 | `Invoice - Scheduled - Bad Debt Referral & Owner Digest` (`dd5a766f-d67d-f111-ab0f-002248a29481`) | off in dev | **Found 2026-09-11; absent from every prior document.** Daily 09:30 SAST. Already carries the exact bad-debt-side eligibility query this build needs (`riivo_referredtobaddebts eq true` + Open/Partially-Paid + `ttt_outstanding gt 0` + createdon floor), a `Compose_\|_TestMode` switch, a dedupe against existing `riivo_baddebt` rows, and an owner-digest email. It is a **second** `riivo_baddebt` creator alongside `4b3d43cd-…`. The closer sibling to clone for the *selection* half. |
 | `Invoice – On Create – Mint Token & Push to Xero` (`9f8601a5-…`) | off | A second minting path; the cadence flow mints inline instead. |
+| `Utility - Child - Email Team a Failed-Flow Alert with Run Link` (`6b0bff17-…`) | **on** | The house "tell a human this flow went wrong" child, called by **218 of the org's 322 modern flows** in one shape: alert, then `Terminate` with `runStatus: Failed`. Owns the recipient (`riivo_varFlowErrorTeamMail`, a Teams channel address), the sender (the shared-mailbox queue) and the run link. Reused by #101 for a parked run. |
 | The 24 `bad_debt_wa_*` Meta templates | approved | Document header + dynamic Pay now button, already approved. No new Meta submissions for touches 1–4. |
 
 ### How the existing cadence engine works
@@ -208,6 +209,53 @@ the calls succeed", so a call that failed and a call that returned nothing are t
 An aborted client receives **no bookkeeping patch at all**, which is what makes the next run pick
 them up unchanged.
 
+### The volume tripwire
+
+Built in #101, between selection and the per-client loop. Three things about it are worth knowing.
+
+**It sits before the loop, not before the send.** The issue says "before any send", but the loop
+mints payment tokens, writes them back to the invoice and renders PDFs in *both* modes — so a
+tripwire that only guarded the send would still let an anomalous run make hundreds of function
+calls and Dataverse writes. Everything that costs something is downstream of the gate. `Terminate`
+ends the run where it stands, so nothing had to be re-nested into a branch to achieve that.
+
+**An aborted run is not a baseline.** The previous count is read from the most recent run whose
+outcome is `proceeded` **or** `accepted`, never `aborted`. Without that, the tripwire disarms
+itself: a selection that jumped tenfold would park once, record ten times the usual count, and look
+perfectly normal on the next run. The cost is that a population which stays anomalous keeps parking
+— which is the point. `accepted` is the human's way out, and deliberately a one-field edit on the
+parked row rather than a threshold change: raising the threshold to let one run through is exactly
+the temporary change that becomes permanent.
+
+**It notifies through the house child, not its own email.** `Utility - Child - Email Team a
+Failed-Flow Alert with Run Link` already owns the recipient (`riivo_varFlowErrorTeamMail`), the
+sender and the run link, and 218 flows already alert through it — so a parked run lands in the
+channel operators already watch. Its `text` and `text_1` inputs are free text it renders verbatim,
+which is how the selected count, the previous count and the threshold reach the reader and how the
+reason reaches the subject line. This is a **deliberate departure** from the issue's "the
+notification target belongs in an environment variable following the `riivo_Reminder*` convention":
+the target *is* an environment variable, just the house one, and reproducing the send here would
+have cost this build its strongest assertion — that the flow creates no `email` row and performs no
+`SendEmail` at all until #102/#103 deliberately add one. A bad-debt-specific address later is one
+variable on the child, not a change here.
+
+The run terminates as **Failed**, not Succeeded: a park is something someone must look at, and
+Failed makes it red in run history and picked up by the platform's own failure notifications — a
+second path to a human if the email does not arrive. The `Terminate` runs after the alert on *any*
+status, so an undeliverable courtesy cannot keep a parked run alive.
+
+Two limits, both accepted and both recorded in the code:
+
+- **A zero baseline is unguarded.** A previous run that legitimately selected nobody leaves no
+  proportion to measure, so growth from zero proceeds. Parking every restart is worse.
+- **The percentage is integer-truncated**, so the comparison is coarse by a fraction of a percent,
+  in the direction of proceeding. A threshold measured in tens of percent has no use for the
+  difference between 40.9 and 41.
+
+`riivo_BadDebtVolumeChangeThresholdPercent` (String, default 40, following every other numeric
+variable in this org) is the only knob. `int()` throws on a non-numeric value, which fails the run
+at that compose — upstream of everything — rather than sending with a threshold nobody meant.
+
 ### Consent is not optional
 
 D6 sets the *campaign* stop rule to Paid-only; channel consent is separate and enforced regardless:
@@ -216,13 +264,41 @@ in with a valid mobile. A client failing one channel still receives the other.
 
 ## Data Model — `riivo_baddebt`
 
-**No new columns are required.** Confirmed present in dev: `riivo_campaignlastsent` (DateTime),
+**No new columns are required on `riivo_baddebt`.** Confirmed present in dev: `riivo_campaignlastsent` (DateTime),
 `riivo_campaignsendcount` (Integer), `riivo_campaignfirstsent` (DateTime), `riivo_campaignbounced`
 (Boolean), `riivo_campaignlastreply` (DateTime), plus `riivo_invoice` and `riivo_client` lookups,
 `riivo_outstandingamount`, `riivo_baselineoutstanding`, `riivo_invoiceage` and the bank/EFT fields.
 
 Optional, only if per-channel outcome reporting is wanted: two choice columns for last email and
 last WhatsApp result. Not required for the cadence to work.
+
+## Data Model — `riivo_baddebtrun` (new, #101)
+
+**One new table is required**, and it is the only schema this build adds. The volume tripwire
+compares a run against the previous one, so the previous count has to outlive the run that produced
+it. Declared in `flows/badDebtRunTable.ts` and created by the deploy script from that same module,
+so the column names the flow addresses as strings are the column names that exist.
+
+| Column | Type | Why |
+|---|---|---|
+| `riivo_name` | String (primary) | The run, named by the UTC instant it started. |
+| `riivo_selectedcount` | Integer | What this run selected. The next run's baseline. |
+| `riivo_previouscount` | Integer | What it was compared against. 0 when there was nothing. |
+| `riivo_changepercent` | Integer | The movement, truncated. Stored so a parked row explains itself. |
+| `riivo_thresholdpercent` | Integer | The threshold in force, so retuning the variable later does not make an old decision unreadable. |
+| `riivo_outcome` | String | `proceeded` \| `aborted` \| `accepted`. |
+| `riivo_abortreason` | String | The sentence the alert email carried. |
+| `riivo_testmode` | Boolean | Whether this was a rehearsal. Selection does not depend on it, so a rehearsal is a valid baseline; this is how a human tells them apart. |
+| `riivo_resolvedcount` / `riivo_heldcount` | Integer | Written after the per-client loop, so null on a parked run. |
+
+Three cheaper stores were considered and rejected. **An environment variable the flow writes
+back**: variable *values* are solution-aware rows, so the prod import this build is heading for
+would silently reset the baseline. **Recomputing from `riivo_baddebt` bookkeeping**: that records
+what was *sent*, not what was *selected*, and records nothing at all for a run that aborted — which
+is the run whose count matters most. **`riivo_systemsettings`** (name + integer, already in dev):
+no field for the outcome, so the property that makes the tripwire safe could only live in a name
+string. `riivo_systemevent` was the other candidate; its `riivo_eventtype` is application-required
+with exactly one option, "Document Decryption".
 
 ## Scope
 
@@ -287,11 +363,14 @@ invoice continues to age toward the three-year prescription line un-chased, and 
 age band is derived from the newest invoice — a stated, accepted contradiction of
 `CONTEXT.md` § Campaign key rather than an oversight.
 
-**R5 — Nothing catches a bad run (D5).** The tool's validation gate, sample preview and hold report
-are out of the path. Mitigated: no message without its PDF, per-channel consent, and the
-last-sent guard. Not mitigated: a wrong template, a stale balance, or a selection query returning
-10× the usual count. *Strongly recommend* a volume tripwire — abort if the selected count moves
-more than ~40% from the previous run.
+**R5 — Partly resolved by #101.** The tool's validation gate, sample preview and hold report are
+still out of the path. Now mitigated: no message without its PDF, per-channel consent, the
+last-sent guard, and — new — a run-level volume tripwire that parks the run if the selected count
+moves more than `riivo_BadDebtVolumeChangeThresholdPercent` (default 40) from the last acted-on
+run, or empties out entirely. Still **not** mitigated: a wrong template and a stale balance. Both
+are per-recipient faults at the right volume, which is precisely what a count cannot see. The
+Statement build's Freshness re-check is the answer to the stale balance; the template is guarded
+only by the approved-name check in #99.
 
 **R6 — Resolved, and the spec was incomplete.** Statuscodes are confirmed (table above). The new
 finding is **Partially Paid (`463630001`), an active state absent from every prior document**. Any
@@ -324,10 +403,21 @@ measurement of a run has to account for both plus the new flow.
 - **P2a — Message inputs.** ✅ Built (#100): per-client token minting with write-back, the invoice
   PDF via the existing child flow, and a clean per-client abort when either cannot be produced.
   Still test mode, still no sends. Rides P2's replace-deploy and human run.
+- **P2b — Volume tripwire.** ✅ Built (#101): the run parks itself before producing anything if its
+  selected count disagrees with the last acted-on run, and records every run's count on
+  `riivo_baddebtrun` either way. Needs the new environment variable and the table, both of which the
+  deploy script creates.
 - **P3 — Email live.** To colleague addresses, then a small canary.
 - **P4 — WhatsApp live.** Same progression.
 - **P5 — Schedule and hand over.** Recurrence on in dev, observe two cycles, hand to Luc for prod.
 
 R2, R3 and R4 are settled (D10–D12); none now blocks P5. R1's dev half is measured and its
 prod half plus R7 remain open — both are owned by issue #96 and block prod promotion, not the dev
-build. R5 is being built as issue #101.
+build. R5's run-level half is built as #101; its per-recipient half (wrong template, stale balance)
+is not, and is named above.
+
+**Found while building #101, unrelated and unfiled:** the failed-flow alert child `6b0bff17` gates
+its send on `riivo_varFlowErrorSendBool` — and **sends in both branches**, `Send_Mail` and
+`Do_not_Send_Mail` being identical `SendEmail` calls. Setting that variable to `no` therefore
+suppresses nothing, org-wide. For a safety alert that is the fail-safe direction, so #101 does not
+work around it; it is worth its own ticket alongside the `2b89f0b5` statuscode bug.

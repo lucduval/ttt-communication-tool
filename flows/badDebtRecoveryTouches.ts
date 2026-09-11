@@ -1,10 +1,25 @@
 /**
- * `Invoice - Scheduled - Send Bad Debt Recovery Touches` — issues #98, #99, #100.
+ * `Invoice - Scheduled - Send Bad Debt Recovery Touches` — issues #98–#101.
  *
  * The selection half of the bad-debt cadence, the campaign key that says WHICH
- * message each selected client is due, and the two inputs that message needs —
- * and deliberately nothing else: this flow still sends nothing at all. The
- * channels arrive in #102/#103.
+ * message each selected client is due, the two inputs that message needs, and
+ * the one brake that looks at the run as a whole — and deliberately nothing
+ * else: this flow still sends nothing at all. The channels arrive in #102/#103.
+ *
+ * #101 adds the volume tripwire. Every other guard here is per-recipient — no
+ * message without its PDF, per-channel consent, the last-sent recency test —
+ * and none of them can see a filter regression that matches ten times the usual
+ * population, an upstream change that empties the selection, or a bad-debt
+ * creation flow that floods the table overnight. So after selection, and
+ * before the loop that mints tokens and renders PDFs, the run compares its
+ * selected count against the last run that was acted on and parks itself if the
+ * two disagree by more than a configured proportion. A parked run alerts the
+ * team through the house failed-flow child and terminates: nothing minted,
+ * nothing generated, nothing written against any client, nothing to clean up
+ * before re-running it. The count of every run — parked, live or rehearsal — is
+ * recorded on `riivo_baddebtrun` (see `badDebtRunTable.ts`), which is both
+ * where the next run's baseline comes from and a run history the campaign can
+ * be measured against.
  *
  * #100 adds the payment token and the invoice PDF, under one guarantee carried
  * over from the comms tool's pre-send validation gate — which is otherwise out
@@ -52,6 +67,13 @@
  * the book — the opposite of what this campaign is for.
  */
 
+import {
+  BASELINE_OUTCOMES,
+  RUN_OUTCOME,
+  RUN_TABLE_ID,
+  RUN_TABLE_SET,
+} from "./badDebtRunTable";
+
 export const FLOW_NAME = "Invoice - Scheduled - Send Bad Debt Recovery Touches";
 
 /** Dataverse environment variable holding the minimum gap between touches. */
@@ -59,6 +81,52 @@ export const TOUCH_GAP_VARIABLE = "riivo_BadDebtMinDaysBetweenTouches";
 
 const TEST_MODE_PARAM = "Reminder Test Mode (riivo_ReminderTestMode)";
 const TOUCH_GAP_PARAM = `Bad Debt Min Days Between Touches (${TOUCH_GAP_VARIABLE})`;
+
+/**
+ * The tripwire's one tuning knob, and its default.
+ *
+ * String rather than Number, following `riivo_BadDebtMinDaysBetweenTouches`
+ * and `riivo_CcSizeCap`: every numeric environment variable in this org is
+ * typed String and read through `int()`. The default is a fallback for a
+ * missing variable, not the source of truth — and `int()` on a non-numeric
+ * value throws, which fails the run before the loop rather than sending with a
+ * threshold nobody meant.
+ */
+export const VOLUME_THRESHOLD_VARIABLE =
+  "riivo_BadDebtVolumeChangeThresholdPercent";
+export const DEFAULT_VOLUME_THRESHOLD_PERCENT = 40;
+const VOLUME_THRESHOLD_PARAM = `Bad Debt Volume Change Threshold Percent (${VOLUME_THRESHOLD_VARIABLE})`;
+
+/**
+ * `Utility - Child - Email Team a Failed-Flow Alert with Run Link`, on in dev,
+ * called by 218 of the org's 322 modern flows in exactly this shape: alert,
+ * then `Terminate` with `runStatus: Failed`.
+ *
+ * It is used here instead of creating an `email` row and performing a bound
+ * `SendEmail` for three reasons. It owns the notification target already, as
+ * `riivo_varFlowErrorTeamMail` — so the target is an environment variable and
+ * a parked run lands in the channel operators already watch for flow failures,
+ * rather than a second bad-debt-specific inbox nobody has a habit of reading.
+ * It owns the sender (the shared-mailbox queue) and the run link. And most of
+ * all, reproducing the send here would cost this build its strongest guarantee:
+ * that this flow creates no `email` row and performs no `SendEmail` at all
+ * until #102/#103 deliberately add one. That assertion is worth more than a
+ * dedicated recipient.
+ *
+ * PROMOTION HAZARD: a child flow is addressed by workflowid, so this is the
+ * second line in this file — with `PDF_CHILD_FLOW_ID` — that cannot travel to
+ * prod unchanged.
+ */
+export const ALERT_CHILD_FLOW_ID = "6b0bff17-e79b-ed11-aad1-000d3ab479cf";
+const ENVIRONMENT_ADDRESS_VARIABLE = "riivo_EnvironmentAddress";
+const ENVIRONMENT_ADDRESS_PARAM = `Environment Address (${ENVIRONMENT_ADDRESS_VARIABLE})`;
+
+/** The three verdicts the tripwire can reach. Only `proceed` runs the loop. */
+const VERDICT = {
+  PROCEED: "proceed",
+  VOLUME: "volume",
+  EMPTY: "empty",
+} as const;
 
 /**
  * D12: from touch 5 the ladder is exhausted, so every further touch uses one
@@ -374,6 +442,62 @@ const untilNotThrottled = ({
 });
 
 export function buildBadDebtRecoveryTouchesFlow() {
+  // ---------------------------------------------- #101: the run-level brake ----
+  const selectedCount = "outputs('Compose_|_Selected_Count')";
+  const previousCount = "outputs('Compose_|_Previous_Count')";
+  const changePercent = "outputs('Compose_|_Volume_Change_Percent')";
+  const thresholdPercent = "outputs('Compose_|_Volume_Threshold_Percent')";
+  const verdict = "outputs('Compose_|_Tripwire_Verdict')";
+
+  /**
+   * Only a run that was ACTED ON is a baseline — see `RUN_OUTCOME`. Reading
+   * the last run whatever its outcome would let one abort disarm the tripwire:
+   * a tenfold selection would park once, record tenfold, and sail through next
+   * time.
+   */
+  const baselineFilter = `statecode eq 0 and (${BASELINE_OUTCOMES.map(
+    (outcome) => `riivo_outcome eq '${outcome}'`,
+  ).join(" or ")})`;
+
+  /**
+   * Order is the whole logic. No baseline proceeds (a first run must not
+   * deadlock); an empty selection is then caught BEFORE the proportional test,
+   * because a drop to zero is also a 100% move and "selected nobody" is the
+   * more useful thing to be told. A zero baseline proceeds: there is no
+   * proportion of zero, and a run following one that legitimately selected
+   * nobody is the ordinary restart case.
+   */
+  const verdictExpression = nestedIf(
+    [
+      ["not(outputs('Compose_|_Has_Previous_Run'))", `'${VERDICT.PROCEED}'`],
+      [
+        `and(equals(${selectedCount}, 0), greater(${previousCount}, 0))`,
+        `'${VERDICT.EMPTY}'`,
+      ],
+      [`equals(${previousCount}, 0)`, `'${VERDICT.PROCEED}'`],
+      [
+        `greater(${changePercent}, ${thresholdPercent})`,
+        `'${VERDICT.VOLUME}'`,
+      ],
+    ],
+    `'${VERDICT.PROCEED}'`,
+  );
+
+  /** The sentence the alert email, the run record and the run error all carry. */
+  const reasonExpression = nestedIf(
+    [
+      [
+        `equals(${verdict}, '${VERDICT.VOLUME}')`,
+        `concat('selected ', string(${selectedCount}), ' clients against ', string(${previousCount}), ' in the last acted-on run - a ', string(${changePercent}), '% move, past the ', string(${thresholdPercent}), '% threshold')`,
+      ],
+      [
+        `equals(${verdict}, '${VERDICT.EMPTY}')`,
+        `concat('selected no clients at all, against ', string(${previousCount}), ' in the last acted-on run')`,
+      ],
+    ],
+    "''",
+  );
+
   const invoiceScopeFilter =
     "@concat('new_invoicesid eq ', items('Apply_to_each_|_BadDebt')?['_riivo_invoice_value']" +
     `, ' and statecode eq 0 and (statuscode eq ${CHASEABLE_STATUSCODES[0]}` +
@@ -420,6 +544,24 @@ export function buildBadDebtRecoveryTouchesFlow() {
               schemaName: "riivo_WhatsApp_Template_WithButton",
               description:
                 "D12: the template used from touch 5, once the four campaign-key touches are spent. Already approved with a Pay-now button, so no Meta submission blocks the cadence going unattended. Its copy is a general reminder rather than an arrears notice, so firmness softens after the Day-40 final notice - accepted, and swappable for a purpose-written bad_debt_wa_ongoing by changing this variable alone.",
+            },
+          },
+          [VOLUME_THRESHOLD_PARAM]: {
+            defaultValue: String(DEFAULT_VOLUME_THRESHOLD_PERCENT),
+            type: "String",
+            metadata: {
+              schemaName: VOLUME_THRESHOLD_VARIABLE,
+              description:
+                "How far the selected client count may move from the last acted-on run before the run parks itself instead of sending, as a whole-number percentage in either direction. 40 is the figure R5 of the spec recommends. Raise it to accept a genuinely larger book; to bless one run only, set that parked run's riivo_outcome to 'accepted' instead, which does not leave a loosened threshold behind.",
+            },
+          },
+          [ENVIRONMENT_ADDRESS_PARAM]: {
+            defaultValue: "",
+            type: "String",
+            metadata: {
+              schemaName: ENVIRONMENT_ADDRESS_VARIABLE,
+              description:
+                "Org address, passed to the failed-flow alert child so the email names which environment parked the run. Empty default: the value belongs to the environment, and an alert that says 'dev' while running in prod is worse than one that says nothing.",
             },
           },
           // Empty defaults on all three: the values belong to the environment,
@@ -736,8 +878,166 @@ export function buildBadDebtRecoveryTouchesFlow() {
             type: "Compose",
             inputs: "@length(variables('varSelected'))",
           },
-          "Initialize_variable_|_Touches": {
+          // ---- #101: the volume tripwire, before anything is produced ----
+          // It sits here, not merely "before any send", because the per-client
+          // loop below mints tokens, writes them back and renders PDFs in BOTH
+          // modes. Everything that costs something happens after this gate.
+          //
+          // It also fails CLOSED: if this table is missing or unreadable the
+          // List below fails, and because it is upstream of the loop the run
+          // ends having produced nothing. A broken tripwire stops the campaign
+          // rather than waving it through.
+          "List_rows_|_Previous_Run": {
             runAfter: { "Compose_|_Selected_Count": ["Succeeded"] },
+            ...dataverse("ListRecords", {
+              entityName: RUN_TABLE_SET,
+              $select: "riivo_name,riivo_selectedcount,riivo_outcome,createdon",
+              $filter: baselineFilter,
+              // WDL has no sort, but OData does, and one row is all we read.
+              $orderby: "createdon desc",
+              $top: 1,
+            }),
+          },
+          "Compose_|_Has_Previous_Run": {
+            runAfter: { "List_rows_|_Previous_Run": ["Succeeded"] },
+            type: "Compose",
+            inputs:
+              "@greater(length(outputs('List_rows_|_Previous_Run')?['body/value']), 0)",
+          },
+          // No branch, deliberately: first() of an empty list is null and
+          // WDL's ?[] is null-safe, so this reads 0 on its own.
+          "Compose_|_Previous_Count": {
+            runAfter: { "Compose_|_Has_Previous_Run": ["Succeeded"] },
+            type: "Compose",
+            inputs:
+              "@coalesce(first(outputs('List_rows_|_Previous_Run')?['body/value'])?['riivo_selectedcount'], 0)",
+          },
+          "Compose_|_Volume_Threshold_Percent": {
+            runAfter: { "Compose_|_Previous_Count": ["Succeeded"] },
+            type: "Compose",
+            inputs: `@int(coalesce(parameters('${VOLUME_THRESHOLD_PARAM}'), '${DEFAULT_VOLUME_THRESHOLD_PERCENT}'))`,
+          },
+
+          // Absolute movement, as a percentage of the baseline.
+          //
+          // WDL has no abs(): the documented math set is add, div, max, min,
+          // mod, mul, pow, rand, range, sub. max(a-b, b-a) is the absolute
+          // difference, and it reads the same in both directions, which is
+          // what "moved by more than" asks for.
+          //
+          // The divisor is max(previous, 1), not previous, and the guard is not
+          // an if(): if() takes its arguments as values, so both arms are
+          // evaluated and a "guarded" div() would still divide by zero. The
+          // verdict above is what actually excludes a zero baseline; this only
+          // has to avoid throwing on the way there.
+          //
+          // Integer division truncates, so the comparison is coarse by a
+          // fraction of a percent — in the direction of proceeding. Accepted:
+          // a threshold measured in tens of percent has no use for the
+          // difference between 40.9 and 41.
+          "Compose_|_Volume_Change_Percent": {
+            runAfter: { "Compose_|_Volume_Threshold_Percent": ["Succeeded"] },
+            type: "Compose",
+            inputs: `@div(mul(max(sub(${selectedCount}, ${previousCount}), sub(${previousCount}, ${selectedCount})), 100), max(${previousCount}, 1))`,
+          },
+          "Compose_|_Tripwire_Verdict": {
+            runAfter: { "Compose_|_Volume_Change_Percent": ["Succeeded"] },
+            type: "Compose",
+            inputs: `@${verdictExpression}`,
+          },
+          "Compose_|_Tripwire_Reason": {
+            runAfter: { "Compose_|_Tripwire_Verdict": ["Succeeded"] },
+            type: "Compose",
+            inputs: `@${reasonExpression}`,
+          },
+          "Compose_|_Run_Name": {
+            runAfter: { "Compose_|_Tripwire_Reason": ["Succeeded"] },
+            type: "Compose",
+            inputs: "@concat('Bad Debt Recovery Run ', utcNow())",
+          },
+
+          // Written BEFORE the verdict is acted on, and for every outcome:
+          // parked, live or rehearsal. Two reasons it is not deferred to the
+          // end of a successful run. The next run's baseline must not depend on
+          // this one finishing — a run that dies mid-loop has still selected
+          // what it selected. And a parked run is exactly the run whose count a
+          // human needs to see.
+          "Create_|_Run_Record": {
+            runAfter: { "Compose_|_Run_Name": ["Succeeded"] },
+            ...dataverse("CreateRecord", {
+              entityName: RUN_TABLE_SET,
+              "item/riivo_name": "@outputs('Compose_|_Run_Name')",
+              "item/riivo_selectedcount": `@${selectedCount}`,
+              "item/riivo_previouscount": `@${previousCount}`,
+              "item/riivo_changepercent": `@${changePercent}`,
+              "item/riivo_thresholdpercent": `@${thresholdPercent}`,
+              "item/riivo_outcome": `@if(equals(${verdict}, '${VERDICT.PROCEED}'), '${RUN_OUTCOME.PROCEEDED}', '${RUN_OUTCOME.ABORTED}')`,
+              "item/riivo_abortreason": "@outputs('Compose_|_Tripwire_Reason')",
+              "item/riivo_testmode": "@outputs('Compose_|_TestMode')",
+            }),
+          },
+
+          "Condition_|_Tripwire_Tripped": {
+            runAfter: { "Create_|_Run_Record": ["Succeeded"] },
+            type: "If",
+            expression: {
+              and: [{ not: { equals: [`@${verdict}`, VERDICT.PROCEED] } }],
+            },
+            actions: {
+              // The house alert, in the shape 218 of this org's flows use it:
+              // the child owns the recipient (riivo_varFlowErrorTeamMail), the
+              // sender and the run link. `text` and `text_1` are free text it
+              // renders verbatim, so the counts travel in the body and the
+              // reason reaches the subject line.
+              "Run_Child_|_Volume_Alert": {
+                runAfter: {},
+                type: "Workflow",
+                inputs: {
+                  host: { workflowReferenceName: ALERT_CHILD_FLOW_ID },
+                  body: {
+                    text: `@{parameters('${ENVIRONMENT_ADDRESS_PARAM}')} - THE BAD DEBT RECOVERY RUN WAS PARKED AND SENT NOTHING. It @{outputs('Compose_|_Tripwire_Reason')}. No token was minted, no PDF rendered, no touch recorded: no client was contacted or altered, so the run can simply be re-run once someone has established why the population moved. If the new volume is real, set riivo_outcome to '${RUN_OUTCOME.ACCEPTED}' on @{outputs('Compose_|_Run_Name')} and the next run will compare against it. Test mode: @{outputs('Compose_|_TestMode')}.`,
+                    text_1: `@{workflow().tags.flowDisplayName} - parked by the volume tripwire`,
+                    text_2: "@workflow().tags.environmentName",
+                    text_3: "@workflow().name",
+                    text_4: "@workflow().run.name",
+                  },
+                },
+              },
+
+              // Any status: an alert that could not be delivered must not keep
+              // a parked run alive. The park is the guarantee; the email is a
+              // courtesy, and a failed run is itself visible in run history.
+              "Terminate_|_Parked": {
+                runAfter: {
+                  "Run_Child_|_Volume_Alert": [
+                    "Succeeded",
+                    "Failed",
+                    "Skipped",
+                    "TimedOut",
+                  ],
+                },
+                type: "Terminate",
+                inputs: {
+                  // Failed, not Succeeded: a parked run is an event someone
+                  // must look at, and Failed is what makes it red in run
+                  // history and picked up by the platform's own failure
+                  // notifications — a second path to a human if the email fails.
+                  runStatus: "Failed",
+                  runError: {
+                    code: "BadDebtVolumeTripwire",
+                    message: `@concat('Run parked: it ', outputs('Compose_|_Tripwire_Reason'), '. Nothing was sent.')`,
+                  },
+                },
+              },
+            },
+            else: { actions: {} },
+          },
+
+          "Initialize_variable_|_Touches": {
+            // Everything below is reached only by a run the tripwire cleared:
+            // Terminate ends the run where it stands, so the loop is never
+            // entered on a park. Nothing had to move into a branch for that.
+            runAfter: { "Condition_|_Tripwire_Tripped": ["Succeeded"] },
             type: "InitializeVariable",
             inputs: { variables: [{ name: "varTouches", type: "array", value: [] }] },
           },
@@ -1175,8 +1475,22 @@ export function buildBadDebtRecoveryTouchesFlow() {
             },
           },
 
-          "Compose_|_Dry_Run_Report": {
+          // The run history's second half. Selected/previous/threshold were
+          // written before the loop because the baseline must not depend on the
+          // loop finishing; resolved and held can only be known after it, so
+          // they arrive as a patch and stay null on a run that never got here.
+          "Update_|_Run_Record": {
             runAfter: { "Apply_to_each_|_Selected": ["Succeeded"] },
+            ...dataverse("UpdateRecord", {
+              entityName: RUN_TABLE_SET,
+              recordId: `@outputs('Create_|_Run_Record')?['body/${RUN_TABLE_ID}']`,
+              "item/riivo_resolvedcount": "@length(variables('varTouches'))",
+              "item/riivo_heldcount": "@length(variables('varHeld'))",
+            }),
+          },
+
+          "Compose_|_Dry_Run_Report": {
+            runAfter: { "Update_|_Run_Record": ["Succeeded"] },
             type: "Compose",
             inputs: {
               flow: FLOW_NAME,
@@ -1184,6 +1498,15 @@ export function buildBadDebtRecoveryTouchesFlow() {
               lastSentCutoff: "@outputs('Compose_|_Last_Sent_Cutoff')",
               candidatesBeforeCollapse: "@length(variables('varCandidates'))",
               selectedClients: "@outputs('Compose_|_Selected_Count')",
+              // The tripwire's working, on a run it let through: a human
+              // reading the report can see how close it came without opening
+              // the run history.
+              runRecord: "@outputs('Compose_|_Run_Name')",
+              previousRunClients: "@outputs('Compose_|_Previous_Count')",
+              volumeChangePercent: "@outputs('Compose_|_Volume_Change_Percent')",
+              volumeThresholdPercent:
+                "@outputs('Compose_|_Volume_Threshold_Percent')",
+              tripwireVerdict: "@outputs('Compose_|_Tripwire_Verdict')",
               // Resolved rows are what #102/#103 will send — each now carries
               // a minted link and a rendered PDF, so "resolved" means ready,
               // not merely eligible. Held rows are clients this run
