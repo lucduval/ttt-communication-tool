@@ -1,0 +1,201 @@
+# Handoff: bad-debt recovery on Power Automate
+
+_Written 2026-09-11 · Covers issues #96–#104 · Spec: `docs/spec-bad-debt-power-automate.md`_
+
+Read this plus the spec and you can pick up cold. Everything below was verified
+against the dev org on 2026-09-11 unless it says otherwise.
+
+---
+
+## Where the work stands
+
+| Issue | State |
+|---|---|
+| #96 Prod flow inventory + SP permissions | **Open.** Dev half done and commented on the issue; prod half untouched. |
+| #97 Cadence policy | **Closed.** Decisions recorded as D10–D12 in the spec. |
+| #98 Selection, dry run only | **Open but built and deployed.** Two ACs need a human run. |
+| #99 Template resolution + touch bookkeeping | **Ready to start — this is the next one.** |
+| #100 Token minting + PDF | Ready. Blocked-by #98 is satisfied in practice. |
+| #101 Volume tripwire | Ready. |
+| #102–#104 | Human-gated (live sends, recurrence). |
+
+**#99, #100 and #101 all say "Blocked by #98".** That dependency is satisfied:
+#98's build is deployed and verified. Only its two human-verification ACs
+remain, and none of the downstream work depends on them.
+
+---
+
+## Connecting to the dev org
+
+Everything runs against **`https://tttdevelopment.crm4.dynamics.com`**.
+`ttt-financial-group2.crm4.dynamics.com` is a legacy alias for the *same dev
+org* — it is not prod.
+
+Credentials are a service principal in `~/ttt-automations-update/.env`
+(`DYNAMICS_TENANT_ID`, `DYNAMICS_CLIENT_ID`, `DYNAMICS_CLIENT_SECRET`). That
+file holds multi-line HTML values, so `source .env` **fails** — grep each var
+individually. The full recipe is in
+`~/ttt-automations-update/dynamics-connection-guide.md` §3; the SP should come
+back as `7229f676-afd5-f011-8544-000d3adca789` from `WhoAmI`.
+
+### Traps that cost time here
+
+- **Page the `workflows` query.** An unpaged request returns exactly 200 rows
+  and looks complete. Dev has **321** modern flows, and the truncated tail
+  contained a flow the spec already depended on. Use
+  `Prefer: odata.maxpagesize=500` and follow `@odata.nextLink`.
+- **`clientdata` cannot be PATCHed** — it fails `ConnectionAuthorizationFailed`
+  because the SP does not own the connection. To edit a flow: POST the new one,
+  verify, then delete the old. That mints a new `workflowid`; update references.
+- **An agent cannot activate a flow or run one on demand.** Ownership and
+  activation are connection-gated to riivo Admin. `PATCH ownerid` and `Assign`
+  are both blocked. Anything needing a *run* is a human step.
+- **Dataverse writes are blocked by the Claude Code permission classifier** in
+  the default mode, including via the `update-config` skill — an agent cannot
+  grant itself the permission, by design. Luc ran the #98 deploy himself.
+
+---
+
+## What exists in dev (state at handoff)
+
+| Flow | GUID | State |
+|---|---|---|
+| `Invoice - Scheduled - Send Bad Debt Recovery Touches` **(ours, #98)** | `7d112cdb-bcad-f111-aaab-002248a35b45` | draft / **off** |
+| `Invoice - Scheduled - Payment Reminder & Link Cadence` | `c430ace5-c57b-f111-ab0f-000d3ada6ac0` | off |
+| `Invoice - Scheduled - Bad Debt Referral & Owner Digest` | `dd5a766f-d67d-f111-ab0f-002248a29481` | off |
+| `Invoice - Child - Generate PDF` | `be610dd6-bf7b-f111-ab0f-000d3ada6ac0` | **on** |
+| `Email - Child - Build Branded HTML Email, Create or Send` | `0d0bc4d6-7f74-f111-ab0e-000d3ada6ac0` | **on** |
+| `Invoice - Automated - Close Bad Debt When Invoice Paid` | `fa37bef7-668a-f111-ab10-002248a29481` | **on** |
+| `Invoice - Scheduled - Send Overdue Payment SMS Reminders...` | `2b89f0b5-a9c7-eb11-bacc-000d3ab7951b` | **on** |
+
+Environment variables that matter:
+
+| Variable | Value |
+|---|---|
+| `riivo_PaymentLink_BaseUrl` | `https://payment-link-ttt.azurewebsites.net` |
+| `riivo_PaymentLink_FunctionKey` | (secret, plaintext default value — review separately) |
+| `riivo_WhatsApp_Template_WithButton` | `ttt_invoice_reminder_paylink_v2` |
+| `riivo_WhatsApp_Template_NoButton` | `ttt_invoice_reminder` |
+| `riivo_ReminderTestMode` | `true` |
+| `riivo_BadDebtMinDaysBetweenTouches` | `2` — created for #98 |
+
+---
+
+## Policy decisions settled in #97 — build to these
+
+- **D10 — chase the NEWEST open invoice.** The age band therefore derives from
+  the newest invoice. This **contradicts `CONTEXT.md` § Campaign key**, which
+  defines the band against the client's *oldest* In-scope invoice. The
+  contradiction is accepted and recorded, not an oversight — do not "fix" it.
+- **D11 — stop rule stays Paid-only.** No promise-to-pay brake. Departs from
+  stories 22–23 of `docs/spec-bad-debt-statements.md`; the Statement build owns
+  that. Channel consent flags are still enforced unconditionally.
+- **D12 — from touch 5, fall back to one general template and keep sending.**
+  Use `riivo_WhatsApp_Template_WithButton` (`ttt_invoice_reminder_paylink_v2`),
+  already approved with a Pay-now button. **No Meta submissions needed.** Never
+  wrap back to touch 1 — a fresh "opening" message after a final notice is the
+  failure mode this guards against.
+
+---
+
+## The #98 artifact, and how to extend it
+
+The flow definition is **authored as tested code**, not clicked together:
+
+| File | What it is |
+|---|---|
+| `flows/badDebtRecoveryTouches.ts` | Builds the definition. Edit here, never in the designer. |
+| `flows/__tests__/badDebtRecoveryTouches.test.ts` | 29 tests pinning the expensive-to-get-wrong properties. |
+| `flows/deploy-bad-debt-touches.sh` | Idempotent deploy. `--check` reads only. |
+
+Verified at handoff: the `clientdata` in Dataverse is **byte-for-byte identical**
+to what the module renders, so the tested definition and the deployed one cannot
+have drifted.
+
+```
+npx vitest run flows/                              # 29 tests
+bash flows/deploy-bad-debt-touches.sh --check      # read-only state report
+```
+
+### Facts the tests encode — do not re-derive them by guessing
+
+- **Consent polarity is inverted between channels.**
+  `riivo_whatsappoptinout` **true = opted IN**; `donotemail` /
+  `donotbulkemail` **true = suppressed**. Both default to contactable when
+  null. Read off the live cadence flow `c430ace5`, not inferred from the column
+  names. Getting this backwards messages exactly the people who opted out.
+- **Chaseable statuscodes are `958140000` (Open) and `463630001` (Partially
+  Paid)** — and Partially Paid is absent from every pre-2026-09 document.
+  Filtering on `statecode eq 0` alone sweeps in `463630002` Payment Received –
+  Pending Settlement, i.e. clients whose money is already in flight.
+- **Amounts come from `ttt_outstanding`**, never an original invoice total.
+- **The recurrence is Mon/Thu 09:45 SAST, not the 09:30 the issue asked for.**
+  `dd5a766f` runs daily at 09:30 and *creates* `riivo_baddebt` rows; reading
+  that table on the same tick is a race.
+- **Population is `riivo_baddebt` rows directly**, not invoices flagged
+  `riivo_referredtobaddebts`. The invoice-side query in `dd5a766f` is fenced by
+  a go-live `createdon` floor that would silently exclude the legacy bad debt
+  making up most of the book.
+- **WDL has no `sort()`.** "Newest" is resolved by `max()` over `ticks()`.
+
+---
+
+## Next issue: #99 — template resolution and touch bookkeeping
+
+Template name is `bad_debt_wa_{band}_{relationship}_day{N}`, N ∈ {0,10,25,40}.
+Band comes from the invoice being chased (the **newest**, per D10);
+relationship is paid-before / never-paid and is a property of the **client**,
+not the invoice.
+
+Bookkeeping lives on `riivo_baddebt` — all columns already exist:
+`riivo_campaignsendcount`, `riivo_campaignlastsent`, `riivo_campaignfirstsent`,
+`riivo_campaignbounced`, `riivo_campaignlastreply`.
+
+Three things to be careful about:
+
+1. **Merge monotonically.** A blind overwrite erases earlier runs' figures.
+   This has already happened once on this table.
+2. **`riivo_campaignsendcount` both selects the template and is incremented by
+   the touch** — bookkeeping and selection are two halves of one mechanism.
+3. **Past touch 4, follow D12** (general template, keep sending). Never wrap to
+   touch 1.
+
+Note: #98's module deliberately does **not** read or write
+`riivo_campaignsendcount` — a test asserts its absence, because that field
+belongs to #99. Expect to relax that specific test when you add bookkeeping,
+and keep the "no send" tests untouched.
+
+---
+
+## Open threads worth not losing
+
+- **#96 prod half is unanswered and blocks prod promotion.** The daily
+  WhatsApp/SMS dunning observed in prod since **15 July 2026** is **not
+  explained by dev state** — the live dev SMS flow fires on `icon_daysactive` ∈
+  `[2,4,5,6,7]`, a window that closes on day 7, while bad debt starts at day 30.
+  So prod runs a different flow, a different day-set, or something not in this
+  inventory. Also unanswered: prod SP privileges (R7).
+- **Contact stacking is smaller than the spec feared.** On dev state, worst case
+  for one debtor is **2 messages/week**, both from the new touch.
+- **A live flow is messaging clients whose payment is in flight.**
+  `Invoice - Scheduled - Send Overdue Payment SMS Reminders...` (`2b89f0b5`,
+  **on**) filters on `statecode eq 0` with no `statuscode` clause, so it reaches
+  `463630002` Pending Settlement clients. Pre-existing, unrelated to this build,
+  **not yet filed as a bug.**
+- **`riivo_PaymentLink_FunctionKey` is stored as a plaintext default value** on
+  the environment variable. Flagged in the spec, not actioned.
+- Two #98 ACs still need a human in the maker portal: the same-day re-run check
+  and the dry-run diff against the comms tool's list.
+
+---
+
+## Working conventions
+
+- All build happens in **dev** (D9). Luc promotes dev → prod by hand. No agent
+  activates or deploys anything to prod.
+- Flow naming per `~/ttt-automations-update/naming-standard.md`: three segments,
+  ` - ` delimiter, Title Case.
+- Custom schema uses the **`riivo`** publisher. Flows land in the
+  **`6Automations`** solution, environment variables in **`4Variables`**.
+- Commits are prefixed `RALPH:` and list task, decisions, files and blockers.
+- Config is read from Dataverse environment variables — never hardcoded.
