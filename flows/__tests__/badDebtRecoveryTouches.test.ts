@@ -51,6 +51,9 @@ import {
   DEFAULT_VOLUME_THRESHOLD_PERCENT,
   EMAIL_CHILD_FLOW_ID,
   FLOW_NAME,
+  KILL_SWITCH_OFF,
+  KILL_SWITCH_VARIABLE,
+  STOPPED_HOLD_REASON,
   NOTIFY_CHILD_FLOW_ID,
   APPROVED_BUTTON_URL_PREFIX,
   ONGOING_TEMPLATE_VARIABLE,
@@ -117,7 +120,28 @@ function evaluate(expression: string, env: Record<string, unknown>): unknown {
     while (at < src.length && /\s/.test(src[at])) at++;
   };
 
-  const value = (): unknown => {
+  /**
+   * `?['key']` after a leaf or a call — WDL's safe-navigation accessor, which
+   * the live kill-switch read uses on the result of `first(...)`. Null-safe,
+   * as the platform's is: the whole point of the `?` is that a missing row
+   * yields null rather than failing the run.
+   */
+  const accessors = (base: unknown): unknown => {
+    let current = base;
+    for (;;) {
+      const hit = /^\?\['([^']*)'\]/.exec(src.slice(at));
+      if (!hit) return current;
+      at += hit[0].length;
+      current =
+        current === null || current === undefined
+          ? null
+          : (current as Record<string, unknown>)[hit[1]];
+    }
+  };
+
+  const value = (): unknown => accessors(bareValue());
+
+  const bareValue = (): unknown => {
     skip();
     const leaf = /^«LEAF(\d+)»/.exec(src.slice(at));
     if (leaf) {
@@ -192,6 +216,10 @@ function evaluate(expression: string, env: Record<string, unknown>): unknown {
         return a.find((x) => x !== null && x !== undefined);
       case "empty":
         return Array.isArray(a[0]) ? a[0].length === 0 : !a[0];
+      case "first":
+        // WDL's first() on an empty collection returns null rather than
+        // throwing, which is what the live kill-switch read leans on.
+        return (a[0] as unknown[])[0] ?? null;
       case "length":
         return (a[0] as unknown[]).length;
       case "concat":
@@ -208,6 +236,8 @@ function evaluate(expression: string, env: Record<string, unknown>): unknown {
         return String(a[0]).split(String(a[1])).join(String(a[2]));
       case "trim":
         return String(a[0]).trim();
+      case "toLower":
+        return String(a[0]).toLowerCase();
       case "decodeUriComponent":
         return decodeURIComponent(String(a[0]));
       case "substring":
@@ -592,6 +622,11 @@ describe("campaign key -> template (#99)", () => {
     const holdReason = evaluate(composeInputs("Compose_|_Hold_Reason"), {
       ...env,
       "outputs('Compose_|_Template_Name')": templateName,
+      // #104 folded the kill switch into this reason, ahead of every other
+      // one. These cases are all about a campaign that is RUNNING, so the
+      // switch is on and the reason falls through to the band/template
+      // answers below; the switched-off case is asserted in its own suite.
+      "outputs('Compose_|_Still_Enabled')": true,
     });
     return { ageBand, relationship, templateName, approved, holdReason };
   }
@@ -945,21 +980,25 @@ describe("payment token and PDF (#100)", () => {
     // safe only while every consumer reads these two composes.
     expect(json.split("body('Run_Child_|_Generate_PDF')?['pdfBase64']")).toHaveLength(2);
     expect(json.split("'/p/'")).toHaveLength(2);
-    // #101, #102 and #103 each add a child reference, so the count is no
+    // #101, #102, #103 and #104 each add a child reference, so the count is no
     // longer 1 — but the property this test is really about still holds: every
     // child flow is called from exactly one site, and every GUID is dev's. All
     // four are re-pointed by hand on promotion (see the module's PROMOTION
-    // HAZARD note). The alert child is named twice because a park and a canary
-    // are different events; both are still the same one GUID.
+    // HAZARD note). The alert child is named four times because a park, a
+    // canary, a run that never started and a run stopped part-way through are
+    // four different events a human needs told apart; all four are still the
+    // same one GUID.
     const children = actions
       .filter(([, a]) => a.type === "Workflow")
       .map(([name, a]) => [name, a.inputs.host.workflowReferenceName]);
     expect(children).toEqual([
+      ["Run_Child_|_Disabled_Alert", ALERT_CHILD_FLOW_ID],
       ["Run_Child_|_Volume_Alert", ALERT_CHILD_FLOW_ID],
       ["Run_Child_|_Canary_Alert", ALERT_CHILD_FLOW_ID],
       ["Run_Child_|_Generate_PDF", PDF_CHILD_FLOW_ID],
       ["Run_Child_|_Send_Email", EMAIL_CHILD_FLOW_ID],
       ["Run_Child_|_Wa_Notify", NOTIFY_CHILD_FLOW_ID],
+      ["Run_Child_|_Stopped_Alert", ALERT_CHILD_FLOW_ID],
     ]);
     expect(json.split("workflowReferenceName")).toHaveLength(
       children.length + 1,
@@ -1371,16 +1410,32 @@ describe("the volume tripwire (#101)", () => {
       }
     });
 
-    it("terminates once, as a failure, and only from here", () => {
+    it("parks as a FAILURE, and is the only terminate that is one", () => {
+      // #104 adds two more terminates, both deliberate stops rather than
+      // errors. The distinction is the point of this test: a run parked by the
+      // tripwire is something going wrong and must be red, and a run that
+      // obeyed the kill switch is something going right and must not be — or a
+      // switched-off fortnight reads as two weeks of failures and the
+      // fortnight after that gets ignored.
       const terminates = actions.filter(([, a]) => a.type === "Terminate");
-      expect(terminates.map(([n]) => n)).toEqual(["Terminate_|_Parked"]);
-      expect(terminates[0][1].inputs.runStatus).toBe("Failed");
+      expect(terminates.map(([n]) => n)).toEqual([
+        "Terminate_|_Disabled",
+        "Terminate_|_Parked",
+      ]);
+      const parked = action("Terminate_|_Parked");
+      expect(parked.inputs.runStatus).toBe("Failed");
       // Failed rather than Succeeded so the park is red in run history and
       // reaches the platform's own failure notification — a second path to a
       // human if the email does not arrive.
-      expect(terminates[0][1].inputs.runError.message).toContain(
+      expect(parked.inputs.runError.message).toContain(
         "outputs('Compose_|_Tripwire_Reason')",
       );
+      for (const name of ["Terminate_|_Disabled"]) {
+        // Cancelled, not Succeeded either: a run that did not happen must not
+        // look like a run that found nobody to chase.
+        expect(action(name).inputs.runStatus, name).toBe("Cancelled");
+        expect(action(name).inputs.runError, name).toBeUndefined();
+      }
     });
 
     it("terminates even if the alert could not be delivered", () => {
@@ -1430,6 +1485,11 @@ describe("the volume tripwire (#101)", () => {
         "item/riivo_heldcount",
         "item/riivo_emailsentcount",
         "item/riivo_whatsappsentcount",
+        // #104. Here rather than on the create for the same reason as the
+        // counts: neither is known until the loop has finished, and both stay
+        // null on a run that never finished one — which is the truth about it.
+        "item/riivo_durationseconds",
+        "item/riivo_throttlewaits",
       ]);
     });
 
@@ -2643,6 +2703,337 @@ describe("the WhatsApp channel (#103)", () => {
       const branch = action("Condition_|_Send_WhatsApp").actions;
       expect(Object.keys(branch).at(-1)).toBe("Compose_|_Wa_Notify_Status");
     });
+  });
+});
+
+/**
+ * #104 is where the schedule starts doing the sending, so it is the first
+ * slice whose subject is not what the flow says to a client but what a human
+ * can do about it afterwards. Two things follow from that, and these are the
+ * tests for them: the campaign must be stoppable by somebody who does not own
+ * the flow, and a run must leave behind the numbers that answer "did that go
+ * normally" without anyone having to have been watching at 09:45.
+ */
+describe("the kill switch (#104)", () => {
+  const param = `Bad Debt Enabled (${KILL_SWITCH_VARIABLE})`;
+
+  /** `Compose_|_Enabled`, as the flow will evaluate it. */
+  const enabled = (value: unknown) =>
+    evaluate(composeInputs("Compose_|_Enabled"), {
+      [`parameters('${param}')`]: value,
+    });
+
+  it("is an environment variable, because deactivating the flow is not ours to do", () => {
+    // Ownership and activation are connection-gated to riivo Admin in this
+    // org. An environment variable needs neither, which is the entire reason
+    // this exists rather than "turn the flow off" being the documented answer.
+    expect(definition.parameters[param]).toBeDefined();
+    expect(definition.parameters[param].metadata.schemaName).toBe(
+      KILL_SWITCH_VARIABLE,
+    );
+  });
+
+  it("stops on 'no' in any casing, and runs on anything else", () => {
+    expect(enabled("no")).toBe(false);
+    expect(enabled("No")).toBe(false);
+    expect(enabled(" NO ")).toBe(false);
+    expect(enabled("yes")).toBe(true);
+    // A typo must not silently switch a campaign off, and an unset variable
+    // must not either: only the recognised word stops it.
+    expect(enabled("nope")).toBe(true);
+    expect(enabled("")).toBe(true);
+    expect(enabled(null)).toBe(true);
+    expect(KILL_SWITCH_OFF).toBe("no");
+  });
+
+  it("defaults to running, so a missing variable never silences the campaign", () => {
+    expect(definition.parameters[param].defaultValue).toBe("yes");
+  });
+
+  it("gates the run BEFORE it selects anybody or records anything", () => {
+    // Not merely "before the send": a disabled run must cost nothing and
+    // leave no trace, so neither the selection query nor the run row may be
+    // reachable from a run that was told not to happen.
+    const chain = (name: string): string[] => {
+      const parents = Object.keys(action(name).runAfter ?? {});
+      return parents.flatMap((p) => [p, ...chain(p)]);
+    };
+    for (const downstream of [
+      "List_rows_|_Open_BadDebts",
+      "Create_|_Run_Record",
+      "Apply_to_each_|_Selected",
+    ]) {
+      expect(chain(downstream), downstream).toContain("Condition_|_Kill_Switch");
+    }
+  });
+
+  it("re-reads the switch from Dataverse inside the loop, not from the parameter", () => {
+    // The parameter is bound once, when the run starts. To a run already in
+    // flight it is frozen, so the only way to answer "has somebody changed
+    // their mind since 09:45" is to go and look. Query shape copied from
+    // `Invoice - Offer Report When Paid`, the one activated flow in this org
+    // that already reads a live environment-variable value.
+    const live = action("List_rows_|_Kill_Switch_Live").inputs.parameters;
+    expect(live.entityName).toBe("environmentvariablevalues");
+    expect(live.$filter).toBe(
+      `EnvironmentVariableDefinitionId/schemaname eq '${KILL_SWITCH_VARIABLE}'`,
+    );
+    expect(live.$select).toBe("value");
+    expect(live.$top).toBe(1);
+    expect(composeInputs("Compose_|_Kill_Switch_Live")).toContain(
+      "List_rows_|_Kill_Switch_Live",
+    );
+  });
+
+  it("asks before it acts, on every client", () => {
+    // First in the loop body — nothing is minted, rendered or sent for this
+    // client before the question is asked.
+    const loop = action("Apply_to_each_|_Selected").actions;
+    const first = Object.entries<any>(loop).filter(
+      ([, a]) => Object.keys(a.runAfter ?? {}).length === 0,
+    );
+    expect(first.map(([n]) => n)).toEqual(["List_rows_|_Kill_Switch_Live"]);
+  });
+
+  it("holds the clients it has not reached, because Terminate is illegal in a loop", () => {
+    // Checked against all 322 flows in this dev org: 487 Terminate actions,
+    // not one of them inside a Foreach or Until. So "stop" is expressed as a
+    // hold on the gate that was already there — which costs each remaining
+    // client three reads and no mint, no PDF, no email and no WhatsApp, and
+    // leaves a report saying exactly who was reached before the switch was
+    // thrown and who was not.
+    const inLoop = (name: string) =>
+      JSON.stringify(action(name)).includes('"type":"Terminate"');
+    expect(inLoop("Apply_to_each_|_Selected")).toBe(false);
+    expect(inLoop("Apply_to_each_|_BadDebt")).toBe(false);
+    expect(inLoop("Apply_to_each_|_Client")).toBe(false);
+
+    // The gate the switch rides, and the reason it hands the held client.
+    expect(action("Condition_|_Template_Approved").expression.and).toContainEqual(
+      { equals: ["@outputs('Compose_|_Still_Enabled')", true] },
+    );
+    expect(composeInputs("Compose_|_Hold_Reason")).toContain(STOPPED_HOLD_REASON);
+  });
+
+  it("holds for the switch ahead of every other reason", () => {
+    // The other reasons say something about the client — too young, too old,
+    // no approved template. This one says nothing about them at all, so it
+    // must not be masked by one that misdescribes why they were skipped.
+    const reason = (stillEnabled: boolean) =>
+      evaluate(composeInputs("Compose_|_Hold_Reason"), {
+        "outputs('Compose_|_Still_Enabled')": stillEnabled,
+        "outputs('Compose_|_Touch_Number')": 1,
+        "outputs('Compose_|_Invoice_Age_Days')": 10,
+        "outputs('Compose_|_Age_Band')": "",
+        "outputs('Compose_|_Template_Name')": "",
+      });
+    // 10 days old would otherwise be held as "younger than 30 days".
+    expect(reason(false)).toBe(STOPPED_HOLD_REASON);
+    expect(reason(true)).not.toBe(STOPPED_HOLD_REASON);
+  });
+
+  it("reads the switch as off only on the recognised word", () => {
+    const live = (value: unknown) =>
+      evaluate(composeInputs("Compose_|_Still_Enabled"), {
+        "outputs('Compose_|_Kill_Switch_Live')": value,
+      });
+    expect(live("no")).toBe(false);
+    expect(live("yes")).toBe(true);
+    expect(live("")).toBe(true);
+  });
+
+  it("fails OPEN if the system table cannot be read", () => {
+    // The one place in this build where fail-open is right: this read is an
+    // addition to the switch, not the switch. If it breaks, the honest
+    // outcome is the behaviour the campaign had before #104 — the parameter
+    // gate and the maker portal both still stop it — rather than a campaign
+    // that cannot run at all.
+    expect(action("Compose_|_Kill_Switch_Live").runAfter).toEqual({
+      "List_rows_|_Kill_Switch_Live": ["Succeeded", "Failed"],
+    });
+    expect(action("Compose_|_Kill_Switch_Readable").runAfter).toEqual({
+      "List_rows_|_Kill_Switch_Probe": ["Succeeded", "Failed"],
+    });
+  });
+
+  it("prefers the value row, then the parameter", () => {
+    // Dataverse's own precedence, restated because the connector will not
+    // apply it for us — and the live read must agree with the parameter gate
+    // about what an unset variable means, or the two halves of one switch
+    // disagree about the same question.
+    const effective = (rows: unknown, parameter: unknown) =>
+      evaluate(composeInputs("Compose_|_Kill_Switch_Live"), {
+        "outputs('List_rows_|_Kill_Switch_Live')?['body/value']": rows,
+        [`parameters('${param}')`]: parameter,
+      });
+    expect(effective([{ value: "no" }], "yes")).toBe("no");
+    // No value row: the variable is running on its default, which is what the
+    // platform bound into the parameter.
+    expect(effective([], "no")).toBe("no");
+    // A failed read reaches the compose as null, not as an empty array.
+    expect(effective(null, "yes")).toBe("yes");
+    expect(effective(null, null)).toBe("yes");
+  });
+
+  it("says in the report whether the live read actually works here", () => {
+    // Answered on an ordinary Monday rather than on the day somebody is
+    // trying to stop a run and finding out that half of this switch does
+    // nothing in their environment.
+    const probe = action("List_rows_|_Kill_Switch_Probe").inputs.parameters;
+    expect(probe.$filter).toBe(
+      action("List_rows_|_Kill_Switch_Live").inputs.parameters.$filter,
+    );
+    expect((composeInputs("Compose_|_Dry_Run_Report") as any).killSwitchLiveRead)
+      .toBe("@outputs('Compose_|_Kill_Switch_Readable')");
+  });
+
+  it("tells somebody, every time, that the campaign is off", () => {
+    // The failure mode of this switch is not that it is set — that is the
+    // point of it — it is that it is LEFT set, and a campaign that has
+    // quietly stopped chasing money looks exactly like one that is running
+    // and finding nobody to chase. Same reasoning as the canary notice.
+    for (const name of ["Run_Child_|_Disabled_Alert", "Run_Child_|_Stopped_Alert"]) {
+      const body = action(name).inputs.body;
+      expect(action(name).inputs.host.workflowReferenceName).toBe(
+        ALERT_CHILD_FLOW_ID,
+      );
+      expect(body.text).toContain(KILL_SWITCH_VARIABLE);
+      // The house child hardcodes "Flow Failure:" into its subject, so the
+      // subject line has to say this one is not one.
+      expect(body.text_1).toContain("not a failure");
+    }
+    // Stopping part-way leaves some clients already messaged. Which ones, and
+    // how many, is the first thing the person who pulled the switch needs.
+    expect(action("Run_Child_|_Stopped_Alert").inputs.body.text).toContain(
+      "length(variables('varTouches'))",
+    );
+  });
+
+  it("notices a stopped run once, after the loop, not once per client", () => {
+    // The per-client alternative emails the team for every remaining name on
+    // the list, which is how a real signal gets filtered into a folder.
+    expect(action("Filter_|_Stopped_Holds").inputs.where).toContain(
+      STOPPED_HOLD_REASON,
+    );
+    expect(Object.keys(action("Condition_|_Stopped_Mid_Run").actions)).toEqual([
+      "Run_Child_|_Stopped_Alert",
+    ]);
+    expect(
+      evaluateCondition(action("Condition_|_Stopped_Mid_Run").expression, {
+        "length(body('Filter_|_Stopped_Holds'))": 0,
+      }),
+    ).toBe(false);
+    expect(
+      evaluateCondition(action("Condition_|_Stopped_Mid_Run").expression, {
+        "length(body('Filter_|_Stopped_Holds'))": 3,
+      }),
+    ).toBe(true);
+  });
+
+  it("still writes its report if the notice could not be delivered", () => {
+    // The report is the record; the email is a courtesy. An undeliverable
+    // courtesy must not cost the run its report.
+    expect(action("Compose_|_Dry_Run_Report").runAfter).toEqual({
+      "Condition_|_Stopped_Mid_Run": ["Succeeded", "Failed"],
+    });
+    expect(action("Terminate_|_Disabled").runAfter).toEqual({
+      "Run_Child_|_Disabled_Alert": ["Succeeded", "Failed", "Skipped", "TimedOut"],
+    });
+  });
+});
+
+describe("what a run records about itself (#104)", () => {
+  const report = composeInputs("Compose_|_Dry_Run_Report") as any;
+  const created = action("Create_|_Run_Record").inputs.parameters;
+  const patched = action("Update_|_Run_Record").inputs.parameters;
+
+  it("starts its clock before it decides anything", () => {
+    expect(composeInputs("Compose_|_Run_Started")).toBe("@utcNow()");
+    expect(action("Compose_|_Run_Started").runAfter).toEqual({});
+  });
+
+  it("records when it began on the row it writes first", () => {
+    // With the first patch, so a run that died in the loop still says when it
+    // started. Duration cannot join it there: it is not known yet.
+    expect(created["item/riivo_startedon"]).toBe(
+      "@outputs('Compose_|_Run_Started')",
+    );
+    expect(created["item/riivo_durationseconds"]).toBeUndefined();
+  });
+
+  it("measures duration in whole seconds, from ticks", () => {
+    // Ticks are 100-nanosecond units; 10^7 of them is a second. A wrong
+    // divisor here is a plausible-looking number that is wrong by orders of
+    // magnitude, which is worse than no number at all.
+    for (const expression of [
+      patched["item/riivo_durationseconds"],
+      report.durationSeconds,
+    ]) {
+      expect(expression).toContain("ticks(utcNow())");
+      expect(expression).toContain("ticks(outputs('Compose_|_Run_Started'))");
+      expect(expression).toContain("10000000");
+    }
+  });
+
+  it("counts every Retry-After wait, in every retried call", () => {
+    // Once an Until has retried a 429 into a 200, run history shows a
+    // succeeded action and nothing else: the wait is invisible by the time
+    // anyone reads it. So it is counted as it happens, not reconstructed.
+    const throttled = actions.filter(([n]) => /^Condition_\|_.*_Throttled$/.test(n));
+    expect(throttled.length).toBeGreaterThanOrEqual(3);
+    for (const [name, condition] of throttled) {
+      const increments = Object.entries<any>(condition.actions).filter(
+        ([, a]) => a.type === "IncrementVariable",
+      );
+      expect(increments.length, name).toBe(1);
+      expect(increments[0][1].inputs).toEqual({
+        name: "varThrottleWaits",
+        value: 1,
+      });
+      // Counted before the wait, so a run killed or timed out mid-delay still
+      // records the throttle that put it there.
+      const delay = Object.entries<any>(condition.actions).find(
+        ([, a]) => a.type === "Wait",
+      )!;
+      expect(Object.keys(delay[1].runAfter), name).toEqual([increments[0][0]]);
+    }
+  });
+
+  it("initialises the counter at the top level, before the loop", () => {
+    // Power Automate initialises variables at the top level only, and this one
+    // is written from inside three separate Until loops — safe solely because
+    // the per-client loop runs one repetition at a time, the same assumption
+    // the candidate arrays already rest on.
+    const init = action("Initialize_variable_|_Throttle_Waits");
+    expect(init.inputs.variables).toEqual([
+      { name: "varThrottleWaits", type: "integer", value: 0 },
+    ]);
+    expect(Object.keys(action("Apply_to_each_|_Selected").runAfter)).toEqual([
+      "Initialize_variable_|_Throttle_Waits",
+    ]);
+  });
+
+  it("declares every column it now writes on the run table", () => {
+    const declared = new Set(RUN_TABLE_ATTRIBUTES.map((a) => a.logicalName));
+    for (const column of [
+      "riivo_startedon",
+      "riivo_durationseconds",
+      "riivo_throttlewaits",
+    ]) {
+      expect(declared.has(column), column).toBe(true);
+    }
+  });
+
+  it("puts the operating numbers in the report a human actually reads", () => {
+    for (const field of [
+      "startedOn",
+      "durationSeconds",
+      "throttleWaits",
+      "killSwitch",
+      "killSwitchLiveRead",
+    ]) {
+      expect(report[field], field).toBeDefined();
+    }
   });
 });
 

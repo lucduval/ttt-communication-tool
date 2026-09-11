@@ -19,14 +19,16 @@ against the dev org on 2026-09-11 unless it says otherwise.
 | #101 Volume tripwire | **Open but built.** Rides the same replace-deploy; also needs one new environment variable and one new table, both of which the deploy script creates. |
 | #102 Email live | **Open but built.** Rides the same replace-deploy; adds one environment variable and two columns to the run table, both of which the deploy script creates. The rehearsal and the canary are human runs. |
 | #103 WhatsApp live | **Open but built.** Rides the same replace-deploy; adds one more run-table column and reads three Meta environment variables that already exist. The rehearsal and the canary are human runs — and unlike email there is **no draft mode**, so the first one sends real messages. |
-| #104 | **The next one** (switch on the twice-weekly recurrence and observe two cycles). |
+| #104 Recurrence on, two cycles observed | **Open; the buildable half is built.** Adds the kill switch, the run clock and the throttle counter, plus `docs/runbook-bad-debt-recovery.md`. Rides the same replace-deploy; adds one environment variable and three run-table columns, both of which the deploy script creates. Everything else it asks for is human: switching the recurrence on, watching two cycles, reviewing the threshold against real numbers, and the prod handover. |
 
 **What is actually deployed in dev right now is the #99 definition.** Checked
-byte-for-byte on 2026-09-11: the flow in dev (`3c600c0b-c5ad-f111-aaab-002248a35b45`,
-draft/off) matches the rendered `#99` module exactly, so **#100's replace-deploy
-was never run**. One `--replace` therefore carries dev from #99 straight to
-#103 — the mint/PDF scope, the tripwire, the email channel, the canary and the
-WhatsApp channel land together, and the workflowid changes again when it does.
+byte-for-byte on 2026-09-11, and `--check` still reports `definition=differs` on
+2026-09-11 after the #104 build: the flow in dev
+(`3c600c0b-c5ad-f111-aaab-002248a35b45`, draft/off) matches the rendered `#99`
+module exactly, so **#100's replace-deploy was never run**. One `--replace`
+therefore carries dev from #99 straight to **#104** — the mint/PDF scope, the
+tripwire, the email channel, the canary, the WhatsApp channel and the kill
+switch land together, and the workflowid changes again when it does.
 
 **#99, #100 and #101 all say "Blocked by #98".** That dependency is satisfied:
 #98's build is deployed and verified. Only its two human-verification ACs
@@ -92,6 +94,7 @@ Environment variables that matter:
 | `riivo_varFlowErrorTeamMail` | `233fd44c.riivo.io@za.teams.ms` — the alert child's recipient, i.e. where a parked run lands |
 | `riivo_EnvironmentAddress` | *value* `https://tttdevelopment.crm4.dynamics.com/` — passed to the alert child so the email names the environment |
 | `riivo_BadDebtCanaryContactIds` | **not created yet** — #102's restriction list, default empty. `ensure_env_var` creates it |
+| `riivo_BadDebtEnabled` | **not created yet** — #104's kill switch, default `yes`. `ensure_env_var` creates it. `no` stops the campaign, between runs *and* part-way through one |
 | `riivo_SendEmail` | **`no`** — org-wide. The email child creates every mail as a *draft* and sends nothing while this is off. Read by 71 flows |
 | `riivo_SharedSenderUserId` | `23bfea8c-e77f-ef11-ac20-7c1e5220cbf3` = `riivo Developer`, `riivo-dev@ttt-tax.co.za`. Handed to the email child as `senderUserId` |
 | `riivo_ServiceQueue` | `1a83f63c-…` = **TTT Notifications**, `tttnotificationsdev@ttt-tax.co.za` — the actual **From** on a bad-debt email, because the child is called with `variant: System` |
@@ -627,6 +630,130 @@ channels and should be a deliberate choice rather than a discovery.
 
 ---
 
+## What #104 added: the parts of "unattended" that are not the flow
+
+From here the schedule does the sending, so the subject changes. Every slice
+before this one was about what the run says to a client; this one is about what
+a human can do about it afterwards. Two questions, both of which had bad answers
+before: **how do I stop this**, and **how do I tell whether that run was
+normal**.
+
+### The kill switch
+
+`riivo_BadDebtEnabled`, `yes`/`no`, matching `riivo_SendEmail` — the org's
+existing example of exactly this kind of switch. `no` stops the campaign;
+anything else, including blank, means running.
+
+An environment variable rather than the flow's own state, because **the answers
+that already existed were all owned by somebody else**: deactivating the flow
+and cancelling a run are both connection-gated to riivo Admin in this org, and
+the person watching the wrong message go out at 09:47 on a Monday is not
+necessarily them. An environment variable needs no portal rights over the flow
+and no deploy.
+
+It is checked **twice, in two different ways, for two different questions**:
+
+- **Should this run start?** Read from the flow parameter, which the platform
+  binds fresh at run start, so the cheapest read is also the correct one. A
+  disabled run terminates before selecting anybody: no query, no mint, no
+  render, and **no `riivo_baddebtrun` row**, which keeps it out of the
+  tripwire's baseline for free.
+- **Should this run continue?** The parameter cannot answer that — Power
+  Automate binds it once, so to a run already in flight the switch is frozen at
+  whatever it said at 09:45. So the loop re-reads the live value from
+  Dataverse, once per client. That costs one extra List per client, which is
+  deliberate and is the honest price: it is the difference between a wrong
+  message reaching twelve clients and reaching six hundred. `riivo_durationseconds`
+  exists partly so that price can be judged against a real number.
+
+**Three platform facts were checked against the org rather than assumed**, by
+reading all 322 deployed flow definitions:
+
+1. **`Terminate` is not legal inside a loop.** 487 Terminate actions across the
+   org, **not one** inside a Foreach or Until. So the mid-run stop is *not* a
+   terminate — it rides the `Condition_|_Template_Approved` gate that was
+   already there, and a switched-off run **holds** every client it has not
+   reached, with a reason. That costs the remaining clients three reads each
+   and no mint, no PDF, no email and no WhatsApp. It is also better than the
+   terminate would have been: the run finishes, so the report says exactly who
+   was reached before the switch was thrown and who was not.
+2. **`Cancelled` is a real terminate status here** — 32 uses in deployed flows.
+   The top-of-run stop uses it rather than `Failed` (a run that did what it was
+   told is not an error) or `Succeeded` (a switched-off fortnight must not read
+   as a column of green ticks).
+3. **The live environment-variable read has one precedent in this org**, and
+   the build copies it verbatim: `Invoice - Offer Report When Paid` (activated)
+   reads `environmentvariablevalues` filtered on
+   `EnvironmentVariableDefinitionId/schemaname`, with `runAfter: [Succeeded,
+   Failed]` and a `first(coalesce(..., ...))?['value']` read that returns null
+   rather than throwing on an empty result. An earlier draft of this slice
+   invented a two-call definition-lookup to avoid guessing that navigation
+   property's spelling; the org already knew it.
+
+**The live read fails OPEN**, and this is the one place in this build where
+that is the right direction. It is an *addition* to the switch, not the switch:
+the parameter gate still stops the next run and the maker portal still stops the
+flow, so if the system table cannot be read the honest outcome is the behaviour
+the campaign had before #104, rather than a campaign that cannot run at all.
+`killSwitchLiveRead` in the report is how anyone finds out — on an ordinary
+Monday, rather than on the day they need it.
+
+**Every skipped or stopped run emails the team**, through the same house child,
+for the reason the canary notice does: the failure mode of this switch is not
+that somebody sets it — that is the point of it — it is that nobody unsets it,
+and a campaign that has quietly stopped chasing money looks exactly like one
+that is running and finding nobody to chase. The mid-run notice fires **once**,
+after the loop, found by filtering the held rows on the reason string rather
+than by a flag set inside the loop; per-client it would have mailed the team for
+every remaining name on the list.
+
+### The numbers a run leaves behind
+
+Three columns, sixteen now on `riivo_baddebtrun`:
+
+- **`riivo_startedon`** — written with the *first* patch, so a run that died in
+  the loop still says when it began.
+- **`riivo_durationseconds`** — AC 5. Run history answers this too, until it
+  expires; the column is what makes "is this getting slower" a question about a
+  table rather than about memory.
+- **`riivo_throttlewaits`** — counted as each `Retry-After` wait happens, across
+  the mint call and both Meta calls. **Once an `Until` has retried a 429 into a
+  200 the wait is invisible**: run history shows a succeeded action and nothing
+  else. Read beside the duration, it separates "the endpoints asked us to slow
+  down" from "something else got slower".
+
+All three, plus `killSwitch`, `killSwitchLiveRead` and `stoppedMidRun`, are in
+the run report as well.
+
+### `docs/runbook-bad-debt-recovery.md`
+
+AC 7 and AC 8. Written for whoever is looking at a run that does not look right,
+not for whoever is building the next slice: how to stop it and who can, what a
+healthy run's numbers look like, the five places a failure surfaces, and a
+symptom-to-cause list for the failure modes this build already knows about —
+including the ones that are *expected* in dev (the Pay-now prefix mismatch,
+`riivo_SendEmail` off) so they are not diagnosed from scratch at 09:50.
+
+### Still needed for #104
+
+1. `bash flows/deploy-bad-debt-touches.sh --replace` — the same one command,
+   now carrying dev from #99 all the way to #104. It also creates
+   `riivo_BadDebtEnabled` and the run table, now **16** columns.
+2. The human steps the script prints as 16–20: prove the kill switch **while
+   the canary list is still set** → check `killSwitchLiveRead` → switch the
+   recurrence on and watch two cycles → review the tripwire threshold against
+   the two real counts → hand to Luc for prod.
+
+### What #104 asks for that is not built, and cannot be
+
+Six of its eleven ACs are observations of two real runs, and an agent can
+neither activate the flow nor run it. The threshold review (AC 6) needs two
+real counts that do not exist yet. The prod handover (AC 11) is Luc's by
+decision, and AC 10 is #96, whose prod half is still unanswered — **that one
+blocks promotion, not this build**.
+
+---
+
 ## Open threads worth not losing
 
 - **#96 prod half is unanswered and blocks prod promotion.** The daily
@@ -640,8 +767,8 @@ channels and should be a deliberate choice rather than a discovery.
 - **A live flow is messaging clients whose payment is in flight.**
   `Invoice - Scheduled - Send Overdue Payment SMS Reminders...` (`2b89f0b5`,
   **on**) filters on `statecode eq 0` with no `statuscode` clause, so it reaches
-  `463630002` Pending Settlement clients. Pre-existing, unrelated to this build,
-  **not yet filed as a bug** — asked twice, still unanswered.
+  `463630002` Pending Settlement clients. Pre-existing, unrelated to this build.
+  **Now filed as #105.**
 - **`riivo_SendEmail` is off in dev and is org-wide.** Not a bug, but it is
   load-bearing for #102 and is documented nowhere else: 71 flows read it, and
   with it off every one of them drafts rather than sends. Whoever owns dev
@@ -651,12 +778,15 @@ channels and should be a deliberate choice rather than a discovery.
   branches on `riivo_varFlowErrorSendBool` and then **sends in both branches** —
   `Send_Mail` and `Do_not_Send_Mail` are identical `SendEmail` calls. Setting
   that variable to `no` suppresses nothing, org-wide, in 218 flows. For a safety
-  alert that is the fail-safe direction, so #101 does not work around it. Worth
-  its own ticket next to the `2b89f0b5` one.
-- **`riivo_PaymentLink_FunctionKey` is stored as a plaintext default value** on
-  the environment variable. Flagged in the spec, not actioned.
-  `riivo_varMetaAccessToken` — a live Meta bearer token — is stored the same
-  way, and so is `riivo_HmacFunctionKey`. Same ticket, wider than one key.
+  alert that is the fail-safe direction, so #101 does not work around it.
+  **Now filed as #106**, which notes the decision to take first: make the switch
+  work, or remove it.
+- **Three live credentials are stored as plaintext default values** on their
+  environment variables: `riivo_PaymentLink_FunctionKey`,
+  `riivo_varMetaAccessToken` (a live Meta bearer token for the org's single
+  WhatsApp Business number) and `riivo_HmacFunctionKey`. **Now filed as #107** —
+  one ticket, because the same storage decision was made three times, and it
+  calls for rotation as well as a move to Key Vault.
 - **The WhatsApp button prefix and `riivo_PaymentLink_BaseUrl` disagree in both
   directions** (see #103 above). The campaign templates point at
   `payment-link-ttt.azurewebsites.net`, the D12 fallback at dev's host. Neither

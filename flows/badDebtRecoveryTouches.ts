@@ -149,6 +149,55 @@ const TEST_MODE_PARAM = "Reminder Test Mode (riivo_ReminderTestMode)";
 const TOUCH_GAP_PARAM = `Bad Debt Min Days Between Touches (${TOUCH_GAP_VARIABLE})`;
 
 /**
+ * The kill switch (#104), and the only stop a human who is not riivo Admin has.
+ *
+ * From #104 the schedule does the sending, so "how do I stop it" stops being a
+ * rhetorical question. The answers that existed before this slice were both
+ * owned by somebody else: deactivate the flow in the maker portal, or cancel a
+ * running instance — and in this org both are connection-gated to riivo Admin,
+ * who may not be the person watching the wrong message go out at 09:47 on a
+ * Monday. An environment variable is editable by anyone with Dataverse access,
+ * needs no portal and no flow ownership, and is the same lever every other
+ * switch in this build already uses.
+ *
+ * `yes`/`no` rather than `true`/`false`, matching `riivo_SendEmail` — the
+ * org's existing example of exactly this kind of switch — and read through
+ * `toLower(trim(...))` so `No`, `NO ` and `no` all stop the campaign. Anything
+ * that is not a recognised "off" word means ON: a typo must not silently
+ * switch off a campaign, and a typo that silently switched it ON would be
+ * worse still, so the default and the fallback are both the safe-to-observe
+ * direction — running, visibly, where the next run's report says what it did.
+ */
+export const KILL_SWITCH_VARIABLE = "riivo_BadDebtEnabled";
+const KILL_SWITCH_PARAM = `Bad Debt Enabled (${KILL_SWITCH_VARIABLE})`;
+export const KILL_SWITCH_OFF = "no";
+
+/**
+ * Reading an environment variable's LIVE value, rather than the copy the
+ * platform bound when the run started.
+ *
+ * Query shape and fail-open handling are copied from `Invoice - Offer Report
+ * When Paid` (activated in dev), the one flow in this org of 322 that already
+ * does this — including the `first(coalesce(..., createArray()))?['value']`
+ * read, which returns null on an empty result rather than throwing, and the
+ * `Succeeded, Failed` runAfter that lets a failed read fall through to the
+ * parameter instead of failing the run.
+ */
+const ENV_VAR_VALUE_SET = "environmentvariablevalues";
+const envVarValueFilter = (schemaName: string) =>
+  `EnvironmentVariableDefinitionId/schemaname eq '${schemaName}'`;
+
+/**
+ * The hold reason a client gets when the switch was thrown mid-run.
+ *
+ * Shared, because the post-loop notice finds those clients by filtering the
+ * held rows on this exact string: two spellings of it would mean a run that
+ * stopped and never said so.
+ */
+export const STOPPED_HOLD_REASON =
+  "the campaign was switched off part-way through this run";
+
+/**
  * The tripwire's one tuning knob, and its default.
  *
  * String rather than Number, following `riivo_BadDebtMinDaysBetweenTouches`
@@ -430,6 +479,8 @@ const LINK_ENABLED_PARAM = `Payment Link Enabled (${PAYMENT_LINK_ENABLED_VARIABL
  * client — the safe direction, and visible in the report.
  */
 const THROTTLED_STATUS = 429;
+/** Flow variable counting every Retry-After wait this run served (#104). */
+const THROTTLE_WAITS_VARIABLE = "varThrottleWaits";
 const RETRY_ATTEMPTS = 4;
 const DEFAULT_RETRY_AFTER_SECONDS = 30;
 const MAX_RETRY_AFTER_SECONDS = 300;
@@ -860,8 +911,15 @@ const untilNotThrottled = ({
           ],
         },
         actions: {
-          [`Delay_|_${slug}_Retry_After`]: {
+          // #104: counted before the wait, not after it, so a run killed or
+          // timed out mid-delay still records the throttle that caused it.
+          [`Increment_variable_|_${slug}_Throttled`]: {
             runAfter: {},
+            type: "IncrementVariable",
+            inputs: { name: THROTTLE_WAITS_VARIABLE, value: 1 },
+          },
+          [`Delay_|_${slug}_Retry_After`]: {
+            runAfter: { [`Increment_variable_|_${slug}_Throttled`]: ["Succeeded"] },
             type: "Wait",
             inputs: {
               interval: { count: retryAfterSeconds(call), unit: "Second" },
@@ -972,6 +1030,15 @@ export function buildBadDebtRecoveryTouchesFlow() {
               schemaName: "riivo_ReminderTestMode",
               description:
                 "When 'true' the run reports its selection and stops. This slice (#98) sends nothing in either mode; the switch is wired now so the send slices inherit it rather than bolting it on.",
+            },
+          },
+          [KILL_SWITCH_PARAM]: {
+            defaultValue: "yes",
+            type: "String",
+            metadata: {
+              schemaName: "riivo_BadDebtEnabled",
+              description:
+                "The kill switch (#104). Set it to 'no' and the bad-debt recovery campaign stops: the next scheduled run ends before it selects anybody, and a run already in flight stops at the next client rather than finishing its list. Anything else - including an empty value - means the campaign is running. It is an environment variable rather than the flow's own on/off state because deactivating a flow is connection-gated to riivo Admin in this org, and the person who needs to stop a bad run is whoever is reading it. A disabled run emails the team every time it is skipped, for the same reason a canary run does: the failure mode of this switch is not that somebody sets it, it is that nobody unsets it.",
             },
           },
           [TOUCH_GAP_PARAM]: {
@@ -1115,8 +1182,108 @@ export function buildBadDebtRecoveryTouchesFlow() {
           },
         },
         actions: {
-          "Compose_|_TestMode": {
+          // ---- #104: the run clock, started before anything is decided ----
+          // AC 5 asks how long a run takes at realistic volume, which the run
+          // history answers only until it expires. `utcNow()` here rather than
+          // `trigger()['startTime']`: they differ by well under a second, and
+          // this one is a plain string every downstream expression already
+          // knows how to read. Paired with `Compose_|_Run_Started` the
+          // duration is computed once, at the end, in `Update_|_Run_Record`.
+          "Compose_|_Run_Started": {
             runAfter: {},
+            type: "Compose",
+            inputs: "@utcNow()",
+          },
+
+          // ---- #104: the kill switch, read before the run costs anything ----
+          // Read from the PARAMETER here, which the platform binds at run
+          // start and is therefore already fresh, so the cheapest possible
+          // read is also the correct one. The loop re-reads it from Dataverse
+          // for the different question "has somebody changed their mind since
+          // this run began" — see `Compose_|_Kill_Switch_Live`.
+          "Compose_|_Enabled": {
+            runAfter: { "Compose_|_Run_Started": ["Succeeded"] },
+            type: "Compose",
+            inputs: `@not(equals(toLower(trim(coalesce(parameters('${KILL_SWITCH_PARAM}'), 'yes'))), '${KILL_SWITCH_OFF}'))`,
+          },
+
+          "Condition_|_Kill_Switch": {
+            runAfter: { "Compose_|_Enabled": ["Succeeded"] },
+            type: "If",
+            expression: {
+              and: [{ equals: ["@outputs('Compose_|_Enabled')", false] }],
+            },
+            actions: {
+              // Every skipped run says so, and the reasoning is the canary
+              // list's exactly: the danger is not that somebody switches the
+              // campaign off, which is the whole point of the switch — it is
+              // that nobody switches it back on, and a campaign that has
+              // quietly stopped collecting money looks identical to one that
+              // is running and finding nobody to chase. Twice a week in the
+              // channel operators already watch is as annoying as it should be.
+              "Run_Child_|_Disabled_Alert": {
+                runAfter: {},
+                type: "Workflow",
+                inputs: {
+                  host: { workflowReferenceName: ALERT_CHILD_FLOW_ID },
+                  body: {
+                    text: `@{parameters('${ENVIRONMENT_ADDRESS_PARAM}')} - THE BAD-DEBT CAMPAIGN IS SWITCHED OFF. ${KILL_SWITCH_VARIABLE} is '@{parameters('${KILL_SWITCH_PARAM}')}', so this run ended before selecting anybody: nothing was queried, minted, rendered, emailed or sent, and no ${RUN_TABLE_SET} row was written. That is exactly what the switch is for. It is also the only thing stopping this campaign, so if nobody meant it to be off, set ${KILL_SWITCH_VARIABLE} back to 'yes' and the next scheduled run resumes on its own - no redeploy, no flow edit. This notice repeats every Monday and Thursday until it does.`,
+                    text_1: `@{workflow().tags.flowDisplayName} - SWITCHED OFF by ${KILL_SWITCH_VARIABLE}, not a failure`,
+                    text_2: "@workflow().tags.environmentName",
+                    text_3: "@workflow().name",
+                    text_4: "@workflow().run.name",
+                  },
+                },
+              },
+              // Cancelled, not Failed. A run that did what it was told is not
+              // an error — but it must not read as a clean success either, or
+              // a switched-off fortnight is a column of green ticks. Cancelled
+              // is the one status in run history that means "deliberately did
+              // not happen". On ANY status of the alert, for the reason the
+              // park uses: an undeliverable notice must not keep a run alive
+              // that has been told to stop.
+              "Terminate_|_Disabled": {
+                runAfter: {
+                  "Run_Child_|_Disabled_Alert": [
+                    "Succeeded",
+                    "Failed",
+                    "Skipped",
+                    "TimedOut",
+                  ],
+                },
+                type: "Terminate",
+                inputs: { runStatus: "Cancelled" },
+              },
+            },
+            else: { actions: {} },
+          },
+
+          // A probe, once per run, purely so the report can say whether the
+          // live re-read below actually works in this environment. It answers
+          // the question on an ordinary Monday rather than on the day somebody
+          // is trying to stop a run and finding out it does nothing.
+          "List_rows_|_Kill_Switch_Probe": {
+            runAfter: { "Condition_|_Kill_Switch": ["Succeeded"] },
+            ...dataverse("ListRecords", {
+              entityName: ENV_VAR_VALUE_SET,
+              $select: "value",
+              $filter: envVarValueFilter(KILL_SWITCH_VARIABLE),
+              $top: 1,
+            }),
+          },
+          // An empty result is READABLE — it means the variable has no value
+          // row and is running on its default. Only a failed query is not.
+          "Compose_|_Kill_Switch_Readable": {
+            runAfter: {
+              "List_rows_|_Kill_Switch_Probe": ["Succeeded", "Failed"],
+            },
+            type: "Compose",
+            inputs:
+              "@not(equals(string(coalesce(outputs('List_rows_|_Kill_Switch_Probe')?['body/value'], 'unreadable')), 'unreadable'))",
+          },
+
+          "Compose_|_TestMode": {
+            runAfter: { "Compose_|_Kill_Switch_Readable": ["Succeeded"] },
             type: "Compose",
             inputs: `@equals(toLower(trim(coalesce(parameters('${TEST_MODE_PARAM}'), 'true'))), 'true')`,
           },
@@ -1538,6 +1705,11 @@ export function buildBadDebtRecoveryTouchesFlow() {
               "item/riivo_abortreason": "@outputs('Compose_|_Tripwire_Reason')",
               "item/riivo_canarycount": "@length(outputs('Compose_|_Canary_Ids'))",
               "item/riivo_testmode": "@outputs('Compose_|_TestMode')",
+              // Written with the first patch rather than the second, so a run
+              // that died in the loop still says when it began. Duration
+              // cannot be written here for the mirror-image reason: it is not
+              // known yet.
+              "item/riivo_startedon": "@outputs('Compose_|_Run_Started')",
             }),
           },
 
@@ -1709,10 +1881,24 @@ export function buildBadDebtRecoveryTouchesFlow() {
             },
           },
 
+          // #104: how often an endpoint told this run to slow down. AC 5 asks
+          // whether throttling stretches a run into the afternoon, and after
+          // an Until has retried a 429 into a 200 the run history shows a
+          // succeeded action and nothing else — the wait is invisible by the
+          // time anyone reads it. Counted here, once per wait, across all
+          // three retried calls, so the answer survives the run history.
+          "Initialize_variable_|_Throttle_Waits": {
+            runAfter: { "Initialize_variable_|_Wa_Send_Done": ["Succeeded"] },
+            type: "InitializeVariable",
+            inputs: {
+              variables: [{ name: "varThrottleWaits", type: "integer", value: 0 }],
+            },
+          },
+
           // ---- campaign key -> template, and the touch it records (#99) ----
           "Apply_to_each_|_Selected": {
             foreach: "@variables('varSelected')",
-            runAfter: { "Initialize_variable_|_Wa_Send_Done": ["Succeeded"] },
+            runAfter: { "Initialize_variable_|_Throttle_Waits": ["Succeeded"] },
             type: "Foreach",
             runtimeConfiguration: capped,
             actions: {
@@ -1720,8 +1906,53 @@ export function buildBadDebtRecoveryTouchesFlow() {
               // being chased: "have they ever paid us". Asked as a top-1
               // existence query rather than a count, so a client with 400 paid
               // invoices costs the same as one with a single paid invoice.
-              "List_rows_|_Client_Paid_History": {
+              // ---- #104: the kill switch, asked again, per client ----
+              // The parameter gate at the top of the run answers "should this
+              // run start". It cannot answer "should this run CONTINUE",
+              // because Power Automate binds environment-variable parameters
+              // once, when the run begins — so to a run already in flight the
+              // switch is frozen at whatever it said at 09:45. This is the
+              // read that unfreezes it, and it is the difference between a
+              // wrong message reaching twelve clients and reaching six hundred.
+              //
+              // IT COSTS ONE DATAVERSE LIST PER CLIENT. Deliberate, and the
+              // honest price: this loop already makes several calls per
+              // client, the query is a top-1 on an indexed system table, and
+              // #104 records run duration precisely so this can be judged
+              // against a real number rather than a fear. If it ever fails
+              // that judgement, the cheap retreat is to read it every Nth
+              // client, not to remove it.
+              "List_rows_|_Kill_Switch_Live": {
                 runAfter: {},
+                ...dataverse("ListRecords", {
+                  entityName: ENV_VAR_VALUE_SET,
+                  $select: "value",
+                  $filter: envVarValueFilter(KILL_SWITCH_VARIABLE),
+                  $top: 1,
+                }),
+              },
+              // Value row, then the parameter, then 'yes' — and fail-open on a
+              // failed read, which is the one place in this build where that
+              // is the right direction. This read is an ADDITION to the
+              // switch, not the switch: the parameter gate above already stops
+              // the next run and the maker portal still stops the flow, so if
+              // the system table cannot be read the honest outcome is the
+              // behaviour this campaign had before #104 rather than a campaign
+              // that cannot run at all. `killSwitchLiveRead` in the report is
+              // how anyone finds out, on an ordinary day.
+              "Compose_|_Kill_Switch_Live": {
+                runAfter: { "List_rows_|_Kill_Switch_Live": ["Succeeded", "Failed"] },
+                type: "Compose",
+                inputs: `@toLower(trim(coalesce(first(coalesce(outputs('List_rows_|_Kill_Switch_Live')?['body/value'], createArray()))?['value'], parameters('${KILL_SWITCH_PARAM}'), 'yes')))`,
+              },
+              "Compose_|_Still_Enabled": {
+                runAfter: { "Compose_|_Kill_Switch_Live": ["Succeeded"] },
+                type: "Compose",
+                inputs: `@not(equals(outputs('Compose_|_Kill_Switch_Live'), '${KILL_SWITCH_OFF}'))`,
+              },
+
+              "List_rows_|_Client_Paid_History": {
+                runAfter: { "Compose_|_Still_Enabled": ["Succeeded"] },
                 ...dataverse("ListRecords", {
                   entityName: "new_invoiceses",
                   $select: "new_invoicesid",
@@ -1787,15 +2018,26 @@ export function buildBadDebtRecoveryTouchesFlow() {
               "Compose_|_Hold_Reason": {
                 runAfter: { "Compose_|_Template_Approved": ["Succeeded"] },
                 type: "Compose",
-                inputs: `@if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), 'past touch ${TOUCH_DAYS.length} (D12) but ${ONGOING_TEMPLATE_VARIABLE} is blank', if(less(outputs('Compose_|_Invoice_Age_Days'), ${MIN_IN_SCOPE_DAYS}), 'invoice younger than ${MIN_IN_SCOPE_DAYS} days - outside the In-scope window', if(empty(outputs('Compose_|_Age_Band')), 'invoice older than three years - prescribed, outside the In-scope window', concat('no approved Meta template named ', outputs('Compose_|_Template_Name')))))`,
+                inputs: `@if(not(outputs('Compose_|_Still_Enabled')), '${STOPPED_HOLD_REASON}', if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), 'past touch ${TOUCH_DAYS.length} (D12) but ${ONGOING_TEMPLATE_VARIABLE} is blank', if(less(outputs('Compose_|_Invoice_Age_Days'), ${MIN_IN_SCOPE_DAYS}), 'invoice younger than ${MIN_IN_SCOPE_DAYS} days - outside the In-scope window', if(empty(outputs('Compose_|_Age_Band')), 'invoice older than three years - prescribed, outside the In-scope window', concat('no approved Meta template named ', outputs('Compose_|_Template_Name'))))))`,
               },
 
+              // #104: the kill switch rides the gate that was already here
+              // rather than terminating, because `Terminate` is not a legal
+              // action inside a Foreach — checked against all 322 flows in
+              // this org: 487 Terminates, not one of them inside a loop. So a
+              // switched-off run HOLDS every client it has not yet reached,
+              // with a reason, which costs the remaining clients three reads
+              // each and no mint, no PDF, no email and no WhatsApp. The run
+              // then finishes normally and its report says exactly who was
+              // reached before the switch was thrown and who was not — which
+              // a hard stop, had one been available, would not have.
               "Condition_|_Template_Approved": {
                 runAfter: { "Compose_|_Hold_Reason": ["Succeeded"] },
                 type: "If",
                 expression: {
                   and: [
                     { equals: ["@outputs('Compose_|_Template_Approved')", true] },
+                    { equals: ["@outputs('Compose_|_Still_Enabled')", true] },
                   ],
                 },
                 actions: {
@@ -2904,15 +3146,88 @@ export function buildBadDebtRecoveryTouchesFlow() {
               "item/riivo_emailsentcount": "@length(body('Filter_|_Emails_Sent'))",
               "item/riivo_whatsappsentcount":
                 "@length(body('Filter_|_WhatsApps_Sent'))",
+              // #104, AC 5. Ticks are 100-nanosecond units, so the divisor is
+              // 10^7. Whole seconds: this is a number to compare run against
+              // run and to notice growing, not a benchmark.
+              "item/riivo_durationseconds":
+                "@div(sub(ticks(utcNow()), ticks(outputs('Compose_|_Run_Started'))), 10000000)",
+              // Null on a parked or killed run, like resolved and held, and
+              // for the same reason: those runs never reached the calls that
+              // can be throttled, so a zero here would read as "the endpoints
+              // were fine" rather than "we never asked them".
+              "item/riivo_throttlewaits": `@variables('${THROTTLE_WAITS_VARIABLE}')`,
             }),
           },
 
-          "Compose_|_Dry_Run_Report": {
+          // ---- #104: a run that was stopped part-way says so, ONCE ----
+          // Found by filtering the held rows rather than by a flag set inside
+          // the loop, for the same reason the sent counts are: it asks the
+          // question of data that is already there instead of adding another
+          // piece of cross-iteration state. Once, after the loop, because the
+          // per-client alternative would email the team for every remaining
+          // client on the list.
+          "Filter_|_Stopped_Holds": {
             runAfter: { "Update_|_Run_Record": ["Succeeded"] },
+            type: "Query",
+            inputs: {
+              from: "@variables('varHeld')",
+              where: `@equals(item()['reason'], '${STOPPED_HOLD_REASON}')`,
+            },
+          },
+          "Condition_|_Stopped_Mid_Run": {
+            runAfter: { "Filter_|_Stopped_Holds": ["Succeeded"] },
+            type: "If",
+            expression: {
+              and: [
+                { greater: ["@length(body('Filter_|_Stopped_Holds'))", 0] },
+              ],
+            },
+            actions: {
+              // What the person who threw the switch most needs to know is how
+              // far the run got before they did, because that is the list of
+              // people who already have the message. Those touches are
+              // bookkept and their counters have advanced — correctly: they
+              // WERE reached, and the next run must not reach them twice.
+              "Run_Child_|_Stopped_Alert": {
+                runAfter: {},
+                type: "Workflow",
+                inputs: {
+                  host: { workflowReferenceName: ALERT_CHILD_FLOW_ID },
+                  body: {
+                    text: `@{parameters('${ENVIRONMENT_ADDRESS_PARAM}')} - RUN STOPPED PART-WAY. ${KILL_SWITCH_VARIABLE} was set to '${KILL_SWITCH_OFF}' while this run was working through its list, so it stopped sending where it had got to. ALREADY REACHED, AND KEEPING THEIR TOUCH: @{length(variables('varTouches'))} client(s) of @{outputs('Compose_|_Selected_Count')} selected - their riivo_campaignsendcount has advanced and the next run will not message them again. NOT REACHED: @{length(body('Filter_|_Stopped_Holds'))} client(s), who were minted nothing, rendered nothing and sent nothing, and who the next run that finds the switch back on selects again unchanged. Run record: @{outputs('Compose_|_Run_Name')}.`,
+                    text_1: `@{workflow().tags.flowDisplayName} - STOPPED PART-WAY by ${KILL_SWITCH_VARIABLE} after @{length(variables('varTouches'))} touch(es), not a failure`,
+                    text_2: "@workflow().tags.environmentName",
+                    text_3: "@workflow().name",
+                    text_4: "@workflow().run.name",
+                  },
+                },
+              },
+            },
+            else: { actions: {} },
+          },
+
+          "Compose_|_Dry_Run_Report": {
+            runAfter: {
+              "Condition_|_Stopped_Mid_Run": ["Succeeded", "Failed"],
+            },
             type: "Compose",
             inputs: {
               flow: FLOW_NAME,
               testMode: "@outputs('Compose_|_TestMode')",
+              // #104. The switch as the run read it, and whether the live
+              // re-read behind it is actually working — a run whose
+              // killSwitchLiveRead is false still stops on the NEXT run, but
+              // cannot be stopped part-way through this one, and that is worth
+              // knowing before the day somebody needs it rather than on it.
+              killSwitch: `@parameters('${KILL_SWITCH_PARAM}')`,
+              killSwitchLiveRead: "@outputs('Compose_|_Kill_Switch_Readable')",
+              // Zero on every ordinary run. Non-zero means somebody stopped
+              // this one, and these are the clients it had not yet reached.
+              stoppedMidRun: "@length(body('Filter_|_Stopped_Holds'))",
+              startedOn: "@outputs('Compose_|_Run_Started')",
+              durationSeconds:
+                "@div(sub(ticks(utcNow()), ticks(outputs('Compose_|_Run_Started'))), 10000000)",
+              throttleWaits: `@variables('${THROTTLE_WAITS_VARIABLE}')`,
               lastSentCutoff: "@outputs('Compose_|_Last_Sent_Cutoff')",
               candidatesBeforeCollapse: "@length(variables('varCandidates'))",
               selectedClients: "@outputs('Compose_|_Selected_Count')",

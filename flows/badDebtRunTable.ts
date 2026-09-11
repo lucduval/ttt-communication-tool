@@ -174,6 +174,28 @@ export const RUN_TABLE_ATTRIBUTES: Attribute[] = [
       "Clients this run actually reached on WhatsApp — Meta accepted the template send and returned a message id (#103). Written with the after-the-loop counts, so null on a parked run. Kept beside riivo_emailsentcount rather than summed with it: the two channels fail for different reasons, and a run where WhatsApp collapsed while email held up is invisible in a single total.",
   },
   {
+    schemaName: "riivo_StartedOn",
+    logicalName: "riivo_startedon",
+    kind: "String",
+    maxLength: 40,
+    description:
+      "UTC instant the run began, taken before it selected anybody (#104). Written with the first patch, so it survives a run that died in the loop. A string rather than a DateTime column because every instant this flow handles is an ISO string already, and a DateTime would invite a timezone conversion between what the flow wrote and what a reader sees.",
+  },
+  {
+    schemaName: "riivo_DurationSeconds",
+    logicalName: "riivo_durationseconds",
+    kind: "Integer",
+    description:
+      "Whole seconds from riivo_startedon to the end of the per-client loop (#104, AC 5). The run history answers this too, until it expires; this column is what makes 'is the run getting slower' a question about a table rather than about memory. Null on a run that parked or was killed mid-flight, which never reached the loop's end.",
+  },
+  {
+    schemaName: "riivo_ThrottleWaits",
+    logicalName: "riivo_throttlewaits",
+    kind: "Integer",
+    description:
+      "How many times an endpoint answered 429 and this run waited out its Retry-After, across the mint call and both Meta calls (#104). Invisible in run history once a retry has succeeded, which is why it is counted as it happens. Read beside riivo_durationseconds: a run that got slower with no throttle waits got slower for some other reason.",
+  },
+  {
     schemaName: "riivo_ResolvedCount",
     logicalName: "riivo_resolvedcount",
     kind: "Integer",

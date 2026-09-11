@@ -109,6 +109,13 @@ ensure_env_var riivo_BadDebtVolumeChangeThresholdPercent \
   "Bad Debt Volume Change Threshold Percent" "40" \
   "How far the selected client count may move from the last acted-on run before the run parks itself and sends nothing, as a whole-number percentage in either direction (#101). 40 is the figure R5 of the spec recommends. Raise it to accept a permanently larger book; to let one parked run through, set that run's riivo_outcome to 'accepted' on its riivo_baddebtrun row instead, which leaves no loosened threshold behind."
 
+# Created ON, which is the safe state: a switch that arrives switched off would
+# stop a campaign nobody had decided to stop. 'yes'/'no' matches riivo_SendEmail,
+# the org's existing example of exactly this kind of switch.
+ensure_env_var riivo_BadDebtEnabled \
+  "Bad Debt Enabled" "yes" \
+  "The kill switch for the bad-debt recovery campaign (#104). Set it to 'no' and the campaign stops: the next scheduled run ends before it selects anybody, and a run already in flight stops sending at the next client - those it has already reached keep their touch, those it has not are held and picked up by the next run that finds the switch back on. Anything other than 'no', including an empty value, means the campaign is running. It is an environment variable rather than the flow's on/off state because deactivating a flow is connection-gated to riivo Admin in this org, and the person who needs to stop a bad run is whoever is reading it. Every skipped or stopped run emails riivo_varFlowErrorTeamMail, because the danger is not that somebody sets this - that is the point of it - it is that nobody unsets it."
+
 # Created EMPTY, which is the safe state: an empty list means the whole book,
 # and the run only narrows itself once a human deliberately puts ids in it.
 ensure_env_var riivo_BadDebtCanaryContactIds \
@@ -160,8 +167,8 @@ done
 # an error in either position, and neither is this script's to change — but a
 # rehearsal that produced drafts and a rehearsal that silently failed look
 # identical afterwards unless someone knew which way these were set first.
-echo "==> the two switches that decide what a run does (#102)"
-for SWITCH in riivo_SendEmail riivo_BadDebtCanaryContactIds riivo_ReminderTestMode; do
+echo "==> the switches that decide what a run does (#102, #104)"
+for SWITCH in riivo_BadDebtEnabled riivo_SendEmail riivo_BadDebtCanaryContactIds riivo_ReminderTestMode; do
   VALUE=$(api GET "environmentvariabledefinitions?\$select=defaultvalue&\$filter=schemaname%20eq%20'$SWITCH'&\$expand=environmentvariabledefinition_environmentvariablevalue(\$select=value)" \
     | sed '$d' | python3 -c "
 import sys, json
@@ -176,6 +183,10 @@ print(repr(values[0]['value']) + '  (current value)' if values
       else repr(row.get('defaultvalue')) + '  (default; no value set)')")
   echo "    $SWITCH = $VALUE"
 done
+echo "    riivo_BadDebtEnabled = no => the campaign is STOPPED. Nothing is sent"
+echo "    and every run ends early, having emailed the team to say so. This is"
+echo "    the kill switch: it needs no flow ownership and no maker portal, and"
+echo "    it is read again on every client, so it also stops a run in flight."
 echo "    riivo_SendEmail off => the branded-email child creates every mail as a"
 echo "    DRAFT and sends nothing, org-wide. That is a fine way to inspect a"
 echo "    rendered message; it is not a send, and the run will say so."
@@ -512,3 +523,42 @@ echo "     they must receive nothing, and their touch row must say so."
 echo " 14. CANARY on a small number of real clients, then read what they got."
 echo " 15. CLEAR riivo_BadDebtCanaryContactIds — step 10, again, and it matters"
 echo "     more now that both channels speak."
+echo
+echo "  #104: the schedule takes over. Read docs/runbook-bad-debt-recovery.md"
+echo "  first — it is the operating note, and it is what a human on call needs"
+echo "  rather than what a builder needs."
+echo " 16. PROVE THE KILL SWITCH BEFORE YOU NEED IT, while the canary list is"
+echo "     still set and the blast radius is three people. Set"
+echo "     riivo_BadDebtEnabled to 'no' and run on demand: the run must end"
+echo "     almost immediately, show as CANCELLED (not failed, not succeeded) in"
+echo "     run history, write NO riivo_baddebtrun row, and put one 'switched"
+echo "     off' notice in riivo_varFlowErrorTeamMail. Set it back to 'yes'."
+echo " 17. Check the report of the next good run for killSwitchLiveRead: true."
+echo "     False means the per-client re-read cannot see the variable in this"
+echo "     environment — the campaign still stops at the START of a run, but"
+echo "     NOT part-way through one, and you need to know that now rather than"
+echo "     while a bad run is going out."
+echo " 18. SWITCH THE RECURRENCE ON (Mon/Thu 09:45 SAST) and let TWO cycles"
+echo "     run. Two, not one: the only thing a second run proves is the thing"
+echo "     this campaign has never done — behaving DIFFERENTLY the second time."
+echo "     After the second, check on the two riivo_baddebtrun rows:"
+echo "       - nobody was messaged twice. Each client has at most one"
+echo "         riivo_whatsappcommunications row and one email per run, and"
+echo "         riivo_campaignsendcount advanced by exactly 1, not 2."
+echo "       - the population shrank the way it should: run 2's selectedcount"
+echo "         is lower, and anyone who PAID between the runs is absent."
+echo "       - riivo_durationseconds. That is the number that says whether this"
+echo "         finishes before lunch at real volume. Compare the two."
+echo "       - riivo_throttlewaits. Non-zero means an endpoint asked us to slow"
+echo "         down; read it next to the duration before blaming the flow."
+echo " 19. REVIEW THE TRIPWIRE THRESHOLD against those two real counts. 40% was"
+echo "     a recommendation made before anyone had two numbers to compare. If"
+echo "     the ordinary run-to-run movement is bigger than that, the tripwire"
+echo "     will park good runs and get switched off; if it is far smaller, it"
+echo "     will not catch the thing it exists to catch. Set"
+echo "     riivo_BadDebtVolumeChangeThresholdPercent to what the data says."
+echo " 20. HAND IT TO LUC FOR PROD. Not before #96's prod half is answered:"
+echo "     promoting into an environment that is already running an"
+echo "     unidentified daily dunning flow is how debtors get messaged twice,"
+echo "     and the service principal's privileges there are still unverified."
+echo "     Nothing in prod is promoted or activated by an agent."
