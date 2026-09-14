@@ -64,6 +64,56 @@ api() { # api METHOD PATH [BODY] [EXTRA_HEADER]
   curl "${args[@]}"
 }
 
+API_ATTEMPTS=4
+
+# A GET whose body must parse as JSON, with the transient failures retried.
+#
+# `api` hands back body + status code and leaves both to the caller, so every
+# read below used to pipe raw curl output straight into python3. One blip — an
+# empty body, a 429, a dropped connection — then surfaced as a JSONDecodeError
+# traceback and left the deploy half-finished wherever it happened to be. It
+# did exactly that on this build, between two environment-variable checks that
+# both answer 200 when asked again a minute later.
+#
+# Retries are linear rather than Retry-After-driven: `api` does not capture
+# response headers, and a deploy script making a few dozen calls does not need
+# the precision the FLOW needs on its per-client Meta calls.
+#
+#   api_json GET "path"            -> body on stdout; non-zero on failure
+#   api_json GET "path" missing_ok -> a 404 yields '{}' rather than failing,
+#                                     for the two lookups where "not there" is
+#                                     a legitimate answer rather than a fault
+api_json() {
+  local method="$1" path="$2" missing="${3:-}"
+  local attempt=1 resp code payload pause
+  while :; do
+    resp=$(api "$method" "$path" || true)
+    code=$(tail -n1 <<<"$resp")
+    payload=$(sed '$d' <<<"$resp")
+
+    # The good case: a 2xx whose body actually parses.
+    if [[ "$code" =~ ^2[0-9][0-9]$ ]] \
+       && printf '%s' "$payload" | python3 -c 'import sys,json;json.load(sys.stdin)' >/dev/null 2>&1; then
+      printf '%s' "$payload"; return 0
+    fi
+
+    if [[ -n "$missing" && "$code" == "404" ]]; then printf '{}'; return 0; fi
+
+    # Worth another go: throttling, a server-side error, a dropped connection,
+    # or a 2xx that arrived empty or truncated.
+    if [[ "$code" == "429" || "$code" =~ ^5 || "$code" == "000" || -z "$code" || "$code" =~ ^2 ]] \
+       && (( attempt < API_ATTEMPTS )); then
+      pause=$(( attempt * 3 ))
+      echo "    transient response (HTTP ${code:-none}) on ${path%%\?*} — retrying in ${pause}s" >&2
+      sleep "$pause"; attempt=$(( attempt + 1 )); continue
+    fi
+
+    echo "    FAILED: $method ${path%%\?*} -> HTTP ${code:-none}" >&2
+    head -c 300 <<<"$payload" >&2; echo >&2
+    return 1
+  done
+}
+
 # --------------------------------------------------------------- env vars ----
 # The two variables this build owns and creates. Everything else it reads
 # (payment link, test mode, the flow-error channel) belongs to another build and
@@ -73,8 +123,8 @@ ensure_env_var() { # ensure_env_var SCHEMANAME DISPLAYNAME DEFAULT DESCRIPTION
   local schema="$1" display="$2" default="$3" description="$4"
   echo "==> environment variable $schema"
   local existing
-  existing=$(api GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$schema'" \
-    | sed '$d' | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
+  existing=$(api_json GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$schema'" \
+    | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
   if [[ "$existing" != "0" ]]; then
     echo "    already exists — skipping"; return
   fi
@@ -133,8 +183,8 @@ for DEP in riivo_PaymentLink_BaseUrl riivo_PaymentLink_FunctionKey riivo_Payment
            riivo_EnvironmentAddress riivo_varFlowErrorTeamMail \
            riivo_SharedSenderUserId riivo_SendEmail \
            riivo_varMetaURI riivo_varMetaUploadURI riivo_varMetaAccessToken; do
-  COUNT=$(api GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$DEP'" \
-    | sed '$d' | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
+  COUNT=$(api_json GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$DEP'" \
+    | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
   if [[ "$COUNT" == "0" ]]; then
     echo "    MISSING environment variable $DEP"; MISSING=1
   else
@@ -151,9 +201,8 @@ for CHILD in be610dd6-bf7b-f111-ab0f-000d3ada6ac0 6b0bff17-e79b-ed11-aad1-000d3a
   # statecode FIRST, name last: the name contains spaces, and `read` would
   # otherwise split it and report the state of a word.
   read -r CHILD_STATE CHILD_NAME < <(
-    api GET "workflows($CHILD)?\$select=name,statecode" | sed '$d' \
-      | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('statecode','-'),d.get('name','-'))" 2>/dev/null \
-      || echo "- -")
+    api_json GET "workflows($CHILD)?\$select=name,statecode" missing_ok \
+      | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('statecode','-'),d.get('name','-'))")
   if [[ "$CHILD_STATE" == "-" ]]; then
     echo "    MISSING child flow $CHILD"; MISSING=1
   elif [[ "$CHILD_STATE" != "1" ]]; then
@@ -169,8 +218,8 @@ done
 # identical afterwards unless someone knew which way these were set first.
 echo "==> the switches that decide what a run does (#102, #104)"
 for SWITCH in riivo_BadDebtEnabled riivo_SendEmail riivo_BadDebtCanaryContactIds riivo_ReminderTestMode; do
-  VALUE=$(api GET "environmentvariabledefinitions?\$select=defaultvalue&\$filter=schemaname%20eq%20'$SWITCH'&\$expand=environmentvariabledefinition_environmentvariablevalue(\$select=value)" \
-    | sed '$d' | python3 -c "
+  VALUE=$(api_json GET "environmentvariabledefinitions?\$select=defaultvalue&\$filter=schemaname%20eq%20'$SWITCH'&\$expand=environmentvariabledefinition_environmentvariablevalue(\$select=value)" \
+    | python3 -c "
 import sys, json
 rows = json.load(sys.stdin)['value']
 if not rows:
@@ -208,8 +257,8 @@ APPROVED_PREFIX=$(npx --yes tsx -e '
 import { APPROVED_BUTTON_URL_PREFIX } from "./flows/badDebtRecoveryTouches";
 process.stdout.write(APPROVED_BUTTON_URL_PREFIX);
 ')
-BASE_URL=$(api GET "environmentvariabledefinitions?\$select=defaultvalue&\$filter=schemaname%20eq%20'riivo_PaymentLink_BaseUrl'&\$expand=environmentvariabledefinition_environmentvariablevalue(\$select=value)" \
-  | sed '$d' | python3 -c "
+BASE_URL=$(api_json GET "environmentvariabledefinitions?\$select=defaultvalue&\$filter=schemaname%20eq%20'riivo_PaymentLink_BaseUrl'&\$expand=environmentvariabledefinition_environmentvariablevalue(\$select=value)" \
+  | python3 -c "
 import sys, json
 rows = json.load(sys.stdin)['value']
 if not rows:
@@ -247,11 +296,11 @@ import { RUN_TABLE_LOGICAL } from "./flows/badDebtRunTable";
 process.stdout.write(RUN_TABLE_LOGICAL);
 ')
 echo "==> table $RUN_TABLE_LOGICAL"
-TABLE_STATE=$(api GET "EntityDefinitions(LogicalName='$RUN_TABLE_LOGICAL')?\$select=LogicalName,EntitySetName" \
-  | sed '$d' | python3 -c "
+TABLE_STATE=$(api_json GET "EntityDefinitions(LogicalName='$RUN_TABLE_LOGICAL')?\$select=LogicalName,EntitySetName" missing_ok \
+  | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
-print(d.get('EntitySetName', 'missing'))" 2>/dev/null || echo "missing")
+print(d.get('EntitySetName', 'missing'))")
 
 if [[ "$TABLE_STATE" == "missing" ]]; then
   if $CHECK_ONLY; then
@@ -277,8 +326,8 @@ else
 fi
 
 if [[ "$TABLE_STATE" != "missing" ]]; then
-  HAVE=$(api GET "EntityDefinitions(LogicalName='$RUN_TABLE_LOGICAL')/Attributes?\$select=LogicalName" \
-    | sed '$d' | python3 -c "
+  HAVE=$(api_json GET "EntityDefinitions(LogicalName='$RUN_TABLE_LOGICAL')/Attributes?\$select=LogicalName" \
+    | python3 -c "
 import sys, json
 print(' '.join(a['LogicalName'] for a in json.load(sys.stdin)['value']))")
   # One POST per declared column that is not there yet.
@@ -353,8 +402,8 @@ print(row.get("workflowid", "-"), row.get("statecode", "-"), len(rows),
 PY2
 )
 read -r FOUND FOUND_STATE FOUND_COUNT SAME < <(
-  api GET "workflows?\$select=workflowid,statecode,clientdata&\$filter=name%20eq%20'$ENC'%20and%20category%20eq%205" \
-    | sed '$d' | python3 -c "$READ_STATE" "$CLIENTDATA")
+  api_json GET "workflows?\$select=workflowid,statecode,clientdata&\$filter=name%20eq%20'$ENC'%20and%20category%20eq%205" \
+    | python3 -c "$READ_STATE" "$CLIENTDATA")
 if [[ "$FOUND_COUNT" -gt 1 ]]; then
   echo "    ABORT: $FOUND_COUNT flows share this name — resolve by hand before deploying" >&2
   exit 1
@@ -450,8 +499,8 @@ if row["clientdata"] != rendered:
 print(row["workflowid"])
 PY2
 )
-NEW=$(api GET "workflows?\$select=workflowid,statecode,clientdata&\$filter=name%20eq%20'$ENC'%20and%20category%20eq%205" \
-  | sed '$d' | python3 -c "$VERIFY" "$CLIENTDATA" "$FOUND") || { echo "$NEW" >&2; exit 1; }
+NEW=$(api_json GET "workflows?\$select=workflowid,statecode,clientdata&\$filter=name%20eq%20'$ENC'%20and%20category%20eq%205" \
+  | python3 -c "$VERIFY" "$CLIENTDATA" "$FOUND") || { echo "$NEW" >&2; exit 1; }
 echo "    $NEW  statecode=0 (draft/off), clientdata byte-identical to the module"
 
 # Only now is the old one expendable: the replacement is verified in place.
