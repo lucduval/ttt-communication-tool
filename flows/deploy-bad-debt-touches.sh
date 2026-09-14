@@ -180,7 +180,7 @@ values = row.get('environmentvariabledefinition_environmentvariablevalue') or []
 # The VALUE wins over the default wherever one exists — reading the default
 # alone is how an environment gets misreported as something it is not.
 print(repr(values[0]['value']) + '  (current value)' if values
-      else repr(row.get('defaultvalue')) + '  (default; no value set)')")
+      else repr(row.get('defaultvalue') or '') + '  (default; no value set)')")
   echo "    $SWITCH = $VALUE"
 done
 echo "    riivo_BadDebtEnabled = no => the campaign is STOPPED. Nothing is sent"
@@ -282,14 +282,29 @@ if [[ "$TABLE_STATE" != "missing" ]]; then
 import sys, json
 print(' '.join(a['LogicalName'] for a in json.load(sys.stdin)['value']))")
   # One POST per declared column that is not there yet.
-  npx --yes tsx -e '
+  #
+  # The column list reaches tsx through the ENVIRONMENT, not through argv.
+  # `tsx -e` leaves process.argv as [node, firstArg] — no script path in slot 1
+  # — so the argv index that looks right is off by one, and reading argv[2]
+  # threw `Cannot read properties of undefined` the first time this branch ever
+  # ran, on a freshly created table, after the table POST had already
+  # succeeded. An environment variable has no such indexing to get wrong.
+  HAVE_COLUMNS="$HAVE" npx --yes tsx -e '
 import { RUN_TABLE_ATTRIBUTES, buildAttributeMetadata } from "./flows/badDebtRunTable";
-const have = new Set(process.argv[2].split(" "));
+const have = new Set((process.env.HAVE_COLUMNS ?? "").split(" ").filter(Boolean));
+if (have.size === 0) {
+  // The table always carries its own primary name column and id, so an empty
+  // set means the Attributes read came back empty rather than that the table
+  // is bare — and creating a column that already exists is an error, not a
+  // no-op. Stop instead of guessing.
+  console.error("    FAILED: could not read the existing columns");
+  process.exit(1);
+}
 for (const attribute of RUN_TABLE_ATTRIBUTES) {
   if (have.has(attribute.logicalName)) continue;
   console.log(attribute.logicalName + "\t" + JSON.stringify(buildAttributeMetadata(attribute)));
 }
-' -- "$HAVE" | while IFS=$'\t' read -r COLUMN BODY; do
+' | while IFS=$'\t' read -r COLUMN BODY; do
     if $CHECK_ONLY; then
       echo "    MISSING column $COLUMN (would create)"; continue
     fi
