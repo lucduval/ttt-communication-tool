@@ -78,6 +78,12 @@ Five places, in the order worth checking:
    Every parked run, every canary run, every switched-off or stopped run. The
    subject always begins "Flow Failure:" — the house alert child hardcodes it —
    so read the rest of the line, which says whether it actually is one.
+   **These send even while `riivo_SendEmail` is off.** The alert child does not
+   consult it, so the org-wide switch that turns every other flow's mail into a
+   draft does not silence safety alerts. Verified on the parked run of
+   2026-09-14: status Sent, `senton` stamped, in an environment where
+   `riivo_SendEmail` was `no`. That is the fail-safe direction, and it is why a
+   parked run reaches a human in dev at all.
 2. **Run history** on the flow. Red = a real failure or a tripwire park.
    **Cancelled** = the kill switch. Expires, which is why the two below exist.
 3. **`riivo_baddebtrun`** — one row per run, including parked ones. Counts,

@@ -808,6 +808,52 @@ blocks promotion, not this build**.
 
 ---
 
+## First runs in dev, 2026-09-14
+
+Two runs, both in test mode, both verified against the org rather than read off
+the report.
+
+**Run 1 - proceeded.** 14 candidates collapsed to 5 clients, all `90d_1y`,
+three on touch 1 and two on touch 2, so both template paths were exercised.
+Every touch carried a payment link and an ~89KB PDF; nothing held. No counter
+moved, no `email` row, no `riivo_whatsappcommunications` row.
+`killSwitchLiveRead` came back **true**, so #104's per-client kill switch
+resolves in this environment.
+
+**Run 2 - parked, on purpose.** With run 1's `riivo_selectedcount` moved to 50,
+the next run compared 5 against 50 and tripped the 40% threshold. The useful
+part is what it left behind: `riivo_outcome=aborted`, `riivo_abortreason`
+carrying the same sentence as the alert, and **every after-the-loop field
+null** - resolved, held, both sent counts, and #104's own
+`riivo_durationseconds` and `riivo_throttlewaits`. That is the design observed
+rather than asserted. A token cleared beforehand stayed null, so the park really
+did happen upstream of everything that costs something.
+
+**The house alert child ignores `riivo_SendEmail`.** The park notice was status
+**Sent**, with `senton` stamped, in an environment where `riivo_SendEmail` is
+`no` and every other flow's mail is a draft. So the org-wide switch does not
+silence safety alerts - the fail-safe direction, and the reason a parked run
+reaches anybody in dev at all. Consistent with #106: that child sends in both
+branches of its own on/off condition.
+
+### Two findings against #104's own acceptance criteria
+
+- **Duration.** 95 seconds for 5 clients, with no sending and no minting - about
+  19s per client. At a real book of ~600 that extrapolates past three hours,
+  before the per-client Meta upload and template POST are added. AC 5 asks
+  whether the run finishes in a sensible window; on this evidence it needs
+  measuring again at canary scale before the recurrence is trusted. Part of that
+  cost is #104's own per-client kill-switch read, accepted precisely so it could
+  be judged against a real number.
+- **The mint path has still never run.** All five invoices already carried a
+  `riivo_paymenttoken`, so the mint call was skipped for every one of them -
+  correctly, it is idempotent by skipping. `riivo_PaymentLink_FunctionKey` and
+  the endpoint therefore remain unproven; the links in the report only prove
+  `riivo_PaymentLink_BaseUrl` resolves. Clearing one token and re-running is the
+  only way to cover it.
+
+---
+
 ## Open threads worth not losing
 
 - **#96 prod half is unanswered and blocks prod promotion.** The daily
