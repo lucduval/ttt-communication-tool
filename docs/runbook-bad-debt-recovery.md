@@ -106,7 +106,10 @@ is the temporary change that becomes permanent.
 **The run only messaged a handful of people.**
 Check `canaryClients` in the report and `riivo_BadDebtCanaryContactIds`. While
 that list is non-empty the campaign speaks only to those clients. This is the
-most likely cause of a campaign that looks alive and is reaching nobody.
+most likely cause of a campaign that looks alive and is reaching nobody. Its
+"off" value is `[]`, the empty list — **never blank it**: Dataverse stores no
+empty default, and a variable with neither a default nor a value cannot be
+bound, so the flow fails every run with "Attribute 'value' was not found".
 
 **Everyone was held.**
 Read one held row's `reason` — they will nearly all be the same. Common causes:
@@ -140,6 +143,15 @@ The per-client re-read of the switch cannot see the environment-variable value
 table here. The campaign can still be stopped **between** runs; it cannot be
 stopped **part-way through** one. Treat it as a real gap and fix the read before
 the next unattended cycle — everything else in §1 still applies.
+
+**Every run fails immediately with "Attribute 'value' was not found for
+environment variable X".**
+That variable has neither a value row nor a default, so Power Automate cannot
+bind it — before any expression in the flow gets the chance to default it away.
+A defensive `coalesce` in the flow does not help, because the failure is in the
+binding, not the reading. Give it a default (or a value);
+`bash flows/deploy-bad-debt-touches.sh --check` reports any variable in this
+state as `*** NO VALUE AND NO DEFAULT ***`, and `--replace` repairs it.
 
 **The run took much longer than usual.**
 Read `throttleWaits` beside `durationSeconds` on the run row. Non-zero means

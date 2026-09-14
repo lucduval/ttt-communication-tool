@@ -119,16 +119,72 @@ api_json() {
 # (payment link, test mode, the flow-error channel) belongs to another build and
 # is only checked for below. Both are typed String, following every other
 # numeric variable in this org, and read through int().
+# A variable the flow binds must ALWAYS resolve to something. One with neither
+# a value row nor a default value cannot be bound at all, and Power Automate
+# fails the entire run on it — "Attribute 'value' was not found for environment
+# variable X" — BEFORE any expression in the flow gets the chance to coalesce it
+# away. A defensive `coalesce(parameters('...'), '')` does not save you: the
+# failure is in binding the parameter, not in reading it.
+#
+# Dataverse also does not store an empty defaultvalue as "": it stores nothing,
+# so creating a variable with an empty default creates an unbindable one. That
+# is how riivo_BadDebtCanaryContactIds shipped, and it failed on the first run
+# of the flow. Hence "[]" below rather than "" — an empty JSON array is both a
+# real default and the exact thing the flow parses.
+MISSING=0
 ensure_env_var() { # ensure_env_var SCHEMANAME DISPLAYNAME DEFAULT DESCRIPTION
   local schema="$1" display="$2" default="$3" description="$4"
   echo "==> environment variable $schema"
-  local existing
-  existing=$(api_json GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$schema'" \
-    | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
-  if [[ "$existing" != "0" ]]; then
+  local state exists evid
+  state=$(api_json GET "environmentvariabledefinitions?\$select=environmentvariabledefinitionid,defaultvalue&\$filter=schemaname%20eq%20'$schema'&\$expand=environmentvariabledefinition_environmentvariablevalue(\$select=value)" \
+    | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)['value']
+if not rows:
+    print('absent -'); raise SystemExit
+row = rows[0]
+values = row.get('environmentvariabledefinition_environmentvariablevalue') or []
+bindable = bool(values) or row.get('defaultvalue') is not None
+print('bindable' if bindable else 'unbindable', row['environmentvariabledefinitionid'])")
+  read -r exists evid <<<"$state"
+
+  if [[ "$exists" == "bindable" ]]; then
     echo "    already exists — skipping"; return
   fi
-  if $CHECK_ONLY; then echo "    MISSING (would create)"; return; fi
+
+  # Exists but unbindable. Repairing a NULL default is safe in a way that
+  # changing a non-empty one would not be: nobody deliberately configures a
+  # variable the flow reads so that every run fails, whereas a default someone
+  # has deliberately retuned (the tripwire threshold, say) must never be
+  # silently reverted by a deploy. So this repairs only the state that cannot
+  # have been intended, and leaves every other difference alone.
+  if [[ "$exists" == "unbindable" ]]; then
+    echo "    EXISTS BUT CANNOT BE BOUND — no value row and no default value."
+    echo "    Every run of the flow fails on this, with \"Attribute 'value' was"
+    echo "    not found for environment variable $schema\"."
+    if [[ -z "$default" ]]; then
+      echo "    FAILED: no default declared here to repair it with." >&2; exit 1
+    fi
+    if $CHECK_ONLY; then
+      echo "    (would repair by setting its default to '$default')"; MISSING=1; return
+    fi
+    local pbody pcode
+    pbody=$(python3 -c "import json,sys;print(json.dumps({'defaultvalue': sys.argv[1]}))" "$default")
+    pcode=$(api PATCH "environmentvariabledefinitions($evid)" "$pbody" | tail -n1)
+    if [[ "$pcode" =~ ^2 ]]; then
+      echo "    repaired: default set to '$default' (HTTP $pcode)"
+    else
+      echo "    FAILED to repair (HTTP $pcode)" >&2; exit 1
+    fi
+    return
+  fi
+
+  if $CHECK_ONLY; then echo "    MISSING (would create)"; MISSING=1; return; fi
+  if [[ -z "$default" ]]; then
+    echo "    FAILED: refusing to create $schema with an empty default — Dataverse" >&2
+    echo "    stores no default at all, and the flow then cannot bind it." >&2
+    exit 1
+  fi
   local body
   body=$(python3 - "$schema" "$display" "$default" "$description" <<'PY'
 import json, sys
@@ -166,11 +222,14 @@ ensure_env_var riivo_BadDebtEnabled \
   "Bad Debt Enabled" "yes" \
   "The kill switch for the bad-debt recovery campaign (#104). Set it to 'no' and the campaign stops: the next scheduled run ends before it selects anybody, and a run already in flight stops sending at the next client - those it has already reached keep their touch, those it has not are held and picked up by the next run that finds the switch back on. Anything other than 'no', including an empty value, means the campaign is running. It is an environment variable rather than the flow's on/off state because deactivating a flow is connection-gated to riivo Admin in this org, and the person who needs to stop a bad run is whoever is reading it. Every skipped or stopped run emails riivo_varFlowErrorTeamMail, because the danger is not that somebody sets this - that is the point of it - it is that nobody unsets it."
 
-# Created EMPTY, which is the safe state: an empty list means the whole book,
-# and the run only narrows itself once a human deliberately puts ids in it.
+# Created as an EMPTY LIST, which is the safe state: an empty list means the
+# whole book, and the run only narrows itself once a human deliberately puts ids
+# in it. "[]" rather than "": Dataverse does not store an empty default at all,
+# and a variable with neither a default nor a value cannot be bound, so "" would
+# fail every run of the flow rather than meaning "no restriction".
 ensure_env_var riivo_BadDebtCanaryContactIds \
-  "Bad Debt Canary Contact Ids" "" \
-  "A JSON array of contact ids, e.g. [\"26372e5b-40db-f011-8543-7ced8d7556e1\"]. While it is non-empty the bad-debt recovery run speaks ONLY to those clients: the list narrows the selection query itself, so nobody else is fetched, minted for or rendered for (#102). Empty - the normal state - means the whole book. Used to rehearse the email channel on colleagues, then to canary a handful of real clients before the channel is trusted. A restricted run skips the volume tripwire, is recorded as outcome 'canary' so it can never become a later run's baseline, and emails the team every time it runs. CLEAR IT WHEN THE CANARY IS DONE: until it is empty, the campaign is only speaking to those clients."
+  "Bad Debt Canary Contact Ids" "[]" \
+  "A JSON array of contact ids, e.g. [\"26372e5b-40db-f011-8543-7ced8d7556e1\"]. [] - the normal state - means the whole book; NEVER blank it, because Dataverse stores no empty default and the flow then cannot bind the variable at all, failing every run. While it is non-empty the bad-debt recovery run speaks ONLY to those clients: the list narrows the selection query itself, so nobody else is fetched, minted for or rendered for (#102). Empty - the normal state - means the whole book. Used to rehearse the email channel on colleagues, then to canary a handful of real clients before the channel is trusted. A restricted run skips the volume tripwire, is recorded as outcome 'canary' so it can never become a later run's baseline, and emails the team every time it runs. CLEAR IT WHEN THE CANARY IS DONE: until it is empty, the campaign is only speaking to those clients."
 
 # ---------------------------------------------------- #100/#101 depend on ----
 # The flow reads five environment variables it does NOT create and calls two
@@ -178,7 +237,6 @@ ensure_env_var riivo_BadDebtCanaryContactIds \
 # Dataverse accepts the definition happily — it is a runtime failure, so it is
 # checked here instead.
 echo "==> dependencies for the mint and PDF steps (#100) and the tripwire (#101)"
-MISSING=0
 for DEP in riivo_PaymentLink_BaseUrl riivo_PaymentLink_FunctionKey riivo_PaymentLinkEnabled \
            riivo_EnvironmentAddress riivo_varFlowErrorTeamMail \
            riivo_SharedSenderUserId riivo_SendEmail \
@@ -228,8 +286,15 @@ row = rows[0]
 values = row.get('environmentvariabledefinition_environmentvariablevalue') or []
 # The VALUE wins over the default wherever one exists — reading the default
 # alone is how an environment gets misreported as something it is not.
-print(repr(values[0]['value']) + '  (current value)' if values
-      else repr(row.get('defaultvalue') or '') + '  (default; no value set)')")
+# A null default is NOT an empty string, and printing it as one hides the
+# single state that breaks every run. It was printed as '' for exactly one
+# commit, and that is how the canary variable's fault got past a reader.
+if values:
+    print(repr(values[0]['value']) + '  (current value)')
+elif row.get('defaultvalue') is None:
+    print('*** NO VALUE AND NO DEFAULT — the flow cannot bind this ***')
+else:
+    print(repr(row['defaultvalue']) + '  (default; no value set)')")
   echo "    $SWITCH = $VALUE"
 done
 echo "    riivo_BadDebtEnabled = no => the campaign is STOPPED. Nothing is sent"
@@ -554,10 +619,11 @@ echo "     timeline, emailsSent=3, and riivo_campaignsendcount advanced by"
 echo "     exactly one on those three bad-debt rows and on no others."
 echo "  9. CANARY. Widen the list to a small number of real clients, repeat"
 echo "     step 8, and read what they received before going further."
-echo " 10. CLEAR riivo_BadDebtCanaryContactIds. Until it is empty the campaign"
-echo "     is only speaking to those clients — which is what the Flow Failure"
-echo "     email saying RESTRICTED on every run is there to keep nagging"
-echo "     about."
+echo " 10. SET riivo_BadDebtCanaryContactIds BACK TO [] — the empty LIST, not a"
+echo "     blank. A blank leaves the variable with nothing to bind to and every"
+echo "     run then fails outright. Until it is [] the campaign is only"
+echo "     speaking to those clients, which is what the Flow Failure email"
+echo "     saying RESTRICTED on every run is there to keep nagging about."
 echo
 echo "  #103: the WhatsApp channel. READ THIS BEFORE RUNNING ANYTHING."
 echo "  There is no draft mode. Dev and prod post to the SAME Meta phone number"
@@ -602,9 +668,9 @@ echo "     environment — the campaign still stops at the START of a run, but"
 echo "     NOT part-way through one, and you need to know that now rather than"
 echo "     while a bad run is going out."
 echo " 16. CANARY on a small number of real clients, then read what they got."
-echo " 17. CLEAR riivo_BadDebtCanaryContactIds — step 10, again, and it matters"
-echo "     more now that both channels speak. Until it is empty the campaign"
-echo "     is only speaking to those clients."
+echo " 17. SET riivo_BadDebtCanaryContactIds BACK TO [] — step 10, again, and it"
+echo "     matters more now that both channels speak. [] means the whole book;"
+echo "     a blank value means every run fails."
 echo " 18. SWITCH THE RECURRENCE ON (Mon/Thu 09:45 SAST) and let TWO cycles"
 echo "     run. Two, not one: the only thing a second run proves is the thing"
 echo "     this campaign has never done — behaving DIFFERENTLY the second time."
