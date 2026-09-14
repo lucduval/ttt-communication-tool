@@ -50,6 +50,8 @@ import {
   CANARY_VARIABLE,
   DEFAULT_VOLUME_THRESHOLD_PERCENT,
   EMAIL_CHILD_FLOW_ID,
+  FLOW_DESCRIPTION,
+  FLOW_DESCRIPTION_LIMIT,
   FLOW_NAME,
   KILL_SWITCH_OFF,
   KILL_SWITCH_VARIABLE,
@@ -3033,6 +3035,30 @@ describe("what a run records about itself (#104)", () => {
       "killSwitchLiveRead",
     ]) {
       expect(report[field], field).toBeDefined();
+    }
+  });
+});
+
+describe("the workflow row's own fields", () => {
+  it("keeps the description inside the Flow service's 1024-character limit", () => {
+    // Dataverse's column is far larger and its Web API accepts any length, so
+    // the POST succeeds and the deploy verifies as byte-identical. The FLOW
+    // SERVICE only checks when a human opens the flow and saves it, and then
+    // refuses with WorkflowDescriptionTooLong. So the deploy cannot catch this
+    // and a person hits it days later, in the designer, while trying to do
+    // something else. It shipped at 2310.
+    expect(FLOW_DESCRIPTION.length).toBeLessThanOrEqual(FLOW_DESCRIPTION_LIMIT);
+  });
+
+  it("still says what stops the thing", () => {
+    // Whatever gets trimmed to fit, the three switches stay: this field is the
+    // first thing a stranger reads in the maker portal.
+    for (const switchName of [
+      "riivo_BadDebtEnabled",
+      "riivo_ReminderTestMode",
+      "riivo_BadDebtCanaryContactIds",
+    ]) {
+      expect(FLOW_DESCRIPTION, switchName).toContain(switchName);
     }
   });
 });

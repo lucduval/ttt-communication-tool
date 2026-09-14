@@ -142,6 +142,42 @@ import {
 
 export const FLOW_NAME = "Invoice - Scheduled - Send Bad Debt Recovery Touches";
 
+/**
+ * The `description` column on the Dataverse `workflow` row.
+ *
+ * UNDER 1024 CHARACTERS, and that is not a style preference. Dataverse's own
+ * column is far larger and its Web API accepts whatever you send, so a POST
+ * succeeds and `--check` reports the flow as deployed and byte-identical — but
+ * the FLOW SERVICE enforces 1024 when the designer saves, and refuses with
+ * `WorkflowDescriptionTooLong`. The flow then runs perfectly and cannot be
+ * opened and saved by a human, which is the one thing a deploy script's own
+ * verification cannot notice. It shipped at 2310 characters and was found by
+ * somebody trying to fix a connection reference.
+ *
+ * So it lives here, beside the definition, with a test pinning the limit —
+ * rather than in the deploy script, where nothing measured it. The long-form
+ * account belongs in this file's header comment and in the handoff; this is a
+ * field with a limit, not a place to explain the build.
+ */
+export const FLOW_DESCRIPTION_LIMIT = 1024;
+export const FLOW_DESCRIPTION = [
+  "Bad-debt recovery, Mon/Thu 09:45 SAST (issues #98-#104).",
+  "Selects one client per run from open riivo_baddebt rows, resolves which of",
+  "the 24 approved WhatsApp templates is due, mints a payment token and renders",
+  "the invoice PDF, then emails through the house child 'Email - Child - Build",
+  "Branded HTML Email, Create or Send' and sends the WhatsApp template with that",
+  "PDF as its document header. A client whose token or PDF cannot be produced is",
+  "held, never sent a broken link. Bookkeeping advances only when a channel",
+  "reports a send.",
+  "SAFETY: riivo_BadDebtEnabled=no stops the campaign, between runs and mid-run.",
+  "riivo_ReminderTestMode=true selects and reports but sends nothing.",
+  "riivo_BadDebtCanaryContactIds, while non-empty, restricts the run to those",
+  "clients only. There is NO draft mode for WhatsApp: dev and prod post to the",
+  "same Meta phone number.",
+  "Authored as tested code in flows/badDebtRecoveryTouches.ts - edit there, not",
+  "in the designer. Operating note: docs/runbook-bad-debt-recovery.md.",
+].join(" ");
+
 /** Dataverse environment variable holding the minimum gap between touches. */
 export const TOUCH_GAP_VARIABLE = "riivo_BadDebtMinDaysBetweenTouches";
 

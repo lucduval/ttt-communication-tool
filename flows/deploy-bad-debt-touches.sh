@@ -132,6 +132,40 @@ api_json() {
 # of the flow. Hence "[]" below rather than "" — an empty JSON array is both a
 # real default and the exact thing the flow parses.
 MISSING=0
+# A DEFAULT IS NOT ALWAYS ENOUGH. riivo_BadDebtCanaryContactIds had a default
+# of '[]' and no value row, and the flow still failed to bind it — "Attribute
+# 'value' was not found". Whatever the exact rule (a flow saved before the
+# default existed, a cache, a quirk of this environment), the way not to depend
+# on it is to write a real value row, so there is nothing to fall back TO.
+#
+# It creates a value only where none exists, and never overwrites one: a value
+# is exactly the field a human sets deliberately — the canary list, the kill
+# switch — and a deploy that reset those would be worse than the problem it is
+# solving.
+ensure_env_var_value() { # ensure_env_var_value SCHEMANAME DEFINITION_ID VALUE
+  local schema="$1" evid="$2" value="$3"
+  local existing
+  existing=$(api_json GET "environmentvariablevalues?\$select=value&\$filter=_environmentvariabledefinitionid_value%20eq%20$evid" \
+    | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
+  if [[ "$existing" != "0" ]]; then
+    echo "    value row present — left alone"; return
+  fi
+  if $CHECK_ONLY; then echo "    no value row (would create one holding '$value')"; return; fi
+  local vbody vcode
+  vbody=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'value': sys.argv[1],
+    'EnvironmentVariableDefinitionId@odata.bind': '/environmentvariabledefinitions(%s)' % sys.argv[2],
+}))" "$value" "$evid")
+  vcode=$(api POST "environmentvariablevalues" "$vbody" "MSCRM.SolutionUniqueName: $SOLUTION_VARS" | tail -n1)
+  if [[ "$vcode" =~ ^2 ]]; then
+    echo "    value row created holding '$value' (HTTP $vcode)"
+  else
+    echo "    FAILED to create the value row (HTTP $vcode)" >&2; exit 1
+  fi
+}
+
 ensure_env_var() { # ensure_env_var SCHEMANAME DISPLAYNAME DEFAULT DESCRIPTION
   local schema="$1" display="$2" default="$3" description="$4"
   echo "==> environment variable $schema"
@@ -149,7 +183,9 @@ print('bindable' if bindable else 'unbindable', row['environmentvariabledefiniti
   read -r exists evid <<<"$state"
 
   if [[ "$exists" == "bindable" ]]; then
-    echo "    already exists — skipping"; return
+    echo "    already exists"
+    ensure_env_var_value "$schema" "$evid" "$default"
+    return
   fi
 
   # Exists but unbindable. Repairing a NULL default is safe in a way that
@@ -176,6 +212,7 @@ print('bindable' if bindable else 'unbindable', row['environmentvariabledefiniti
     else
       echo "    FAILED to repair (HTTP $pcode)" >&2; exit 1
     fi
+    ensure_env_var_value "$schema" "$evid" "$default"
     return
   fi
 
@@ -205,6 +242,10 @@ PY
   else
     echo "    FAILED (HTTP $code): $(sed '$d' <<<"$resp" | head -c 400)"; exit 1
   fi
+  # Re-read to get the id the create just minted, then give it a value row too.
+  evid=$(api_json GET "environmentvariabledefinitions?\$select=environmentvariabledefinitionid&\$filter=schemaname%20eq%20'$schema'" \
+    | python3 -c "import sys,json;print(json.load(sys.stdin)['value'][0]['environmentvariabledefinitionid'])")
+  ensure_env_var_value "$schema" "$evid" "$default"
 }
 
 ensure_env_var riivo_BadDebtMinDaysBetweenTouches \
@@ -477,7 +518,26 @@ fi
 if [[ "$FOUND" != "-" ]]; then
   echo "    exists: $FOUND  statecode=$FOUND_STATE (0=draft/off)  definition=$SAME"
   if [[ "$SAME" == "same" ]]; then
-    echo "    deployed definition matches this working tree — nothing to do"
+    echo "    deployed definition matches this working tree"
+    # The description is NOT part of clientdata, so a flow can verify as
+    # byte-identical and still carry a description the Flow service refuses to
+    # let anyone save. It is an ordinary column, so unlike clientdata it can be
+    # PATCHed in place — no replace, no new workflowid.
+    DESCRIPTION=$(npx --yes tsx -e '
+import { FLOW_DESCRIPTION } from "./flows/badDebtRecoveryTouches";
+process.stdout.write(FLOW_DESCRIPTION);
+')
+    CURRENT=$(api_json GET "workflows($FOUND)?\$select=description" \
+      | python3 -c "import sys,json;print(json.load(sys.stdin).get('description') or '')")
+    if [[ "$CURRENT" == "$DESCRIPTION" ]]; then
+      echo "    description matches too — nothing to do"; exit 0
+    fi
+    echo "    description differs: deployed ${#CURRENT} chars, module ${#DESCRIPTION}"
+    if $CHECK_ONLY; then echo "    (would update it)"; exit 0; fi
+    DBODY=$(python3 -c "import json,sys;print(json.dumps({'description': sys.argv[1]}))" "$DESCRIPTION")
+    DCODE=$(api PATCH "workflows($FOUND)" "$DBODY" | tail -n1)
+    [[ "$DCODE" =~ ^2 ]] && echo "    description updated (HTTP $DCODE)" \
+      || { echo "    FAILED to update description (HTTP $DCODE)" >&2; exit 1; }
     exit 0
   fi
   if [[ "$FOUND_STATE" != "0" ]]; then
@@ -496,50 +556,21 @@ if [[ "$FOUND" != "-" ]]; then
 else
   if $CHECK_ONLY; then echo "    MISSING (would create)"; exit 0; fi
 fi
-BODY=$(python3 - "$FLOW_NAME" "$CLIENTDATA" <<'PY'
+DESCRIPTION=$(npx --yes tsx -e '
+import { FLOW_DESCRIPTION } from "./flows/badDebtRecoveryTouches";
+process.stdout.write(FLOW_DESCRIPTION);
+')
+BODY=$(python3 - "$FLOW_NAME" "$CLIENTDATA" "$DESCRIPTION" <<'PY'
 import sys, json
 print(json.dumps({
     "name": sys.argv[1],
     "clientdata": sys.argv[2],
     # Modern cloud flow: category 5, type 1, scope 4, mode 0, primaryentity none.
     "category": 5, "type": 1, "scope": 4, "mode": 0, "primaryentity": "none",
-    "description": (
-        "Bad-debt recovery: selection, campaign key, message inputs and the "
-        "email channel (issues #98-#102). Selects one client per run from "
-        "open riivo_baddebt rows, resolves the campaign-key WhatsApp template "
-        "for the touch that is due, mints a payment token and renders the "
-        "invoice PDF - holding any client whose token or PDF cannot be "
-        "produced - and EMAILS them through the house child 'Email - Child - "
-        "Build Branded HTML Email, Create or Send', which creates the "
-        "Dataverse email row, attaches the PDF and performs the bound "
-        "SendEmail. No Outlook connector anywhere. It also sends the WhatsApp "
-        "template the campaign key resolved (#103): the invoice PDF is "
-        "uploaded to Meta per client and delivered as the template's document "
-        "header, the body carries the client's first name and the outstanding "
-        "amount - three parameters, with the invoice number, on the D12 "
-        "fallback template, which is approved with a different body - and the "
-        "Pay-now button is passed the BARE payment token, because Meta rebuilds "
-        "the approved URL prefix itself. Every attempt is logged to "
-        "riivo_whatsappcommunicationses, sent or refused. The touch bookkeeping "
-        "is gated on a channel reporting a send, so a suppressed recipient, a "
-        "skipped send, a draft left by riivo_SendEmail and a template Meta "
-        "refused all advance no counter. There is no riivo_SendEmail for "
-        "WhatsApp: dev and prod post to the same Meta phone number id, so any "
-        "run not in test mode sends real messages from the live TTT number. "
-        "riivo_BadDebtCanaryContactIds restricts a run to named clients for a "
-        "rehearsal or a canary; while it is set the run skips the volume "
-        "tripwire, records itself as 'canary' so it never becomes a baseline, "
-        "and emails the team to say it was restricted. "
-        "Mon/Thu 09:45 SAST - 09:45 not 09:30 because "
-        "'Bad Debt Referral & Owner Digest' (dd5a766f) runs daily 09:30 and "
-        "creates riivo_baddebt rows. The definition is generated and tested in "
-        "flows/badDebtRecoveryTouches.ts; edit it there, not in the designer. "
-        "#101 adds the volume tripwire: after selection and before anything is "
-        "minted or rendered, the run compares its selected client count "
-        "against the last run that was acted on (riivo_baddebtrun) and, if "
-        "they disagree by more than "
-        "riivo_BadDebtVolumeChangeThresholdPercent - or the selection has "
-        "emptied - alerts the team and terminates having produced nothing."),
+    # Under 1024 characters, and measured by a test rather than here: Dataverse
+    # accepts any length and only the Flow service objects, when a human opens
+    # the flow and tries to save it. See FLOW_DESCRIPTION in the module.
+    "description": sys.argv[3],
 }))
 PY
 )
