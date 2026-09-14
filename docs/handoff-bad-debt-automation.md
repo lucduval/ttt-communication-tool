@@ -21,14 +21,20 @@ against the dev org on 2026-09-11 unless it says otherwise.
 | #103 WhatsApp live | **Open but built.** Rides the same replace-deploy; adds one more run-table column and reads three Meta environment variables that already exist. The rehearsal and the canary are human runs — and unlike email there is **no draft mode**, so the first one sends real messages. |
 | #104 Recurrence on, two cycles observed | **Open; the buildable half is built.** Adds the kill switch, the run clock and the throttle counter, plus `docs/runbook-bad-debt-recovery.md`. Rides the same replace-deploy; adds one environment variable and three run-table columns, both of which the deploy script creates. Everything else it asks for is human: switching the recurrence on, watching two cycles, reviewing the threshold against real numbers, and the prod handover. |
 
-**What is actually deployed in dev right now is the #99 definition.** Checked
-byte-for-byte on 2026-09-11, and `--check` still reports `definition=differs` on
-2026-09-11 after the #104 build: the flow in dev
-(`3c600c0b-c5ad-f111-aaab-002248a35b45`, draft/off) matches the rendered `#99`
-module exactly, so **#100's replace-deploy was never run**. One `--replace`
-therefore carries dev from #99 straight to **#104** — the mint/PDF scope, the
-tripwire, the email channel, the canary, the WhatsApp channel and the kill
-switch land together, and the workflowid changes again when it does.
+**DEPLOYED 2026-09-14: dev now carries the #104 definition.** The one
+`--replace` that had been outstanding since #100 ran, so #100–#104 landed
+together — the mint/PDF scope, the tripwire, the email channel, the canary, the
+WhatsApp channel and the kill switch. Verified against the org the same day:
+
+| | |
+|---|---|
+| Flow | **`e4128910-18b0-f111-aaac-000d3a667755`**, draft / off, `clientdata` byte-identical to the module. One row with this name; `3c600c0b-…` (the #99 row) and `7d112cdb-…` (the #98 row) are both gone |
+| `riivo_baddebtrun` | exists, all **16** declared columns present (plus the auto primary key and the `riivo_testmodename` Dataverse creates for the Boolean) |
+| `riivo_BadDebtEnabled` · `riivo_BadDebtCanaryContactIds` · `riivo_BadDebtVolumeChangeThresholdPercent` | created, at defaults `yes` · empty · `40`, no values set |
+
+The deploy took three attempts and neither failure was in the flow — see
+"What the deploy itself taught us" below. **Nothing has been run yet**: the
+flow is draft/off and no `riivo_baddebtrun` row exists.
 
 **#99, #100 and #101 all say "Blocked by #98".** That dependency is satisfied:
 #98's build is deployed and verified. Only its two human-verification ACs
@@ -71,7 +77,7 @@ back as `7229f676-afd5-f011-8544-000d3adca789` from `WhoAmI`.
 
 | Flow | GUID | State |
 |---|---|---|
-| `Invoice - Scheduled - Send Bad Debt Recovery Touches` **(ours)** | `3c600c0b-c5ad-f111-aaab-002248a35b45` | draft / **off** — carries the **#99** definition; #100+#101 replace it and mint a NEW guid. (`7d112cdb-…`, the #98 row, is gone.) |
+| `Invoice - Scheduled - Send Bad Debt Recovery Touches` **(ours)** | `e4128910-18b0-f111-aaac-000d3a667755` | draft / **off** — carries the **#104** definition as of 2026-09-14. The guid changes on every `--replace`, because `clientdata` cannot be PATCHed; `3c600c0b-…` (#99) and `7d112cdb-…` (#98) are gone. |
 | `Invoice - Scheduled - Payment Reminder & Link Cadence` | `c430ace5-c57b-f111-ab0f-000d3ada6ac0` | off |
 | `Invoice - Scheduled - Bad Debt Referral & Owner Digest` | `dd5a766f-d67d-f111-ab0f-002248a29481` | off |
 | `Invoice - Child - Generate PDF` | `be610dd6-bf7b-f111-ab0f-000d3ada6ac0` | **on** |
@@ -736,13 +742,61 @@ including the ones that are *expected* in dev (the Pay-now prefix mismatch,
 
 ### Still needed for #104
 
-1. `bash flows/deploy-bad-debt-touches.sh --replace` — the same one command,
-   now carrying dev from #99 all the way to #104. It also creates
-   `riivo_BadDebtEnabled` and the run table, now **16** columns.
-2. The human steps the script prints as 16–20: prove the kill switch **while
-   the canary list is still set** → check `killSwitchLiveRead` → switch the
-   recurrence on and watch two cycles → review the tripwire threshold against
-   the two real counts → hand to Luc for prod.
+1. ~~The replace-deploy~~ — **done 2026-09-14.** See the deployed state at the
+   top of this file.
+2. The human steps the script prints, **all twenty of them**, because nothing
+   has been run yet: the connection reference, the test-mode run, the tripwire
+   exercise, the email draft rehearsal and live rehearsal, the WhatsApp
+   colleague rehearsal, the opt-out proof, then #104's own — prove the kill
+   switch **while the canary list still names only colleagues** (14) → check
+   `killSwitchLiveRead` is true (15) → canary and clear the list (16, 17) →
+   recurrence on, two cycles (18) → review the threshold against the two real
+   counts (19) → hand to Luc for prod (20).
+
+---
+
+## What the deploy itself taught us
+
+The `--replace` took three attempts, and **neither failure was in the flow**.
+Both were in the deploy script, and both are worth knowing because the same
+shapes will recur.
+
+**1. The column-creation branch had never once executed.** It threw
+`Cannot read properties of undefined (reading 'split')` after the table POST
+had already succeeded, leaving the table created with only its primary name
+column. The cause: `tsx -e` leaves `process.argv` as `[node, firstArg]` — there
+is no script path in slot 1 — so the argv index that looks right is off by one.
+
+The interesting part is not the off-by-one, it is **why nothing caught it**.
+Every earlier run found the table missing and skipped the whole block, and
+`--check` prints "would create" without generating a single body. So the one
+path that had to work on the day the table first existed was also the only one
+nothing had exercised. The handoff had flagged the table POST as unproven and
+was right about the neighbourhood, wrong about the line. The list now travels
+through the **environment** rather than argv, and an empty column set stops
+rather than proceeding.
+
+**2. A Dataverse blip aborted the deploy with a Python traceback.** On the next
+attempt the dependency check for `riivo_PaymentLink_FunctionKey` came back with
+an empty body; asked again a minute later it — and all its neighbours — answer
+200 with valid JSON. Every read in the script piped raw curl output straight
+into `python3` without looking at the status code, so *any* transient response
+became an unreadable traceback and left the deploy half-finished wherever it
+landed.
+
+`api_json` now sits between the two: it checks the status, retries throttling,
+5xx, dropped connections and 2xx-but-unparseable four times with linear backoff,
+and otherwise fails with the method, the path, the status and Dataverse's own
+words. Two lookups where "not there" is a real answer — the run table on a
+first deploy, a child flow that has gone missing — take a `missing_ok` flag that
+turns a 404 into `{}`; that replaced two `2>/dev/null || echo …` fallbacks which
+had been swallowing every *other* error too.
+
+**The lesson for the next deploy script in this repo:** a branch that only runs
+once, on first creation, is a branch nothing has tested — and a `--check` mode
+that reports intent without building the payload does not test it either. If a
+code path's first execution is also its most consequential, exercise it against
+a scratch object first.
 
 ### What #104 asks for that is not built, and cannot be
 
