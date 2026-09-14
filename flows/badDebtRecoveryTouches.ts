@@ -1689,7 +1689,16 @@ export function buildBadDebtRecoveryTouchesFlow() {
           "Compose_|_Volume_Change_Percent": {
             runAfter: { "Compose_|_Volume_Threshold_Percent": ["Succeeded"] },
             type: "Compose",
-            inputs: `@div(mul(max(sub(${selectedCount}, ${previousCount}), sub(${previousCount}, ${selectedCount})), 100), max(${previousCount}, 1))`,
+            // Zero when there was nothing to compare against, rather than the
+            // number the arithmetic produces. With no baseline the `max(prev,1)`
+            // guard turns a first run of five clients into "500%", and that is
+            // what gets STORED on the run row — so the first row anyone reads
+            // in a new environment says 500% against a 40% threshold and
+            // outcome=proceeded, which reads as a tripwire that failed to fire.
+            // It is read beside riivo_previouscount=0, and 0 there means "not
+            // measured". The verdict never reaches this value in that case
+            // anyway: it returns proceed on the no-baseline rungs above.
+            inputs: `@if(greater(${previousCount}, 0), div(mul(max(sub(${selectedCount}, ${previousCount}), sub(${previousCount}, ${selectedCount})), 100), max(${previousCount}, 1)), 0)`,
           },
           "Compose_|_Tripwire_Verdict": {
             runAfter: { "Compose_|_Volume_Change_Percent": ["Succeeded"] },

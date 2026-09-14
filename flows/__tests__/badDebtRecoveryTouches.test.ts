@@ -1298,6 +1298,29 @@ describe("the volume tripwire (#101)", () => {
     });
   });
 
+  describe("the percentage a human reads off the row", () => {
+    const percent = (selected: number, previous: number) =>
+      evaluate(composeInputs("Compose_|_Volume_Change_Percent"), {
+        "outputs('Compose_|_Selected_Count')": selected,
+        "outputs('Compose_|_Previous_Count')": previous,
+      });
+
+    it("reports 0, not a spurious jump, when there was no baseline", () => {
+      // Observed on the first real run in dev: five clients against no
+      // baseline stored riivo_changepercent = 500 next to a threshold of 40
+      // and outcome=proceeded, which reads as a tripwire that failed to fire.
+      // It is the FIRST row anyone reads in a new environment, prod included.
+      expect(percent(5, 0)).toBe(0);
+      expect(percent(0, 0)).toBe(0);
+    });
+
+    it("still measures movement once there is something to measure", () => {
+      expect(percent(150, 100)).toBe(50);
+      expect(percent(50, 100)).toBe(50);
+      expect(percent(100, 100)).toBe(0);
+    });
+  });
+
   describe("the threshold is configuration, not a literal", () => {
     const param = Object.entries<any>(definition.parameters).find(
       ([, p]) => p.metadata?.schemaName === VOLUME_THRESHOLD_VARIABLE,
