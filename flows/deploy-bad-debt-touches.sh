@@ -282,14 +282,36 @@ for DEP in riivo_PaymentLink_BaseUrl riivo_PaymentLink_FunctionKey riivo_Payment
            riivo_EnvironmentAddress riivo_varFlowErrorTeamMail \
            riivo_SharedSenderUserId riivo_SendEmail \
            riivo_varMetaURI riivo_varMetaUploadURI riivo_varMetaAccessToken; do
-  COUNT=$(api_json GET "environmentvariabledefinitions?\$select=schemaname&\$filter=schemaname%20eq%20'$DEP'" \
-    | python3 -c "import sys,json;print(len(json.load(sys.stdin)['value']))")
-  if [[ "$COUNT" == "0" ]]; then
-    echo "    MISSING environment variable $DEP"; MISSING=1
-  else
-    echo "    $DEP ok"
-  fi
+  # Reported, not repaired: these belong to other builds. But a variable with
+  # no value row is the shape that just failed to bind on this build's own
+  # canary list, and riivo_ReminderTestMode is on this list — the one variable
+  # that decides whether a run sends real messages. Worth a line.
+  COUNT=$(api_json GET "environmentvariabledefinitions?\$select=schemaname,defaultvalue&\$filter=schemaname%20eq%20'$DEP'&\$expand=environmentvariabledefinition_environmentvariablevalue(\$select=value)" \
+    | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)['value']
+if not rows:
+    print('missing'); raise SystemExit
+row = rows[0]
+if row.get('environmentvariabledefinition_environmentvariablevalue'):
+    print('ok')
+elif row.get('defaultvalue') is None:
+    print('unbindable')
+else:
+    print('defaultonly')")
+  case "$COUNT" in
+    missing)     echo "    MISSING environment variable $DEP"; MISSING=1 ;;
+    unbindable)  echo "    $DEP has NO VALUE AND NO DEFAULT — every run fails on it"; MISSING=1 ;;
+    defaultonly) echo "    $DEP ok (default only, no value row — see note below)" ;;
+    *)           echo "    $DEP ok" ;;
+  esac
 done
+
+echo "    A variable marked 'default only' has no environment-variable VALUE row."
+echo "    That is the shape riivo_BadDebtCanaryContactIds was in when the flow"
+echo "    refused to bind it at runtime. These belong to other builds so this"
+echo "    script will not write them, but if a run fails with \"Attribute 'value'"
+echo "    was not found\", give that variable a current value and re-run."
 
 # Addressed by workflowid, which differs per environment: these are the two
 # references in the definition that cannot travel to prod unchanged. Both must
