@@ -187,6 +187,19 @@ no transactions.
   run's WhatsApp; they are excluded from the next one.
 - **The house failed-flow alert child cannot be switched off** — it sends in
   both branches of its own on/off condition, org-wide, in 218 flows.
+- **A client with several overdue invoices is chased per invoice, not per
+  client.** `riivo_BadDebtMinDaysBetweenTouches` is applied to the
+  `riivo_baddebts` row, and a send stamps only the row it selected, so a client
+  who owes ten invoices becomes eligible again as soon as the next run starts —
+  with a different invoice. Decided deliberately on 2026-09-15: each debt earns
+  its own reminder.
+  **On the Mon/Thu schedule this changes nothing.** The collapse allows one
+  message per client per run whatever they owe, and the runs are three and four
+  days apart, so a two-day gap never binds. The behaviour is only visible on
+  ad-hoc runs made minutes apart, which is how it was found — one dev contact
+  received two messages 25 minutes apart, for two different invoices. If the
+  schedule ever tightens to within two days, re-read this entry: the gap would
+  then bind for single-invoice clients and still not for multi-invoice ones.
 - **One handset can buzz twice in a single run.** Two clients sharing a mobile
   number each get their own message, with their own invoice, amount and payment
   link. Decided deliberately on 2026-09-15: the debts are separate and each
