@@ -42,9 +42,11 @@ the second `--replace` deployed `0db2dfe`, so `--check` reports
 (see "First runs in dev" below); their Power Automate run history died with
 that row, so the run-level durations are recorded here instead: **97.7s** for
 5 clients / 0 mints, **192.3s** for 5 clients / 1 mint, and **35.7s / 38.9s**
-for the two tripwire-parked runs — which bound the fixed overhead at ~37s and
-put the marginal cost of a single mint at ~95s. Nothing has been sent to
-anybody: `riivo_ReminderTestMode` is `true` and `riivo_SendEmail` is `no`.
+for the two tripwire-parked runs, which bound the fixed overhead at ~37s. A
+fifth run on 2026-09-15 — 5 clients, **3 mints**, **113s** — showed the 192.3s
+run to be an outlier and settled AC 5; see "What the fifth run measured" below.
+Nothing has been sent to anybody: `riivo_ReminderTestMode` is `true` and
+`riivo_SendEmail` is `no`.
 
 **#99, #100 and #101 all say "Blocked by #98".** That dependency is satisfied:
 #98's build is deployed and verified. Only its two human-verification ACs
@@ -861,6 +863,50 @@ branches of its own on/off condition.
   the endpoint therefore remain unproven; the links in the report only prove
   `riivo_PaymentLink_BaseUrl` resolves. Clearing one token and re-running is the
   only way to cover it.
+
+---
+
+## What the fifth run measured, 2026-09-15
+
+Run five was the first on flow row `0188de8a-…`: 5 clients, 3 mints, test mode,
+`outcome=proceeded`, `previouscount=5`, a 0% volume move, nothing sent. Three
+tokens were cleared beforehand precisely so the run would mint, because all five
+selected invoices already had one and a run would otherwise have minted nothing.
+
+**A mint costs about 6 seconds, not 87.** Three data points, all 5 clients:
+
+| Mints | Duration |
+|---|---|
+| 0 | 95s |
+| 1 | 182s |
+| 3 | **113s** |
+
+Three mints cost **18s more** than none. The 182s run was an **outlier** — an
+~87s stall that the previous handoff attributed to its single mint, which three
+mints have now shown it cannot have been. An Azure Function cold start is the
+likeliest explanation.
+
+The three runs fit one model to the second:
+
+```
+duration ≈ 37s fixed + 11.6s per client + 6s per mint
+37 + 5(11.6) + 3(6) = 113   ← measured 113
+```
+
+**So pre-minting is not worth building, and AC 5's blocker is answered.** What
+the model also says is that the cost was never in the mint: it is the **11.6s
+per client**, and that is what governs a real run.
+
+**At 600 clients**, on this model: ~1h56m in steady state, ~2h57m for a first
+run where everybody mints. Starting 09:45 that finishes around 11:40, or 12:45
+on the first run. Survivable, and worth knowing before it is a surprise.
+
+**The lever, if it ever needs pulling**, is `concurrency: { repetitions: 1 }` on
+the client loop — the run is strictly serial by choice (R8: uncapped loops trip
+service-protection limits). Raising it to 4 would cut the wall clock roughly
+fourfold. `riivo_throttlewaits` has been **0** in every run so far, which is
+encouraging and is also no evidence at all about 600 clients. Decide it at step
+19 with two real counts, not before.
 
 ---
 
