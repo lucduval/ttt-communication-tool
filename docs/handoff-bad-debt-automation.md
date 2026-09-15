@@ -921,6 +921,31 @@ encouraging and is also no evidence at all about 600 clients. Decide it at step
 
 ---
 
+## Two rehearsal steps deliberately skipped, 2026-09-15
+
+Both were offered and declined, so they are gaps by decision rather than by
+oversight. Each means the canary on real clients is the FIRST time that path
+runs against anybody.
+
+- **The live email send (printed step 8) has never run.** `riivo_SendEmail` has
+  been `no` throughout, so every email this flow has produced is a Dataverse
+  row marked sent-without-delivery. The rendering is verified — right amount,
+  right invoice number, the PDF attached at ~66KB, a Pay-now link on the host
+  dev actually mints against — but nothing has been handed to a mail server.
+- **The WhatsApp opt-out (printed step 13) has never been exercised.** The only
+  suppression observed is `test riivo`, who has no mobile number at all, and
+  the flow reports a missing number and a withdrawn consent with the same
+  sentence. So "we honour `riivo_whatsappoptinout`" rests on the selection
+  query and a unit test, not on a run.
+
+What IS proven on the WhatsApp side, from three real sends on 2026-09-15: the
+template resolves, the document header carries a real PDF, the log row records
+`riivo_clickatellstatus = 463630001` with Meta's message id, and
+`riivo_campaignsendcount` advances by exactly one on the row that was touched
+and on no other.
+
+---
+
 ## Open threads worth not losing
 
 - **#96 prod half is unanswered and blocks prod promotion.** The daily
