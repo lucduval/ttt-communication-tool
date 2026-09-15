@@ -187,3 +187,10 @@ no transactions.
   run's WhatsApp; they are excluded from the next one.
 - **The house failed-flow alert child cannot be switched off** — it sends in
   both branches of its own on/off condition, org-wide, in 218 flows.
+- **One handset can buzz twice in a single run.** Two clients sharing a mobile
+  number each get their own message, with their own invoice, amount and payment
+  link. Decided deliberately on 2026-09-15: the debts are separate and each
+  client is entitled to their own demand, so the run does not deduplicate by
+  number and does not hold the second message. Expect it to be reported as a
+  double-send; it is not one. Check the two messages name two different clients
+  before treating it as a bug.

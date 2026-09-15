@@ -28,13 +28,23 @@ WhatsApp channel and the kill switch. Verified against the org the same day:
 
 | | |
 |---|---|
-| Flow | **`e4128910-18b0-f111-aaac-000d3a667755`**, draft / off, `clientdata` byte-identical to the module. One row with this name; `3c600c0b-…` (the #99 row) and `7d112cdb-…` (the #98 row) are both gone |
+| Flow | **`0188de8a-ffb0-f111-aaac-70a8a52b74f1`**, `clientdata` byte-identical to the module. One row with this name. Superseded by a second `--replace` on **2026-09-15** carrying `0db2dfe` (the `changePercent` fix); `e4128910-…` (the 2026-09-14 row), `3c600c0b-…` (#99) and `7d112cdb-…` (#98) are all gone |
 | `riivo_baddebtrun` | exists, all **16** declared columns present (plus the auto primary key and the `riivo_testmodename` Dataverse creates for the Boolean) |
-| `riivo_BadDebtEnabled` · `riivo_BadDebtCanaryContactIds` · `riivo_BadDebtVolumeChangeThresholdPercent` | created, at defaults `yes` · empty · `40`, no values set |
+| `riivo_BadDebtEnabled` · `riivo_BadDebtCanaryContactIds` · `riivo_BadDebtVolumeChangeThresholdPercent` | created, and as of 2026-09-15 all three carry real **value rows**: `yes` · `[]` · `40`. So does `riivo_ReminderTestMode` (`true`) |
 
 The deploy took three attempts and neither failure was in the flow — see
-"What the deploy itself taught us" below. **Nothing has been run yet**: the
-flow is draft/off and no `riivo_baddebtrun` row exists.
+"What the deploy itself taught us" below.
+
+**State as of 2026-09-15.** The flow is **switched on** (statecode 1) with the
+Mon/Thu 09:45 recurrence armed, and carries the working tree's definition —
+the second `--replace` deployed `0db2dfe`, so `--check` reports
+`definition=same`. Four runs happened on the *previous* flow row on 2026-09-14
+(see "First runs in dev" below); their Power Automate run history died with
+that row, so the run-level durations are recorded here instead: **97.7s** for
+5 clients / 0 mints, **192.3s** for 5 clients / 1 mint, and **35.7s / 38.9s**
+for the two tripwire-parked runs — which bound the fixed overhead at ~37s and
+put the marginal cost of a single mint at ~95s. Nothing has been sent to
+anybody: `riivo_ReminderTestMode` is `true` and `riivo_SendEmail` is `no`.
 
 **#99, #100 and #101 all say "Blocked by #98".** That dependency is satisfied:
 #98's build is deployed and verified. Only its two human-verification ACs
@@ -77,7 +87,7 @@ back as `7229f676-afd5-f011-8544-000d3adca789` from `WhoAmI`.
 
 | Flow | GUID | State |
 |---|---|---|
-| `Invoice - Scheduled - Send Bad Debt Recovery Touches` **(ours)** | `e4128910-18b0-f111-aaac-000d3a667755` | draft / **off** — carries the **#104** definition as of 2026-09-14. The guid changes on every `--replace`, because `clientdata` cannot be PATCHed; `3c600c0b-…` (#99) and `7d112cdb-…` (#98) are gone. |
+| `Invoice - Scheduled - Send Bad Debt Recovery Touches` **(ours)** | `0188de8a-ffb0-f111-aaac-70a8a52b74f1` | **on** as of 2026-09-15, recurrence armed — carries the **#104** definition including `0db2dfe`. The guid changes on every `--replace`, because `clientdata` cannot be PATCHed; `e4128910-…`, `3c600c0b-…` (#99) and `7d112cdb-…` (#98) are gone. |
 | `Invoice - Scheduled - Payment Reminder & Link Cadence` | `c430ace5-c57b-f111-ab0f-000d3ada6ac0` | off |
 | `Invoice - Scheduled - Bad Debt Referral & Owner Digest` | `dd5a766f-d67d-f111-ab0f-002248a29481` | off |
 | `Invoice - Child - Generate PDF` | `be610dd6-bf7b-f111-ab0f-000d3ada6ac0` | **on** |
@@ -895,6 +905,36 @@ branches of its own on/off condition.
   dev**, and it is the first thing to settle before prod.
 - Two #98 ACs still need a human in the maker portal: the same-day re-run check
   and the dry-run diff against the comms tool's list.
+- **The "cascading write" is a classic workflow, and is closed.** The invoice
+  modified a minute after a mint write on 2026-09-14 (`bfcbef56-…`, 13:21:07)
+  was touched by the **classic workflow** `Invoice - Concat Client Name and
+  Invoice Number`, which fired twice (13:21:07 and 13:21:08) and recomputed
+  `new_name` to the value it already held — hence a `modifiedon` bump with **no
+  audit row**. No cloud flow was involved: of the 25 flows triggered by
+  `new_invoices`, none filters on `riivo_paymenttoken`, and the only runs in
+  that window were ours and its five PDF child calls. Classic workflows do not
+  appear in `flowruns`; they surface as `asyncoperations`, which is where this
+  was finally found. Practical effect in prod: one async background workflow run
+  per invoice we write, trailing ~60s behind. It does **not** add to the flow's
+  own duration and does not double its writes, but it is queue load at ~600
+  invoices a run.
+- **Does `/mint-token` already persist the token?** Audit on the same invoice
+  shows `riivo_paymenttoken` (col 218) written at 13:20:05 and
+  `riivo_paymentlinksenton` (col 220) at 13:20:10 — five seconds apart, though
+  the flow writes both in a **single** `Update_|_Invoice_Token` action. The
+  reading that fits is that the mint endpoint stores the token server-side
+  itself (it must, to resolve `/p/{token}`), and the flow's write-back five
+  seconds later rewrote the same value, so audit logged only the column that
+  genuinely changed. **Unproven**, and worth settling before anyone builds
+  pre-minting on the assumption that the flow owns that column.
+- **Two more issues filed 2026-09-15.** **#108** — `Invoice – On Create – Mint
+  Token & Push to Xero` mints unconditionally with no existing-token check and
+  pushes to Xero with no idempotency guard, so a subtotal change silently kills
+  a payment link already sent. It is off, and was briefly enabled in prod on an
+  agent's bad recommendation; nothing ran. **#109** — two flows share the name
+  `Invoice – Scheduled – Delayed Payment Link Send`, differing in the mint path
+  and the invoice-selection filter, which blocks anything that resolves a flow
+  by name.
 
 ---
 
