@@ -938,6 +938,16 @@ runs against anybody.
   sentence. So "we honour `riivo_whatsappoptinout`" rests on the selection
   query and a unit test, not on a run.
 
+- **The kill switch has never been pulled in a run (printed step 14).** What is
+  proven is the mechanism: `killSwitchLiveRead` has come back `true` on all
+  eight runs, so the live query against `environmentvariablevalues` works in
+  this environment — the part most likely to fail on permissions. The terminate
+  chain, the per-client re-read, the probe and the value handling are pinned by
+  unit tests against the rendered definition. What has never happened is a run
+  with the switch at `no`: that it ends as **Cancelled** rather than Failed,
+  writes **no** `riivo_baddebtrun` row, and puts one notice in the team channel
+  is asserted in tests and nowhere else.
+
 What IS proven on the WhatsApp side, from three real sends on 2026-09-15: the
 template resolves, the document header carries a real PDF, the log row records
 `riivo_clickatellstatus = 463630001` with Meta's message id, and
