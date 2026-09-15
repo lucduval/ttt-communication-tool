@@ -921,6 +921,37 @@ encouraging and is also no evidence at all about 600 clients. Decide it at step
 
 ---
 
+## The dev rehearsal is finished, and step 16 was never a dev step
+
+**There are no real clients in the dev org.** The whole bad-debt population is
+**19 open rows across 8 contacts**, every one a test record — 10 of them
+Michael Test Contact, then Jules Test, Nic Tes, Test Referral, test riivo,
+Sheri Parasaraman, New TestSharePoint and KC Test.
+
+So printed step 16, "CANARY on a small number of real clients", **cannot be
+performed here**, and neither can step 19: reviewing the 40% tripwire threshold
+wants two real population counts and dev's are 2 to 5. Both are production
+activities that the printed sequence lists as though they were dev ones. The
+only remaining dev step is **18** — let the recurrence fire and watch it.
+
+**Dev end state, chosen 2026-09-15 and left running deliberately:** flow
+`ec1a9150-0cb1-f111-aaac-000d3a667755` on, recurrence armed for Mon/Thu 09:45
+SAST, `riivo_ReminderTestMode` **false**, the canary list naming the three
+colleague contacts, `riivo_SendEmail` off. Thursday 2026-09-17 is predicted to
+select 2 clients from 9 candidates — Michael Test Contact (INV3111862193,
+R6 510.15) and test riivo — sending **one real WhatsApp to a handset the team
+owns** and creating two email drafts. Monday repeats it with another of
+Michael's eight remaining invoices. That is step 18 with a blast radius of one
+phone, and it is the only thing that has ever tested whether this campaign runs
+without somebody pressing a button.
+
+A multi-invoice client stays at **touch 1** for ever, because the touch number
+is per bad-debt row and each run picks a different invoice. Under the old
+campaign ladder that meant a client like Michael would never escalate past the
+day-0 opener. With one evergreen template it no longer signifies.
+
+---
+
 ## Two rehearsal steps deliberately skipped, 2026-09-15
 
 Both were offered and declined, so they are gaps by decision rather than by
