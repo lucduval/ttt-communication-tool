@@ -897,9 +897,20 @@ duration ≈ 37s fixed + 11.6s per client + 6s per mint
 the model also says is that the cost was never in the mint: it is the **11.6s
 per client**, and that is what governs a real run.
 
-**At 600 clients**, on this model: ~1h56m in steady state, ~2h57m for a first
-run where everybody mints. Starting 09:45 that finishes around 11:40, or 12:45
-on the first run. Survivable, and worth knowing before it is a surprise.
+**That model describes TEST-MODE runs only, and the 600-client extrapolation
+first published here has been withdrawn.** Two runs that actually sent broke
+it: 3 clients / 2 WhatsApps / 0 mints took **108s**, and 2 clients / 1 WhatsApp
+/ 1 mint took **181s** — less work, 73 seconds longer. A real run pays for the
+branded-email child, the Meta upload and the template send, and at three to
+five clients that cost is not separable from noise. Durations so far span
+73s to 182s for runs of 2 to 5 clients.
+
+What survives is the **comparison** that controls for everything else: the
+same five clients, same run shape, 0 mints vs 3 mints, 95s vs 113s. A mint
+costs about 6 seconds. Pre-minting is still not worth building.
+
+What does not survive is any per-client number worth multiplying by 600. That
+measurement belongs at step 18, on two real runs, which is where #104 puts it.
 
 **The lever, if it ever needs pulling**, is `concurrency: { repetitions: 1 }` on
 the client loop — the run is strictly serial by choice (R8: uncapped loops trip
