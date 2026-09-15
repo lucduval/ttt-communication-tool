@@ -648,39 +648,48 @@ describe("campaign key -> template (#99)", () => {
     expect([...APPROVED_CAMPAIGN_TEMPLATES].sort()).toEqual([...seeded].sort());
   });
 
+  // ONE TEMPLATE, EVERY TOUCH. The campaign keys encoded a day in the name, so
+  // they aged out of accuracy, and all 24 are approved against the PROD
+  // payment-link host — their Pay-now button cannot work in dev whatever this
+  // flow does. The general template is evergreen and exists as a matched pair,
+  // one per host, so the environment variable settles the button too.
   it.each([
-    [45, true, 1, "bad_debt_wa_30_90_paid_before_day0"],
-    [45, true, 2, "bad_debt_wa_30_90_paid_before_day10"],
-    [45, true, 3, "bad_debt_wa_30_90_paid_before_day25"],
-    [45, true, 4, "bad_debt_wa_30_90_paid_before_day40"],
-    [45, false, 1, "bad_debt_wa_30_90_never_paid_day0"],
-    [45, false, 2, "bad_debt_wa_30_90_never_paid_day10"],
-    [45, false, 3, "bad_debt_wa_30_90_never_paid_day25"],
-    [45, false, 4, "bad_debt_wa_30_90_never_paid_day40"],
-    [200, true, 1, "bad_debt_wa_90d_1y_paid_before_day0"],
-    [200, true, 2, "bad_debt_wa_90d_1y_paid_before_day10"],
-    [200, true, 3, "bad_debt_wa_90d_1y_paid_before_day25"],
-    [200, true, 4, "bad_debt_wa_90d_1y_paid_before_day40"],
-    [200, false, 1, "bad_debt_wa_90d_1y_never_paid_day0"],
-    [200, false, 2, "bad_debt_wa_90d_1y_never_paid_day10"],
-    [200, false, 3, "bad_debt_wa_90d_1y_never_paid_day25"],
-    [200, false, 4, "bad_debt_wa_90d_1y_never_paid_day40"],
-    [700, true, 1, "bad_debt_wa_1_3y_paid_before_day0"],
-    [700, true, 2, "bad_debt_wa_1_3y_paid_before_day10"],
-    [700, true, 3, "bad_debt_wa_1_3y_paid_before_day25"],
-    [700, true, 4, "bad_debt_wa_1_3y_paid_before_day40"],
-    [700, false, 1, "bad_debt_wa_1_3y_never_paid_day0"],
-    [700, false, 2, "bad_debt_wa_1_3y_never_paid_day10"],
-    [700, false, 3, "bad_debt_wa_1_3y_never_paid_day25"],
-    [700, false, 4, "bad_debt_wa_1_3y_never_paid_day40"],
+    [45, true, 1],
+    [45, true, 4],
+    [45, false, 1],
+    [200, true, 1],
+    [200, true, 2],
+    [200, false, 3],
+    [700, true, 4],
+    [700, false, 1],
+    [700, false, 10],
   ])(
-    "age %i days, paid-before %s, touch %i -> %s",
-    (ageDays, hasPaidBefore, touch, expected) => {
+    "age %i days, paid-before %s, touch %i -> the configured general template",
+    (ageDays, hasPaidBefore, touch) => {
       const { templateName, approved } = resolve(ageDays, hasPaidBefore, touch);
-      expect(templateName).toBe(expected);
+      expect(templateName).toBe(ongoingTemplate);
       expect(approved).toBe(true);
     },
   );
+
+  it("resolves the same template whatever the band, relationship or touch", () => {
+    const names = new Set<unknown>();
+    for (const ageDays of [45, 200, 700]) {
+      for (const hasPaidBefore of [true, false]) {
+        for (const touch of [1, 2, 3, 4, 5, 12]) {
+          names.add(resolve(ageDays, hasPaidBefore, touch).templateName);
+        }
+      }
+    }
+    expect([...names]).toEqual([ongoingTemplate]);
+  });
+
+  it("sends no campaign-key template at all", () => {
+    // The 24 remain approved in Meta and seeded in the comms tool; this flow
+    // simply no longer names one. Asserted on the rendered definition so a
+    // half-reverted change cannot pass.
+    expect(json).not.toContain("bad_debt_wa_");
+  });
 
   it.each([
     [29, "", "younger"],
@@ -737,7 +746,7 @@ describe("campaign key -> template (#99)", () => {
   });
 
   it.each([5, 6, 12, 40])(
-    "touch %i falls back to the D12 general template and never wraps to touch 1",
+    "touch %i uses the general template and never wraps to a day-0 opener",
     (touch) => {
       const { templateName, approved } = resolve(200, true, touch);
       expect(templateName).toBe(ongoingTemplate);
@@ -754,22 +763,21 @@ describe("campaign key -> template (#99)", () => {
     expect(ongoingParam[1].metadata.schemaName).toBe(ONGOING_TEMPLATE_VARIABLE);
   });
 
-  it("asserts a resolved name against the approved set rather than assuming it", () => {
+  it("holds when the template variable names nothing, at every touch", () => {
+    // With one configured name there is no ladder to validate. What is left is
+    // the failure that variable can actually have: being blank. It must hold
+    // the client rather than hand Meta a nameless send, and it must do so at
+    // touch 1 exactly as at touch 5 — there is no boundary any more.
     const approvedOf = (templateName: string, touch: number) =>
       evaluate(composeInputs("Compose_|_Template_Approved"), {
         "outputs('Compose_|_Touch_Number')": touch,
         "outputs('Compose_|_Template_Name')": templateName,
-        "outputs('Compose_|_Approved_Templates')": APPROVED_CAMPAIGN_TEMPLATES,
       });
 
-    expect(approvedOf("bad_debt_wa_90d_1y_paid_before_day10", 2)).toBe(true);
-    // A band or relationship token that drifts produces a plausible-looking
-    // name Meta has never seen. It must be held, not sent.
-    expect(approvedOf("bad_debt_wa_90d_1yr_paid_before_day10", 2)).toBe(false);
-    expect(approvedOf("bad_debt_wa_90d_1y_paidbefore_day10", 2)).toBe(false);
-    expect(approvedOf("", 1)).toBe(false);
-    // Past touch 4 the name comes from config, so the check is that it is set.
-    expect(approvedOf("", 5)).toBe(false);
+    for (const touch of [1, 2, 4, 5, 12]) {
+      expect(approvedOf(ongoingTemplate, touch)).toBe(true);
+      expect(approvedOf("", touch)).toBe(false);
+    }
   });
 
   it("holds a client rather than sending an unapproved template", () => {
@@ -2273,11 +2281,10 @@ describe("the WhatsApp channel (#103)", () => {
     );
   });
 
-  describe("body parameters, which are not the same for both templates", () => {
+  describe("body parameters, one shape for every send", () => {
     const parameters = (touch: number) =>
       evaluate(action("Compose_|_Wa_Body").inputs.parameters, {
         "outputs('Compose_|_Touch_Number')": touch,
-        "outputs('Compose_|_Wa_Params_Campaign')": ["name", "amount"],
         "outputs('Compose_|_Wa_Params_Ongoing')": [
           "name",
           "invoice",
@@ -2285,39 +2292,29 @@ describe("the WhatsApp channel (#103)", () => {
         ],
       });
 
-    it("gives a campaign template the two it was approved with", () => {
-      // "Hi {{1}}, … Amount due: {{2}}" — name and amount, no invoice number.
-      expect(composeInputs("Compose_|_Wa_Params_Campaign")).toEqual([
-        { type: "text", text: "@{outputs('Compose_|_Wa_Name')}" },
-        { type: "text", text: "@{outputs('Compose_|_Wa_Amount')}" },
-      ]);
-      for (const touch of [1, 2, 3, 4]) {
-        expect(parameters(touch)).toEqual(["name", "amount"]);
-      }
-    });
-
-    it("gives the D12 fallback the THREE it was approved with", () => {
-      // ttt_invoice_reminder_paylink_v2 reads
+    it("gives every send the THREE the general template was approved with", () => {
+      // ttt_invoice_reminder_paylink_* reads
       // "Hi {{1}}, … invoice *{{2}}* … balance of *{{3}}*". Two parameters is
-      // a 400 from Meta, and touch 5 is months away from the code that sets it.
+      // a 400 from Meta, and it is now the shape EVERY touch sends.
       expect(composeInputs("Compose_|_Wa_Params_Ongoing")).toEqual([
         { type: "text", text: "@{outputs('Compose_|_Wa_Name')}" },
         { type: "text", text: "@{outputs('Compose_|_Wa_Invoice')}" },
         { type: "text", text: "@{outputs('Compose_|_Wa_Amount')}" },
       ]);
-      for (const touch of [5, 9, 40]) {
+      for (const touch of [1, 2, 3, 4, 5, 9, 40]) {
         expect(parameters(touch)).toEqual(["name", "invoice", "amount"]);
       }
     });
 
-    it("switches at exactly the touch the template name does", () => {
-      // One boundary, read from one place: the touch where Compose_|_Template_Name
-      // stops building a campaign key and reads the D12 variable.
-      const templateName = composeInputs("Compose_|_Template_Name");
-      const boundary = /greater\(outputs\('Compose_\|_Touch_Number'\), (\d+)\)/;
-      expect(boundary.exec(templateName)![1]).toBe(
-        boundary.exec(action("Compose_|_Wa_Body").inputs.parameters)![1],
+    it("chooses between no shapes, because there is only one", () => {
+      // The two-shape era needed the body and the template name to switch at
+      // the same touch. Neither switches now, and a reintroduced branch here
+      // would be a silent way to send two parameters to a three-parameter
+      // template — the failure this suite exists for.
+      expect(action("Compose_|_Wa_Body").inputs.parameters).toBe(
+        "@outputs('Compose_|_Wa_Params_Ongoing')",
       );
+      expect(json).not.toContain("Compose_|_Wa_Params_Campaign");
     });
   });
 
@@ -2383,7 +2380,7 @@ describe("the WhatsApp channel (#103)", () => {
       expect(clean("Thabo", "")).toBe(false);
     });
 
-    it("checks the invoice number only on the template that uses it", () => {
+    it("checks the invoice number on every send, because every send carries it", () => {
       const withInvoice = (invoice: string, touch: number) =>
         evaluate(composeInputs("Compose_|_Wa_Params_Clean"), {
           "outputs('Compose_|_Wa_Name')": "Thabo",
@@ -2391,8 +2388,10 @@ describe("the WhatsApp channel (#103)", () => {
           "outputs('Compose_|_Wa_Invoice')": invoice,
           "outputs('Compose_|_Touch_Number')": touch,
         });
-      expect(withInvoice("", 4)).toBe(true);
-      expect(withInvoice("", 5)).toBe(false);
+      for (const touch of [1, 4, 5, 12]) {
+        expect(withInvoice("INV1112584759", touch)).toBe(true);
+        expect(withInvoice("", touch)).toBe(false);
+      }
     });
 
     it("holds the client rather than sending something Meta will refuse", () => {

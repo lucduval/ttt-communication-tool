@@ -781,7 +781,6 @@ const metaParameterClean = (value: string) =>
  * The amount carries its own "R" because the templates do not: `Amount due:
  * {{2}}` renders exactly what is passed.
  */
-const CAMPAIGN_BODY_PARAMETERS = ["Wa_Name", "Wa_Amount"] as const;
 const ONGOING_BODY_PARAMETERS = [
   "Wa_Name",
   "Wa_Invoice",
@@ -1092,7 +1091,7 @@ export function buildBadDebtRecoveryTouchesFlow() {
             metadata: {
               schemaName: "riivo_WhatsApp_Template_WithButton",
               description:
-                "D12: the template used from touch 5, once the four campaign-key touches are spent. Already approved with a Pay-now button, so no Meta submission blocks the cadence going unattended. Its copy is a general reminder rather than an arrears notice, so firmness softens after the Day-40 final notice - accepted, and swappable for a purpose-written bad_debt_wa_ongoing by changing this variable alone.",
+                "The Meta template EVERY bad-debt touch sends, at every age band and every touch number. It must be approved, carry a document header and a Pay-now URL button, and take three body parameters in this order: first name, invoice number, amount. A template with two is a 400 from Meta and a silent client. SET IT PER ENVIRONMENT: Meta bakes the Pay-now URL prefix into a template at approval time, so a template approved against one payment-link host produces a dead button on the other. ttt_invoice_reminder_paylink_v2 carries the dev host and ttt_invoice_reminder_paylink_prod the production one - identical copy, and the only difference that matters. Blank holds every client with a reason rather than sending anything.",
             },
           },
           [VOLUME_THRESHOLD_PARAM]: {
@@ -1324,20 +1323,10 @@ export function buildBadDebtRecoveryTouchesFlow() {
             inputs: `@equals(toLower(trim(coalesce(parameters('${TEST_MODE_PARAM}'), 'true'))), 'true')`,
           },
 
-          // The 24 names approved in Meta. A resolved name is checked against
-          // this list before it is reported as sendable, so a band or
-          // relationship token that drifts produces a HELD row naming the
-          // unapproved template rather than a send Meta would reject.
-          "Compose_|_Approved_Templates": {
-            runAfter: { "Compose_|_TestMode": ["Succeeded"] },
-            type: "Compose",
-            inputs: APPROVED_CAMPAIGN_TEMPLATES,
-          },
-
           // sub(0, n) rather than a negative literal, so the gap is only ever
           // read from the environment variable.
           "Compose_|_Last_Sent_Cutoff": {
-            runAfter: { "Compose_|_Approved_Templates": ["Succeeded"] },
+            runAfter: { "Compose_|_TestMode": ["Succeeded"] },
             type: "Compose",
             inputs: `@addDays(utcNow(), sub(0, int(coalesce(parameters('${TOUCH_GAP_PARAM}'), '2'))), 'yyyy-MM-ddTHH:mm:ssZ')`,
           },
@@ -2044,26 +2033,36 @@ export function buildBadDebtRecoveryTouchesFlow() {
                 inputs: `@${touchDayExpression("outputs('Compose_|_Touch_Number')")}`,
               },
 
-              // Past touch 4 the ladder is spent: D12 hands over to the general
-              // template. It must never wrap to touch 1 - a fresh "opening"
-              // message after a final notice is the failure this guards.
+              // ONE TEMPLATE, EVERY TOUCH. The 24 campaign-key templates are
+              // no longer used: they encode a day in their name, so they go
+              // stale, and every one of them is approved against the PROD
+              // payment-link host, which is why their Pay-now button can never
+              // work in dev. The configured general template is evergreen and
+              // exists in a matched pair - one per host - so the button
+              // resolves in whichever environment the flow runs.
+              //
+              // The age band still gates the window: empty means the invoice
+              // is outside In-scope at one end or the other, and an empty
+              // template name is what holds that client.
               "Compose_|_Template_Name": {
                 runAfter: { "Compose_|_Touch_Day": ["Succeeded"] },
                 type: "Compose",
-                inputs: `@if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), parameters('${ONGOING_TEMPLATE_PARAM}'), if(empty(outputs('Compose_|_Age_Band')), '', concat('bad_debt_wa_', outputs('Compose_|_Age_Band'), '_', outputs('Compose_|_Relationship'), '_day', outputs('Compose_|_Touch_Day'))))`,
+                inputs: `@if(empty(outputs('Compose_|_Age_Band')), '', parameters('${ONGOING_TEMPLATE_PARAM}'))`,
               },
 
-              // Asserted, not assumed: a ladder name must be one of the 24
-              // approved in Meta, and the D12 name must at least be configured.
+              // With one configured template there is no ladder name to
+              // validate against Meta's list - the only failure left is an
+              // unconfigured variable or an out-of-window invoice, and both
+              // arrive here as an empty name.
               "Compose_|_Template_Approved": {
                 runAfter: { "Compose_|_Template_Name": ["Succeeded"] },
                 type: "Compose",
-                inputs: `@if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), not(empty(outputs('Compose_|_Template_Name'))), contains(outputs('Compose_|_Approved_Templates'), outputs('Compose_|_Template_Name')))`,
+                inputs: `@not(empty(outputs('Compose_|_Template_Name')))`,
               },
               "Compose_|_Hold_Reason": {
                 runAfter: { "Compose_|_Template_Approved": ["Succeeded"] },
                 type: "Compose",
-                inputs: `@if(not(outputs('Compose_|_Still_Enabled')), '${STOPPED_HOLD_REASON}', if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), 'past touch ${TOUCH_DAYS.length} (D12) but ${ONGOING_TEMPLATE_VARIABLE} is blank', if(less(outputs('Compose_|_Invoice_Age_Days'), ${MIN_IN_SCOPE_DAYS}), 'invoice younger than ${MIN_IN_SCOPE_DAYS} days - outside the In-scope window', if(empty(outputs('Compose_|_Age_Band')), 'invoice older than three years - prescribed, outside the In-scope window', concat('no approved Meta template named ', outputs('Compose_|_Template_Name'))))))`,
+                inputs: `@if(not(outputs('Compose_|_Still_Enabled')), '${STOPPED_HOLD_REASON}', if(less(outputs('Compose_|_Invoice_Age_Days'), ${MIN_IN_SCOPE_DAYS}), 'invoice younger than ${MIN_IN_SCOPE_DAYS} days - outside the In-scope window', if(empty(outputs('Compose_|_Age_Band')), 'invoice older than three years - prescribed, outside the In-scope window', '${ONGOING_TEMPLATE_VARIABLE} names no template, so there is nothing approved to send')))`,
               },
 
               // #104: the kill switch rides the gate that was already here
@@ -2548,18 +2547,11 @@ export function buildBadDebtRecoveryTouchesFlow() {
                           "@if(empty(outputs('Compose_|_Wa_File_Clean')), 'invoice.pdf', outputs('Compose_|_Wa_File_Clean'))",
                       },
 
-                      // The two shapes, composed separately and chosen
-                      // between — WDL cannot build an object inside an
-                      // expression, and this is how both reference flows do it.
-                      "Compose_|_Wa_Params_Campaign": {
-                        runAfter: { "Compose_|_Wa_File_Name": ["Succeeded"] },
-                        type: "Compose",
-                        inputs: textParameters(CAMPAIGN_BODY_PARAMETERS),
-                      },
+                      // One body shape now: name, invoice number, amount.
+                      // Composed rather than inlined because WDL cannot build
+                      // an object inside an expression.
                       "Compose_|_Wa_Params_Ongoing": {
-                        runAfter: {
-                          "Compose_|_Wa_Params_Campaign": ["Succeeded"],
-                        },
+                        runAfter: { "Compose_|_Wa_File_Name": ["Succeeded"] },
                         type: "Compose",
                         inputs: textParameters(ONGOING_BODY_PARAMETERS),
                       },
@@ -2577,9 +2569,9 @@ export function buildBadDebtRecoveryTouchesFlow() {
                           "outputs('Compose_|_Wa_Name')",
                         )}, ${metaParameterClean(
                           "outputs('Compose_|_Wa_Amount')",
-                        )}, if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), ${metaParameterClean(
+                        )}, ${metaParameterClean(
                           "outputs('Compose_|_Wa_Invoice')",
-                        )}, true))`,
+                        )})`,
                       },
 
                       "Condition_|_Send_WhatsApp": {
@@ -2721,7 +2713,7 @@ export function buildBadDebtRecoveryTouchesFlow() {
                                 type: "Compose",
                                 inputs: {
                                   type: "body",
-                                  parameters: `@if(greater(outputs('Compose_|_Touch_Number'), ${TOUCH_DAYS.length}), outputs('Compose_|_Wa_Params_Ongoing'), outputs('Compose_|_Wa_Params_Campaign'))`,
+                                  parameters: `@outputs('Compose_|_Wa_Params_Ongoing')`,
                                 },
                               },
                               // THE BARE TOKEN, never the URL. Meta stores the
