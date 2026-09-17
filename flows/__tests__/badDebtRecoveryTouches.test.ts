@@ -55,6 +55,8 @@ import {
   FLOW_NAME,
   KILL_SWITCH_OFF,
   KILL_SWITCH_VARIABLE,
+  MAX_IN_SCOPE_DAYS,
+  PRESCRIBED_DEBT_HOLD_REASON,
   STOPPED_HOLD_REASON,
   NOTIFY_CHILD_FLOW_ID,
   APPROVED_BUTTON_URL_PREFIX,
@@ -505,6 +507,286 @@ describe("the cadence guard is the only defence against a duplicate", () => {
   });
 });
 
+
+/**
+ * The 2026-09-17 outage, pinned. 75 of 3,371 rows carried a null
+ * `riivo_invoice` or `riivo_client` lookup; `List_rows_|_Invoice_In_Scope`
+ * concatenates that lookup into its own `$filter`, so a null rendered
+ * `new_invoicesid eq  and statecode eq 0 ...` and Dataverse answered 400.
+ *
+ * Loop 1 wraps that call in no scope, a Foreach with a failed iteration ends
+ * Failed, and `Select_|_Client_Ids` runs after ['Succeeded'] — so 75 bad rows
+ * cost 3,296 good ones and the run sent nothing at all. The guard belongs on
+ * the query, not on a downstream condition, for the same reason the cadence
+ * guard does.
+ */
+describe("a row that cannot be acted on is never fetched", () => {
+  const selectionFilter: string = action("List_rows_|_Open_BadDebts").inputs
+    .parameters["$filter"];
+
+  it("excludes a null invoice lookup from the selection query", () => {
+    expect(selectionFilter).toContain("_riivo_invoice_value ne null");
+  });
+
+  it("excludes a null client lookup from the selection query", () => {
+    expect(selectionFilter).toContain("_riivo_client_value ne null");
+  });
+
+  it("guards every lookup that is concatenated into a later $filter", () => {
+    // The sweep, as an assertion rather than a memory: any $filter built by
+    // concatenating a value has to have that value guaranteed non-empty
+    // upstream, because a blank renders malformed OData and 400s. Three
+    // filters in this flow are built that way, and each is named here with
+    // what makes it safe. A fourth appearing without an entry fails this.
+    const concatenatedFilters = actions
+      .filter(
+        ([, a]) =>
+          typeof a?.inputs?.parameters?.["$filter"] === "string" &&
+          a.inputs.parameters["$filter"].includes("concat("),
+      )
+      .map(([name]) => name);
+
+    expect(concatenatedFilters.sort()).toEqual([
+      // guaranteed by `_riivo_client_value ne null` on the selection query,
+      // and again by Condition_|_Invoice_In_Scope's non-empty test
+      "List_rows_|_Client_Paid_History",
+      // guaranteed by `_riivo_invoice_value ne null` on the selection query
+      "List_rows_|_Invoice_In_Scope",
+      // its own concatenated parts are a computed timestamp and the canary
+      // filter, which Filter_|_Canary_Ids guarantees is well formed or empty
+      "List_rows_|_Open_BadDebts",
+    ]);
+  });
+
+  it("still reaches the invoice filter through the lookup it guards", () => {
+    // If this ever stops concatenating the lookup, the guard above is no
+    // longer what keeps the run alive and this suite is describing history.
+    expect(
+      action("List_rows_|_Invoice_In_Scope").inputs.parameters["$filter"],
+    ).toContain("items('Apply_to_each_|_BadDebt')?['_riivo_invoice_value']");
+  });
+});
+
+/**
+ * The same failure class as the null lookup, one action earlier: a clause is
+ * concatenated per canary id, so a blank entry makes the SELECTION QUERY
+ * malformed — the first Dataverse call of the run, which then reads nothing.
+ */
+describe("the canary allowlist cannot malform the selection query", () => {
+  const kept = (ids: unknown[]) =>
+    ids.filter(
+      (id) =>
+        evaluate(action("Filter_|_Canary_Ids").inputs.where, {
+          "item()": id,
+        }) === true,
+    );
+
+  it("drops blank and whitespace-only ids before a clause is built", () => {
+    expect(kept(["a-real-guid", "", "   ", "another-guid"])).toEqual([
+      "a-real-guid",
+      "another-guid",
+    ]);
+  });
+
+  it("keeps the three real ids in a list that also has an empty slot", () => {
+    // An allowlist naming three clients and one empty slot chases the three:
+    // rejecting the whole list would silence a run over a trailing comma.
+    expect(kept(["one", "two", "", "three"])).toHaveLength(3);
+  });
+
+  it("builds clauses and the active test from the FILTERED list", () => {
+    expect(action("Select_|_Canary_Clauses").inputs.from).toBe(
+      "@body('Filter_|_Canary_Ids')",
+    );
+    expect(composeInputs("Compose_|_Canary_Active")).toContain(
+      "body('Filter_|_Canary_Ids')",
+    );
+  });
+
+  it("trims the id it does concatenate", () => {
+    expect(action("Select_|_Canary_Clauses").inputs.select).toContain("trim(");
+  });
+
+  it("is inert when no canary is configured, as it is today", () => {
+    expect(
+      evaluate(composeInputs("Compose_|_Canary_Filter"), {
+        "outputs('Compose_|_Canary_Active')": false,
+        "body('Select_|_Canary_Clauses')": [],
+      }),
+    ).toBe("");
+  });
+});
+
+/**
+ * Every Dataverse read asks for the columns it uses and no more. The contact
+ * read is the one that matters: once per bad-debt row, ~3,371 a run, against a
+ * wide table.
+ */
+describe("Dataverse reads select their columns", () => {
+  const reads = actions.filter(([, a]) =>
+    ["ListRecords", "GetItem"].includes(
+      a?.inputs?.host?.operationId as string,
+    ),
+  );
+
+  it("names every read, so a new one has to be accounted for here", () => {
+    expect(reads.map(([n]) => n).sort()).toEqual([
+      "Get_|_Payer_Contact",
+      "List_rows_|_Client_Paid_History",
+      "List_rows_|_Invoice_In_Scope",
+      "List_rows_|_Kill_Switch_Live",
+      "List_rows_|_Kill_Switch_Probe",
+      "List_rows_|_Open_BadDebts",
+      "List_rows_|_Previous_Run",
+    ]);
+  });
+
+  it("passes a $select on every one of them", () => {
+    for (const [name, a] of reads) {
+      expect(
+        a.inputs.parameters["$select"],
+        `${name} fetches every column`,
+      ).toBeTruthy();
+    }
+  });
+
+  it("asks the contact table for exactly the fields it reads", () => {
+    const source = readFileSync(
+      new URL("../badDebtRecoveryTouches.ts", import.meta.url),
+      "utf8",
+    );
+    const read = new Set(
+      [...source.matchAll(/contact\("([a-z0-9_]+)"\)/g)].map((m) => m[1]),
+    );
+    const selected = new Set<string>(
+      action("Get_|_Payer_Contact").inputs.parameters["$select"].split(","),
+    );
+
+    // Every field the flow reads is fetched: a contact() read that is not in
+    // the $select returns null, which silently flips a consent answer.
+    for (const field of read) expect(selected).toContain(field);
+    // And nothing is fetched that is not read, bar the id of the row itself.
+    for (const field of selected) {
+      if (field !== "contactid") expect(read).toContain(field);
+    }
+  });
+
+  it("does not fetch the whole contact row to answer six questions", () => {
+    expect(
+      action("Get_|_Payer_Contact").inputs.parameters["$select"],
+    ).not.toContain("*");
+  });
+});
+
+/**
+ * The In-scope window has two bounds and, until now, only the invoice was
+ * tested against the far one. A bad-debt record carries its own age.
+ */
+describe("the second In-scope bound: the debt record's own age", () => {
+  const ongoingParam = Object.entries<any>(definition.parameters).find(
+    ([, p]) => p.metadata?.schemaName === ONGOING_TEMPLATE_VARIABLE,
+  )!;
+
+  const gate = (badDebtAgeDays: number, ageBand = "1_3y") => {
+    const inScope = evaluate(composeInputs("Compose_|_BadDebt_In_Scope"), {
+      "outputs('Compose_|_BadDebt_Age_Days')": badDebtAgeDays,
+    });
+    const env = {
+      "outputs('Compose_|_Age_Band')": ageBand,
+      "outputs('Compose_|_BadDebt_In_Scope')": inScope,
+      [`parameters('${ongoingParam[0]}')`]: ongoingParam[1].defaultValue,
+    };
+    const templateName = evaluate(composeInputs("Compose_|_Template_Name"), env);
+    return {
+      inScope,
+      templateName,
+      holdReason: evaluate(composeInputs("Compose_|_Hold_Reason"), {
+        ...env,
+        "outputs('Compose_|_Still_Enabled')": true,
+        "outputs('Compose_|_Invoice_Age_Days')": 400,
+        "outputs('Compose_|_Template_Name')": templateName,
+      }),
+    };
+  };
+
+  it("takes its bound from the last age band, not a second literal", () => {
+    // 3 years to the day is still chaseable, so 1096 is the first day that is
+    // not — one value, shared with the band ladder.
+    expect(MAX_IN_SCOPE_DAYS).toBe(1096);
+    expect(composeInputs("Compose_|_BadDebt_In_Scope")).toContain(
+      `${MAX_IN_SCOPE_DAYS}`,
+    );
+  });
+
+  it("chases a record three years old to the day", () => {
+    expect(gate(MAX_IN_SCOPE_DAYS - 1).templateName).toBeTruthy();
+  });
+
+  it("sends nothing once the record is past three years", () => {
+    expect(gate(MAX_IN_SCOPE_DAYS).templateName).toBe("");
+    expect(gate(MAX_IN_SCOPE_DAYS + 500).templateName).toBe("");
+  });
+
+  it("says which of the two bounds held the client", () => {
+    expect(gate(MAX_IN_SCOPE_DAYS).holdReason).toBe(
+      PRESCRIBED_DEBT_HOLD_REASON,
+    );
+    // The invoice's own reason still wins when the invoice is what is out of
+    // window: it is the more specific answer and it predates this bound.
+    expect(gate(10, "").holdReason).toContain("invoice older than three years");
+  });
+
+  it("holds both channels, because it holds the template name", () => {
+    // The gate is the template name rather than a test at either send: email
+    // and WhatsApp both sit behind Condition_|_Template_Approved.
+    expect(composeInputs("Compose_|_Template_Name")).toContain(
+      "outputs('Compose_|_BadDebt_In_Scope')",
+    );
+    expect(
+      evaluate(composeInputs("Compose_|_Template_Approved"), {
+        "outputs('Compose_|_Template_Name')": "",
+      }),
+    ).toBe(false);
+  });
+
+  it("holds before a token is minted or a PDF rendered", () => {
+    // Everything that costs something is inside Condition_|_Template_Approved,
+    // so a prescribed debt costs three reads and no child-flow run.
+    const gated = allActions(
+      action("Condition_|_Template_Approved").actions,
+    ).map(([n]) => n);
+    expect(gated).toContain("Scope_|_Prepare_Documents");
+    expect(gated).toContain("Run_Child_|_Generate_PDF");
+  });
+
+  it("measures the age freshly each run, from createdon", () => {
+    const expression = composeInputs("Compose_|_BadDebt_Age_Days");
+    expect(expression).toContain("badDebtCreatedOn");
+    expect(expression).toContain("utcNow()");
+    // riivo_invoiceage is stamped at creation and does not age.
+    expect(expression).not.toContain("riivo_invoiceage");
+  });
+
+  it("treats a missing createdon as in scope, leaving the invoice to govern", () => {
+    // An absent date must not silence a client: before this bound existed the
+    // invoice's window was the whole answer, and that is what it falls back to.
+    expect(composeInputs("Compose_|_BadDebt_Age_Days")).toContain(
+      "if(empty(coalesce(",
+    );
+    expect(gate(0).templateName).toBeTruthy();
+  });
+
+  it("selects createdon on the query that reads the record", () => {
+    expect(
+      action("List_rows_|_Open_BadDebts").inputs.parameters["$select"],
+    ).toContain("createdon");
+  });
+
+  it("reports the age that held the row, beside the invoice's", () => {
+    expect(json).toContain("badDebtAgeDays");
+  });
+});
+
 describe("recurrence", () => {
   const rec = definition.triggers.Recurrence.recurrence;
 
@@ -595,7 +877,12 @@ describe("campaign key -> template (#99)", () => {
   const ongoingTemplate: string = ongoingParam[1].defaultValue;
 
   /** Run the deployed composes in the order the flow runs them. */
-  function resolve(ageDays: number, hasPaidBefore: boolean, touch: number) {
+  function resolve(
+    ageDays: number,
+    hasPaidBefore: boolean,
+    touch: number,
+    badDebtAgeDays = 0,
+  ) {
     const relationship = evaluate(composeInputs("Compose_|_Relationship"), {
       "outputs('List_rows_|_Client_Paid_History')?['body/value']": hasPaidBefore
         ? [{ new_invoicesid: "a-paid-invoice" }]
@@ -607,8 +894,12 @@ describe("campaign key -> template (#99)", () => {
     const touchDay = evaluate(composeInputs("Compose_|_Touch_Day"), {
       "outputs('Compose_|_Touch_Number')": touch,
     });
+    const badDebtInScope = evaluate(composeInputs("Compose_|_BadDebt_In_Scope"), {
+      "outputs('Compose_|_BadDebt_Age_Days')": badDebtAgeDays,
+    });
     const env = {
       "outputs('Compose_|_Invoice_Age_Days')": ageDays,
+      "outputs('Compose_|_BadDebt_In_Scope')": badDebtInScope,
       "outputs('Compose_|_Touch_Number')": touch,
       "outputs('Compose_|_Age_Band')": ageBand,
       "outputs('Compose_|_Relationship')": relationship,
@@ -630,7 +921,14 @@ describe("campaign key -> template (#99)", () => {
       // answers below; the switched-off case is asserted in its own suite.
       "outputs('Compose_|_Still_Enabled')": true,
     });
-    return { ageBand, relationship, templateName, approved, holdReason };
+    return {
+      ageBand,
+      relationship,
+      templateName,
+      approved,
+      holdReason,
+      badDebtInScope,
+    };
   }
 
   it("offers exactly the 24 templates that are approved in Meta", () => {
@@ -2848,6 +3146,7 @@ describe("the kill switch (#104)", () => {
         "outputs('Compose_|_Still_Enabled')": stillEnabled,
         "outputs('Compose_|_Touch_Number')": 1,
         "outputs('Compose_|_Invoice_Age_Days')": 10,
+        "outputs('Compose_|_BadDebt_In_Scope')": true,
         "outputs('Compose_|_Age_Band')": "",
         "outputs('Compose_|_Template_Name')": "",
       });

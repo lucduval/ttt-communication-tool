@@ -234,6 +234,16 @@ export const STOPPED_HOLD_REASON =
   "the campaign was switched off part-way through this run";
 
 /**
+ * The hold reason for a debt record that has itself aged past the window.
+ *
+ * Exported for the same reason STOPPED_HOLD_REASON is: it is matched by string
+ * downstream, and two spellings would mean a prescribed debt reported under a
+ * reason nothing recognises.
+ */
+export const PRESCRIBED_DEBT_HOLD_REASON =
+  "bad-debt record older than three years - prescribed, outside the In-scope window";
+
+/**
  * The tripwire's one tuning knob, and its default.
  *
  * String rather than Number, following `riivo_BadDebtMinDaysBetweenTouches`
@@ -554,6 +564,17 @@ const TOUCH_DAYS = [0, 10, 25, 40] as const;
  */
 const MIN_IN_SCOPE_DAYS = 30;
 
+/**
+ * The far bound of the same window, in days, DERIVED from the last age band
+ * rather than written out a second time: three years to the day is still
+ * chaseable, so 1096 is the first day that is not. `ageBandExpression` already
+ * enforces it for the INVOICE by yielding no band; the bad-debt record carries
+ * its own age and is tested against the same bound, because a row that has sat
+ * on this table for three years is chasing a debt that has prescribed whatever
+ * date the invoice behind it carries.
+ */
+export const MAX_IN_SCOPE_DAYS = AGE_BANDS[AGE_BANDS.length - 1].underDays;
+
 /** The 24 templates approved in Meta, in the seed file's order. */
 export const APPROVED_CAMPAIGN_TEMPLATES: string[] = AGE_BANDS.flatMap((band) =>
   RELATIONSHIPS.flatMap((relationship) =>
@@ -816,6 +837,21 @@ const CHASEABLE_STATUSCODES = [
 const contact = (field: string) =>
   `outputs('Get_|_Payer_Contact')?['body/${field}']`;
 
+/**
+ * Every field `contact()` reads, and therefore exactly what `Get_|_Payer_Contact`
+ * asks Dataverse for. Declared here rather than as a literal on the action so
+ * the $select and the readers cannot drift apart.
+ */
+const CONTACT_FIELDS = [
+  "contactid",
+  "firstname",
+  "emailaddress1",
+  "donotemail",
+  "donotbulkemail",
+  "icon_formattedmobilenumber",
+  "riivo_whatsappoptinout",
+] as const;
+
 /** One row of `varSelected` — a client, and the invoice this run chases. */
 const selected = (field: string) =>
   `items('Apply_to_each_|_Selected')?['${field}']`;
@@ -873,6 +909,10 @@ const heldRow = (reason: string) => ({
       invoiceId: selectedValue("invoiceId"),
       invoiceNumber: selectedValue("invoiceNumber"),
       ageDays: "@outputs('Compose_|_Invoice_Age_Days')",
+      // Reported beside the invoice's age because the two bounds now hold for
+      // different reasons, and "who was silent today, and why" has to be
+      // answerable without re-reading either table.
+      badDebtAgeDays: "@outputs('Compose_|_BadDebt_Age_Days')",
       ageBand: "@outputs('Compose_|_Age_Band')",
       touch: "@outputs('Compose_|_Touch_Number')",
       templateName: "@outputs('Compose_|_Template_Name')",
@@ -1342,10 +1382,29 @@ export function buildBadDebtRecoveryTouchesFlow() {
             type: "Compose",
             inputs: `@if(empty(trim(coalesce(parameters('${CANARY_PARAM}'), ''))), json('[]'), json(trim(parameters('${CANARY_PARAM}'))))`,
           },
-          "Compose_|_Canary_Active": {
+          // THE SAME FAILURE CLASS AS THE NULL LOOKUP, one action earlier and
+          // one blast radius wider. A clause is concatenated per id, so a
+          // blank entry — a trailing comma in the environment variable's JSON,
+          // or a quoted empty string — renders `_riivo_client_value eq ` and
+          // makes the SELECTION QUERY itself malformed. That is the first
+          // Dataverse call the run makes: it answers 400, and the run ends
+          // having read nothing at all. Dormant today only because the list is
+          // `[]`; the canary recipe exists and the next run may well use it.
+          //
+          // Blanks are dropped rather than rejected: an allowlist that names
+          // three real clients and one empty slot should chase the three.
+          "Filter_|_Canary_Ids": {
             runAfter: { "Compose_|_Canary_Ids": ["Succeeded"] },
+            type: "Query",
+            inputs: {
+              from: "@outputs('Compose_|_Canary_Ids')",
+              where: "@not(equals(trim(string(item())), ''))",
+            },
+          },
+          "Compose_|_Canary_Active": {
+            runAfter: { "Filter_|_Canary_Ids": ["Succeeded"] },
             type: "Compose",
-            inputs: "@greater(length(outputs('Compose_|_Canary_Ids')), 0)",
+            inputs: "@greater(length(body('Filter_|_Canary_Ids')), 0)",
           },
           // WDL expressions have join() but no map, so the clauses are built
           // by a Select action rather than inline.
@@ -1353,8 +1412,8 @@ export function buildBadDebtRecoveryTouchesFlow() {
             runAfter: { "Compose_|_Canary_Active": ["Succeeded"] },
             type: "Select",
             inputs: {
-              from: "@outputs('Compose_|_Canary_Ids')",
-              select: "@concat('_riivo_client_value eq ', item())",
+              from: "@body('Filter_|_Canary_Ids')",
+              select: "@concat('_riivo_client_value eq ', trim(string(item())))",
             },
           },
           "Compose_|_Canary_Filter": {
@@ -1375,14 +1434,35 @@ export function buildBadDebtRecoveryTouchesFlow() {
           // The cadence guard lives in the QUERY, not in a downstream
           // condition: a record that is too recent is never fetched, so no
           // later branch can accidentally act on it.
+          //
+          // THE NULL GUARD IS HERE FOR THE SAME REASON, and it is not a
+          // tuning knob either. `invoiceScopeFilter` builds its own $filter by
+          // concatenating this row's `_riivo_invoice_value` into it, so a null
+          // lookup renders `new_invoicesid eq  and statecode eq 0 ...`, which
+          // is malformed OData and answers 400. That failure is not survivable
+          // one row at a time: `Apply_to_each_|_BadDebt` has no scope around
+          // the call, a Foreach with any failed iteration ends Failed, and
+          // `Select_|_Client_Ids` runs after ['Succeeded'] — so ONE unchaseable
+          // row skips the whole sending loop and the run ends having sent
+          // nothing. It did, on 2026-09-17: 75 of 3,371 rows, 68 of them with
+          // both lookups null.
+          //
+          // A row with no invoice or no client cannot be chased by definition,
+          // so excluding it here changes no targeting: loop 1 only ever
+          // appended a candidate from INSIDE `Condition_|_Invoice_In_Scope`,
+          // which such a row could never satisfy.
           "List_rows_|_Open_BadDebts": {
             runAfter: { "Initialize_variable_|_Candidates": ["Succeeded"] },
             ...dataverse("ListRecords", {
               entityName: "riivo_baddebts",
+              // createdon is the bad-debt record's OWN age, tested against
+              // MAX_IN_SCOPE_DAYS in the send loop. riivo_invoiceage is not
+              // used for it, for the reason given at Compose_|_Invoice_Age_Days:
+              // it is stamped once and does not age.
               $select:
-                "riivo_baddebtid,_riivo_invoice_value,_riivo_client_value,riivo_campaignlastsent,riivo_campaignsendcount,riivo_campaignfirstsent,riivo_outstandingamount",
+                "riivo_baddebtid,_riivo_invoice_value,_riivo_client_value,riivo_campaignlastsent,riivo_campaignsendcount,riivo_campaignfirstsent,riivo_outstandingamount,createdon",
               $filter:
-                "@concat('statecode eq 0 and (riivo_campaignlastsent eq null or riivo_campaignlastsent lt ', outputs('Compose_|_Last_Sent_Cutoff'), ')', outputs('Compose_|_Canary_Filter'))",
+                "@concat('statecode eq 0 and _riivo_invoice_value ne null and _riivo_client_value ne null and (riivo_campaignlastsent eq null or riivo_campaignlastsent lt ', outputs('Compose_|_Last_Sent_Cutoff'), ')', outputs('Compose_|_Canary_Filter'))",
             }),
           },
 
@@ -1433,12 +1513,24 @@ export function buildBadDebtRecoveryTouchesFlow() {
                   ],
                 },
                 actions: {
+                  // $select, because this is the heaviest read in the flow by
+                  // volume: once per bad-debt row, ~3,371 a run, and `contacts`
+                  // is a wide table. Six fields are read from it — the four
+                  // consent/contact fields just below, plus firstname and
+                  // icon_formattedmobilenumber carried into the candidate row —
+                  // and contactid so the response identifies itself.
+                  //
+                  // This list is the ONLY place the set is written down, so a
+                  // new `contact(...)` read that is not added here returns null
+                  // and silently changes a consent answer. The test suite pins
+                  // the two together.
                   "Get_|_Payer_Contact": {
                     runAfter: {},
                     ...dataverse("GetItem", {
                       entityName: "contacts",
                       recordId:
                         "@items('Apply_to_each_|_BadDebt')?['_riivo_client_value']",
+                      $select: CONTACT_FIELDS.join(","),
                     }),
                   },
 
@@ -1505,6 +1597,12 @@ export function buildBadDebtRecoveryTouchesFlow() {
                               "@coalesce(first(outputs('List_rows_|_Invoice_In_Scope')?['body/value'])?['riivo_paymentlinksenton'], '')",
                             // Touch state, read once here so template
                             // resolution and the increment share one value.
+                            // The bad-debt record's own age, for the second
+                            // In-scope bound. Carried from this read for the
+                            // same reason invoiceCreatedOn is: the send loop
+                            // re-reads neither table.
+                            badDebtCreatedOn:
+                              "@coalesce(items('Apply_to_each_|_BadDebt')?['createdon'], '')",
                             sendCount:
                               "@coalesce(items('Apply_to_each_|_BadDebt')?['riivo_campaignsendcount'], 0)",
                             firstSent:
@@ -2019,11 +2117,42 @@ export function buildBadDebtRecoveryTouchesFlow() {
                 inputs: `@${ageBandExpression("outputs('Compose_|_Invoice_Age_Days')")}`,
               },
 
+              // The SECOND In-scope bound, on the bad-debt record rather than
+              // the invoice behind it, and measured the same way: from
+              // createdon, freshly each run.
+              //
+              // In the ordinary case this bound never binds, and that is worth
+              // knowing rather than discovering: `Invoice - Scheduled - Create
+              // Bad Debt Records for Unpaid Aged Invoices` creates a row from
+              // an invoice that is already 30+ days old, so the record is
+              // always YOUNGER than its invoice and the invoice's own three-year
+              // test fails first. What this catches is the case where that
+              // ordering does not hold — a migrated or re-dated invoice whose
+              // createdon is not when it was raised — where the invoice looks
+              // fresh and only the debt record remembers how long this has
+              // been chased. An empty createdon reads as age 0 via coalesce and
+              // is treated as in scope: absent the date, the invoice bound is
+              // the one that governs, exactly as it did before this existed.
+              "Compose_|_BadDebt_Age_Days": {
+                runAfter: { "Compose_|_Age_Band": ["Succeeded"] },
+                type: "Compose",
+                inputs: `@if(empty(coalesce(${selected(
+                  "badDebtCreatedOn",
+                )}, '')), 0, div(sub(ticks(utcNow()), ticks(${selected(
+                  "badDebtCreatedOn",
+                )})), 864000000000))`,
+              },
+              "Compose_|_BadDebt_In_Scope": {
+                runAfter: { "Compose_|_BadDebt_Age_Days": ["Succeeded"] },
+                type: "Compose",
+                inputs: `@less(outputs('Compose_|_BadDebt_Age_Days'), ${MAX_IN_SCOPE_DAYS})`,
+              },
+
               // The touch this run would be. It is read from
               // riivo_campaignsendcount and, when a send succeeds, written
               // back as the new count - one value, both halves.
               "Compose_|_Touch_Number": {
-                runAfter: { "Compose_|_Age_Band": ["Succeeded"] },
+                runAfter: { "Compose_|_BadDebt_In_Scope": ["Succeeded"] },
                 type: "Compose",
                 inputs: `@add(coalesce(${selected("sendCount")}, 0), 1)`,
               },
@@ -2043,11 +2172,18 @@ export function buildBadDebtRecoveryTouchesFlow() {
               //
               // The age band still gates the window: empty means the invoice
               // is outside In-scope at one end or the other, and an empty
-              // template name is what holds that client.
+              // template name is what holds that client. The bad-debt record's
+              // own three-year bound joins it here rather than anywhere else,
+              // because an empty template name is already the one thing every
+              // downstream branch treats as "say nothing to this client": it
+              // holds BOTH channels, not just WhatsApp, and it holds them
+              // before `Scope_|_Prepare_Documents` mints a token or renders a
+              // PDF. A guard placed at either send would have had to be written
+              // twice and would have paid for the documents first.
               "Compose_|_Template_Name": {
                 runAfter: { "Compose_|_Touch_Day": ["Succeeded"] },
                 type: "Compose",
-                inputs: `@if(empty(outputs('Compose_|_Age_Band')), '', parameters('${ONGOING_TEMPLATE_PARAM}'))`,
+                inputs: `@if(or(empty(outputs('Compose_|_Age_Band')), not(outputs('Compose_|_BadDebt_In_Scope'))), '', parameters('${ONGOING_TEMPLATE_PARAM}'))`,
               },
 
               // With one configured template there is no ladder name to
@@ -2062,7 +2198,7 @@ export function buildBadDebtRecoveryTouchesFlow() {
               "Compose_|_Hold_Reason": {
                 runAfter: { "Compose_|_Template_Approved": ["Succeeded"] },
                 type: "Compose",
-                inputs: `@if(not(outputs('Compose_|_Still_Enabled')), '${STOPPED_HOLD_REASON}', if(less(outputs('Compose_|_Invoice_Age_Days'), ${MIN_IN_SCOPE_DAYS}), 'invoice younger than ${MIN_IN_SCOPE_DAYS} days - outside the In-scope window', if(empty(outputs('Compose_|_Age_Band')), 'invoice older than three years - prescribed, outside the In-scope window', '${ONGOING_TEMPLATE_VARIABLE} names no template, so there is nothing approved to send')))`,
+                inputs: `@if(not(outputs('Compose_|_Still_Enabled')), '${STOPPED_HOLD_REASON}', if(less(outputs('Compose_|_Invoice_Age_Days'), ${MIN_IN_SCOPE_DAYS}), 'invoice younger than ${MIN_IN_SCOPE_DAYS} days - outside the In-scope window', if(empty(outputs('Compose_|_Age_Band')), 'invoice older than three years - prescribed, outside the In-scope window', if(not(outputs('Compose_|_BadDebt_In_Scope')), '${PRESCRIBED_DEBT_HOLD_REASON}', '${ONGOING_TEMPLATE_VARIABLE} names no template, so there is nothing approved to send'))))`,
               },
 
               // #104: the kill switch rides the gate that was already here
