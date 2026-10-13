@@ -1,6 +1,6 @@
 "use client";
 
-import { useMutation, useQuery } from "convex/react";
+import { useAction, useMutation, useQuery } from "convex/react";
 import { useState } from "react";
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
@@ -26,7 +26,10 @@ export default function BadDebtPage() {
     const sendTest = useMutation(api.badDebtRuns.sendTest);
     const setHold = useMutation(api.badDebtRuns.setHold);
     const updateSettings = useMutation(api.badDebtRuns.updateSettings);
+    const searchClients = useAction(api.actions.badDebtRun.searchClients);
     const [busy, setBusy] = useState(false);
+    const [q, setQ] = useState("");
+    const [found, setFound] = useState<Awaited<ReturnType<typeof searchClients>> | null>(null);
 
     if (data === undefined) return <div className="p-8 text-center">Loading…</div>;
     if (data === null) return <div className="p-8 text-center">Only an admin can see the bad-debt run.</div>;
@@ -197,6 +200,39 @@ export default function BadDebtPage() {
                     })}
                     {byPerson.size === 0 && <div className="py-3 text-gray-500">No replies.</div>}
                 </div>
+            </Card>
+
+            <Card>
+                <h2 className="text-xl font-semibold">Remove a client</h2>
+                <p className="text-sm text-gray-500 mt-1">
+                    Search by name, ID number, tax number, mobile or email, then hold them. A hold applies to the next send, including one already built.
+                </p>
+                <form className="flex gap-2 mt-3" onSubmit={(e) => { e.preventDefault(); act(async () => setFound(await searchClients({ q }))); }}>
+                    <input className="flex-1 border rounded-md px-3 py-2" placeholder="e.g. 7801205008083, 0766580146 or Abdulla Kraft" value={q} onChange={(e) => setQ(e.target.value)} />
+                    <Button type="submit" disabled={busy || q.trim().length < 3}>Search</Button>
+                </form>
+                {found && (
+                    <div className="mt-3 divide-y text-sm">
+                        {found.length === 0 && <div className="py-2 text-gray-500">No contact matches.</div>}
+                        {found.map((c) => {
+                            const held = holds.some((h) => h.contactId === c.contactId);
+                            return (
+                                <div key={c.contactId} className="py-2 flex justify-between gap-4">
+                                    <div>
+                                        <b>{c.name}</b>{!c.active && <span className="text-gray-400"> (inactive)</span>}
+                                        <div className="text-gray-500">ID {c.idNumber || "—"} · tax {c.taxNumber || "—"} · {c.mobile || "no mobile"} · {c.email || "no email"}</div>
+                                    </div>
+                                    {held ? <Badge status="error">held</Badge> : (
+                                        <Button variant="danger" disabled={busy} onClick={() => {
+                                            const reason = prompt(`Why remove ${c.name}? (e.g. consultant request: old client)`);
+                                            if (reason) act(() => setHold({ contactId: c.contactId, name: c.name, hold: true, reason }));
+                                        }}>Hold</Button>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
             </Card>
 
             <Card>

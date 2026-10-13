@@ -15,8 +15,8 @@
  * re-checks every invoice and every hold before creating the campaigns.
  */
 import { v } from "convex/values";
-import { internalAction, type ActionCtx } from "../_generated/server";
-import { internal } from "../_generated/api";
+import { action, internalAction, type ActionCtx } from "../_generated/server";
+import { api, internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 import { getDynamicsAccessToken } from "../lib/dynamics_auth";
 import { getGraphAccessToken, sendEmail } from "../lib/graph_client";
@@ -511,6 +511,36 @@ export const sendTestRun = internalAction({
 async function loadFile(ctx: ActionCtx, runId: Id<"badDebtRuns">, file: RunFile) {
     return await ctx.runQuery(internal.badDebtRuns.recipientsForFile, { runId, file });
 }
+
+// ─── Remove a client ────────────────────────────────────────────────────────
+
+/**
+ * Find CRM contacts to hold out of the run, e.g. a consultant asking for named
+ * clients to stop getting reminders. Matches a 13-digit ID number, a tax number,
+ * a mobile, an email address, or part of a name.
+ */
+export const searchClients = action({
+    args: { q: v.string() },
+    handler: async (ctx, { q }): Promise<{ contactId: string; name: string; idNumber: string; taxNumber: string; mobile: string; email: string; active: boolean }[]> => {
+        const access = await ctx.runQuery(api.users.checkAccess, {});
+        if (!access.hasAccess || access.user?.role !== "admin") throw new Error("Only an admin can do this");
+        const term = q.trim().replace(/'/g, "''");
+        if (term.length < 3) return [];
+        const digits = term.replace(/\D/g, "");
+        let filter: string;
+        if (term.includes("@")) filter = `emailaddress1 eq '${term}' or emailaddress2 eq '${term}' or emailaddress3 eq '${term}'`;
+        else if (digits.length >= 6 && digits.length === term.replace(/[\s+-]/g, "").length) {
+            const local = digits.startsWith("27") ? "0" + digits.slice(2) : digits;
+            filter = [`ttt_idnumber eq '${digits}'`, `ttt_taxnumber eq '${digits}'`, `mobilephone eq '${local}'`,
+                `mobilephone eq '${digits}'`, `icon_formattedmobilenumber eq '${digits}'`].join(" or ");
+        } else filter = term.split(/\s+/).map((w) => `contains(fullname,'${w}')`).join(" and ");
+        const rows = await dv(`contacts?$select=contactid,fullname,ttt_idnumber,ttt_taxnumber,mobilephone,emailaddress1,statecode&$top=25&$filter=${encodeURIComponent(filter)}`);
+        return rows.value.map((c: any) => ({
+            contactId: lower(c.contactid), name: c.fullname ?? "", idNumber: c.ttt_idnumber ?? "", taxNumber: c.ttt_taxnumber ?? "",
+            mobile: c.mobilephone ?? "", email: c.emailaddress1 ?? "", active: c.statecode === 0,
+        }));
+    },
+});
 
 // ─── Write-back ─────────────────────────────────────────────────────────────
 
