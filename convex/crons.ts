@@ -30,4 +30,14 @@ crons.daily(
     {}
 );
 
+// Weekly bad-debt run: build Monday 08:00 SAST (06:00 UTC). It sends at the end of
+// the review window (badDebtSettings.reviewHours) unless paused. A no-op while
+// badDebtSettings.enabled is false.
+crons.weekly(
+    "bad-debt-weekly-build",
+    { dayOfWeek: "monday", hourUTC: 6, minuteUTC: 0 },
+    internal.actions.badDebtRun.buildRun,
+    { trigger: "cron" }
+);
+
 export default crons;
