@@ -345,5 +345,127 @@ export default defineSchema({
         lastUpdatedAt: v.number(),
     })
         .index("by_name", ["name"]),
+
+    // ── Weekly bad-debt run (convex/badDebtRuns.ts, convex/actions/badDebtRun.ts) ──
+    // The hand-built runs 1–13 automated: built Monday morning, held for review,
+    // sent unless paused. One settings row; `enabled: false` is the kill switch.
+    badDebtSettings: defineTable({
+        enabled: v.boolean(),
+        // Clerk id the campaigns are created as (their `createdBy`).
+        actorClerkId: v.string(),
+        whatsappTemplateId: v.id("whatsappTemplates"),
+        emailSubject: v.string(),
+        emailFromMailbox: v.string(),
+        emailHtmlBody: v.string(),
+        emailFontSize: v.optional(v.string()),
+        // Who gets the "run built" / "run sent" / "run paused" emails.
+        notifyEmails: v.array(v.string()),
+        // Hours between the build and the send — the review window.
+        reviewHours: v.number(),
+        // Pause instead of sending when the audience moves more than this vs the last run.
+        maxChangePercent: v.number(),
+        // People in the last run sent before automation (run 13), the first baseline.
+        baselinePeople: v.optional(v.number()),
+        // Writes. Off = the build reads only, and a person without a token is skipped.
+        mintTokens: v.boolean(),
+        writeBackStats: v.boolean(),
+        lastRunNumber: v.number(),
+    }),
+
+    badDebtRuns: defineTable({
+        runNumber: v.number(),
+        // building → review → sending → sent; or paused / cancelled / failed.
+        status: v.string(),
+        trigger: v.string(), // "cron" | clerk id of whoever pressed Build
+        startedAt: v.number(),
+        builtAt: v.optional(v.number()),
+        sendAt: v.optional(v.number()),
+        sentAt: v.optional(v.number()),
+        pauseReason: v.optional(v.string()),
+        error: v.optional(v.string()),
+        // Replies are read from here to the build.
+        repliesSince: v.optional(v.string()),
+        summary: v.optional(v.any()),
+        campaigns: v.optional(v.array(v.object({
+            file: v.string(),
+            campaignId: v.id("campaigns"),
+            channel: v.string(),
+            recipients: v.number(),
+            folded: v.boolean(),
+        }))),
+        // Test sends to the reviewer. Never folded into anyone's message count.
+        testCampaigns: v.optional(v.array(v.object({
+            campaignId: v.id("campaigns"),
+            channel: v.string(),
+            to: v.string(),
+            at: v.number(),
+        }))),
+        sendJobId: v.optional(v.id("_scheduled_functions")),
+    })
+        .index("by_run_number", ["runNumber"]),
+
+    // One row per (run, file, person). The `recipient` is exactly what the
+    // campaign's batches will carry.
+    badDebtRunRecipients: defineTable({
+        runId: v.id("badDebtRuns"),
+        file: v.string(),
+        contactId: v.string(),
+        badDebtId: v.string(),
+        invoiceId: v.string(),
+        amount: v.number(),
+        recipient: v.object({
+            id: v.string(),
+            email: v.optional(v.string()),
+            phone: v.optional(v.string()),
+            name: v.string(),
+            variables: v.optional(v.string()),
+        }),
+    })
+        .index("by_run_file", ["runId", "file"])
+        .index("by_run_contact", ["runId", "contactId"]),
+
+    // Replies since the last run, listed for the reviewer to read.
+    badDebtReplies: defineTable({
+        runId: v.id("badDebtRuns"),
+        contactId: v.string(),
+        name: v.string(),
+        channel: v.string(),
+        at: v.string(),
+        text: v.string(),
+        bucket: v.string(),
+    })
+        .index("by_run", ["runId"]),
+
+    // The reply-hold list. Never expires on its own: nothing writes these to the
+    // CRM as do-not-contact, so this list IS the record.
+    badDebtHolds: defineTable({
+        contactId: v.string(),
+        name: v.string(),
+        reason: v.string(),
+        source: v.string(), // "seed" | "auto" | "reviewer"
+        active: v.boolean(),
+        updatedAt: v.number(),
+        updatedBy: v.optional(v.string()),
+    })
+        .index("by_contact", ["contactId"])
+        .index("by_active", ["active"]),
+
+    // Messages each bad-debt record has had, folded from finished campaigns.
+    badDebtLedger: defineTable({
+        badDebtId: v.string(),
+        n: v.number(),
+        first: v.optional(v.string()),
+        last: v.optional(v.string()),
+        bounced: v.boolean(),
+        fails: v.number(),
+    })
+        .index("by_bad_debt", ["badDebtId"]),
+
+    // Hard-bounced addresses. Keyed on (contact, address): a new address is tried again.
+    badDebtBounces: defineTable({
+        contactId: v.string(),
+        address: v.string(),
+    })
+        .index("by_contact_address", ["contactId", "address"]),
 });
 

@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as actions_badDebtRun from "../actions/badDebtRun.js";
 import type * as actions_debug_dynamics from "../actions/debug_dynamics.js";
 import type * as actions_dynamics from "../actions/dynamics.js";
 import type * as actions_email from "../actions/email.js";
@@ -17,6 +18,7 @@ import type * as actions_whatsapp from "../actions/whatsapp.js";
 import type * as actions_whatsappTemplateAdmin from "../actions/whatsappTemplateAdmin.js";
 import type * as admin from "../admin.js";
 import type * as backfill from "../backfill.js";
+import type * as badDebtRuns from "../badDebtRuns.js";
 import type * as bounces from "../bounces.js";
 import type * as campaignBatches from "../campaignBatches.js";
 import type * as campaignQueue from "../campaignQueue.js";
@@ -32,6 +34,12 @@ import type * as files from "../files.js";
 import type * as http from "../http.js";
 import type * as invoicePdfs from "../invoicePdfs.js";
 import type * as lib_applyMerge from "../lib/applyMerge.js";
+import type * as lib_badDebtRun_audience from "../lib/badDebtRun/audience.js";
+import type * as lib_badDebtRun_checks from "../lib/badDebtRun/checks.js";
+import type * as lib_badDebtRun_constants from "../lib/badDebtRun/constants.js";
+import type * as lib_badDebtRun_gate from "../lib/badDebtRun/gate.js";
+import type * as lib_badDebtRun_ledger from "../lib/badDebtRun/ledger.js";
+import type * as lib_badDebtRun_replies from "../lib/badDebtRun/replies.js";
 import type * as lib_batchChunker from "../lib/batchChunker.js";
 import type * as lib_batchLease from "../lib/batchLease.js";
 import type * as lib_campaignTally from "../lib/campaignTally.js";
@@ -84,6 +92,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  "actions/badDebtRun": typeof actions_badDebtRun;
   "actions/debug_dynamics": typeof actions_debug_dynamics;
   "actions/dynamics": typeof actions_dynamics;
   "actions/email": typeof actions_email;
@@ -93,6 +102,7 @@ declare const fullApi: ApiFromModules<{
   "actions/whatsappTemplateAdmin": typeof actions_whatsappTemplateAdmin;
   admin: typeof admin;
   backfill: typeof backfill;
+  badDebtRuns: typeof badDebtRuns;
   bounces: typeof bounces;
   campaignBatches: typeof campaignBatches;
   campaignQueue: typeof campaignQueue;
@@ -108,6 +118,12 @@ declare const fullApi: ApiFromModules<{
   http: typeof http;
   invoicePdfs: typeof invoicePdfs;
   "lib/applyMerge": typeof lib_applyMerge;
+  "lib/badDebtRun/audience": typeof lib_badDebtRun_audience;
+  "lib/badDebtRun/checks": typeof lib_badDebtRun_checks;
+  "lib/badDebtRun/constants": typeof lib_badDebtRun_constants;
+  "lib/badDebtRun/gate": typeof lib_badDebtRun_gate;
+  "lib/badDebtRun/ledger": typeof lib_badDebtRun_ledger;
+  "lib/badDebtRun/replies": typeof lib_badDebtRun_replies;
   "lib/batchChunker": typeof lib_batchChunker;
   "lib/batchLease": typeof lib_batchLease;
   "lib/campaignTally": typeof lib_campaignTally;
