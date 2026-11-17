@@ -191,12 +191,29 @@ export default defineSchema({
         deliveredAt: v.optional(v.number()),
         // CRM opportunity linked to this message
         opportunityId: v.optional(v.string()),
+        // Cold-sweep queue marker for the daily "mark stale opportunities Cold"
+        // cron (convex/messages.ts `listUnengagedOpportunityMessages`). Written
+        // ONLY for messages that have an opportunity linked, so the marker doubles
+        // as the "is a sweep candidate" discriminator: `pending` = sent with an
+        // opportunity, not yet evaluated; `swept` = evaluated once (marked Cold,
+        // or skipped because the recipient engaged). Unset for every other row.
+        // This exists because the predicate the sweep needs — "has an opportunity
+        // AND was sent > 30 days ago AND has not been evaluated" — is not
+        // expressible as an index range over the existing fields, so the sweep had
+        // to post-`filter()` the whole `by_status` "sent" range and blew the 32k
+        // documents-read limit. The marker also guarantees forward progress: the
+        // queue drains instead of the cron re-reading (and re-PATCHing) the same
+        // oldest rows every day.
+        coldSweep: v.optional(v.union(v.literal("pending"), v.literal("swept"))),
     })
         .index("by_campaign", ["campaignId"])
         .index("by_campaign_status", ["campaignId", "status"])
         .index("by_campaign_recipient", ["campaignId", "recipientId"])
         .index("by_status", ["status"])
-        .index("by_external_id", ["externalMessageId"]),
+        .index("by_external_id", ["externalMessageId"])
+        // The cold-sweep work queue: eq(coldSweep, "pending") + a range on sentAt
+        // resolves the sweep entirely in the index, bounding its reads to `limit`.
+        .index("by_cold_sweep", ["coldSweep", "sentAt"]),
 
     // WhatsApp templates (manually added from Meta Business Suite)
     whatsappTemplates: defineTable({
@@ -233,6 +250,13 @@ export default defineSchema({
         button2Text: v.optional(v.string()),
         button2Url: v.optional(v.string()),
         button2UrlVariable: v.optional(v.string()),
+        // Set when the template was created in Meta from this tool
+        // (actions/whatsappTemplateAdmin:submitTemplateToMeta) or matched by a
+        // status sync. `metaId` is Meta's numeric template id, distinct from
+        // `metaTemplateId`, which is the template *name*.
+        metaId: v.optional(v.string()),
+        metaSubmittedAt: v.optional(v.number()),
+        metaRejectedReason: v.optional(v.string()),
         lastUpdatedAt: v.number(),
         createdBy: v.optional(v.string()), // Convex user _id of creator
         visibility: v.optional(v.union(v.literal("private"), v.literal("shared"))), // undefined treated as "shared"
@@ -458,6 +482,8 @@ export default defineSchema({
         last: v.optional(v.string()),
         bounced: v.boolean(),
         fails: v.number(),
+        // The campaign whose fold last wrote this row. A fold is written in chunks; a retry skips rows already stamped.
+        foldedCampaignId: v.optional(v.string()),
     })
         .index("by_bad_debt", ["badDebtId"]),
 

@@ -244,6 +244,90 @@ export const applyMetaStatuses = internalMutation({
     },
 });
 
+/** Record a successful Meta create on our row (called by submitTemplateToMeta). */
+export const markSubmittedToMeta = internalMutation({
+    args: {
+        id: v.id("whatsappTemplates"),
+        metaId: v.string(),
+        status: v.string(),
+        category: v.optional(v.string()),
+    },
+    handler: async (ctx, args) => {
+        const existing = await ctx.db.get(args.id);
+        if (!existing) throw new Error("Template not found");
+        await ctx.db.patch(args.id, {
+            metaId: args.metaId,
+            metaSubmittedAt: Date.now(),
+            status: args.status,
+            category: args.category ?? existing.category,
+            metaRejectedReason: undefined,
+            lastUpdatedAt: Date.now(),
+        });
+    },
+});
+
+/**
+ * Apply a full status sync from Meta to every template row whose name is on
+ * the WABA. Unlike `applyMetaStatuses` (scoped to the 24 bad-debt templates),
+ * this covers all rows and also records Meta's id and any rejection reason.
+ */
+export const applyMetaSync = internalMutation({
+    args: {
+        rows: v.array(
+            v.object({
+                name: v.string(),
+                language: v.string(),
+                metaId: v.string(),
+                status: v.string(),
+                category: v.string(),
+                rejectedReason: v.optional(v.string()),
+            }),
+        ),
+    },
+    returns: v.object({
+        updated: v.number(),
+        unchanged: v.number(),
+        notInMeta: v.array(v.string()),
+    }),
+    handler: async (ctx, args) => {
+        const templates = await ctx.db.query("whatsappTemplates").collect();
+        let updated = 0;
+        let unchanged = 0;
+        const notInMeta: string[] = [];
+        for (const t of templates) {
+            // Meta keys a template by name + language; fall back to name alone
+            // for rows whose stored language code differs only in form.
+            const row =
+                args.rows.find((r) => r.name === t.metaTemplateId && r.language === t.language) ??
+                args.rows.find((r) => r.name === t.metaTemplateId);
+            if (!row) {
+                notInMeta.push(t.metaTemplateId);
+                continue;
+            }
+            const rejectedReason =
+                row.rejectedReason && row.rejectedReason !== "NONE" ? row.rejectedReason : undefined;
+            if (
+                t.status === row.status &&
+                t.category === row.category &&
+                t.metaId === row.metaId &&
+                t.metaRejectedReason === rejectedReason
+            ) {
+                unchanged++;
+                continue;
+            }
+            await ctx.db.patch(t._id, {
+                status: row.status,
+                category: row.category,
+                metaId: row.metaId,
+                metaRejectedReason: rejectedReason,
+                lastUpdatedAt: Date.now(),
+            });
+            updated++;
+        }
+        return { updated, unchanged, notInMeta };
+    },
+});
+
 // Delete a template — admin only
 export const remove = mutation({
     args: {

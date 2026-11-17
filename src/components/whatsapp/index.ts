@@ -4,3 +4,4 @@ export { WhatsAppPreview } from "./WhatsAppPreview";
 export { ChannelSelector } from "./ChannelSelector";
 export { TemplateForm } from "./TemplateForm";
 export { TestWhatsAppModal } from "./TestWhatsAppModal";
+export { SubmitToMetaModal } from "./SubmitToMetaModal";

@@ -70,6 +70,7 @@ import type * as lib_taxCalculator from "../lib/taxCalculator.js";
 import type * as lib_taxProfile from "../lib/taxProfile.js";
 import type * as lib_tracking_utils from "../lib/tracking_utils.js";
 import type * as lib_whatsapp from "../lib/whatsapp.js";
+import type * as lib_whatsappTemplateCreate from "../lib/whatsappTemplateCreate.js";
 import type * as lib_writeRetry from "../lib/writeRetry.js";
 import type * as messages from "../messages.js";
 import type * as migrations_migrateCampaignContent from "../migrations/migrateCampaignContent.js";
@@ -154,6 +155,7 @@ declare const fullApi: ApiFromModules<{
   "lib/taxProfile": typeof lib_taxProfile;
   "lib/tracking_utils": typeof lib_tracking_utils;
   "lib/whatsapp": typeof lib_whatsapp;
+  "lib/whatsappTemplateCreate": typeof lib_whatsappTemplateCreate;
   "lib/writeRetry": typeof lib_writeRetry;
   messages: typeof messages;
   "migrations/migrateCampaignContent": typeof migrations_migrateCampaignContent;

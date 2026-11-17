@@ -51,7 +51,7 @@ export default function BadDebtPage() {
                 <div>
                     <h1 className="text-3xl font-bold text-[#1E3A5F]">Bad-debt run</h1>
                     <p className="text-gray-500 mt-2">
-                        Built every Monday 08:00, sent {settings?.reviewHours ?? "?"}h later unless paused.
+                        Built every Monday and Friday 08:00, sent {settings?.reviewHours ?? "?"}h later unless paused.
                         {settings && !settings.enabled && <b className="text-red-600"> The weekly run is switched OFF.</b>}
                     </p>
                 </div>

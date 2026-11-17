@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { paginationOptsValidator } from "convex/server";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import { tallyCampaign } from "./lib/campaignTally";
 import { checkAccessHelper } from "./users";
@@ -486,62 +487,170 @@ export const setOpportunityId = internalMutation({
             .first();
 
         if (message) {
-            await ctx.db.patch(message._id, { opportunityId: args.opportunityId });
+            // Enqueue the row for the cold sweep in the same write that links the
+            // opportunity: this is the one place an opportunity is attached, and it
+            // runs after the send has already settled the row to `sent` with a
+            // `sentAt`, so `coldSweep: "pending"` always lands on a row the sweep's
+            // index range can see. Only re-arm an unmarked row — a re-link of an
+            // already-swept message must not put it back in the queue.
+            await ctx.db.patch(message._id, {
+                opportunityId: args.opportunityId,
+                ...(message.coldSweep === undefined ? { coldSweep: "pending" as const } : {}),
+            });
         }
     },
 });
 
 /**
- * List messages that have an opportunity linked, sent before a cutoff time,
- * and with no open or click recorded. Used by the cold-status cron job.
+ * One message the cold sweep has evaluated on this pass. Discriminated on
+ * `markCold` so "we decided to go Cold" carries the opportunity to PATCH by
+ * construction — there is no verdict that asks for a Cold write without one.
+ */
+export type ColdSweepVerdict =
+    /** Still unengaged after the cutoff: this opportunity should go Cold. */
+    | { messageId: Id<"messages">; opportunityId: string; markCold: true }
+    /** Evaluated, nothing to do (engaged, or no longer a clean `sent` row). */
+    | { messageId: Id<"messages">; opportunityId?: string; markCold: false };
+
+/** The Cold-bound half of a page of verdicts. */
+export type ColdSweepMarkCold = Extract<ColdSweepVerdict, { markCold: true }>;
+
+/**
+ * Drain up to `limit` messages from the cold-sweep queue: rows with an
+ * opportunity linked, sent before `sentBefore`, not yet evaluated.
+ *
+ * The `by_cold_sweep` index resolves the whole predicate as a range
+ * (`coldSweep = "pending"` + `sentAt < sentBefore`), so this reads at most
+ * `limit` message documents plus two engagement probes each — bounded, and
+ * independent of how large the messages table grows. The previous shape scanned
+ * the entire `by_status` "sent" range and post-`filter()`ed it, which read every
+ * sent message until 100 matches turned up and hit Convex's 32k
+ * documents-read ceiling.
+ *
+ * Every row read comes back with a verdict, engaged or not, so the caller can
+ * mark the whole page swept and the queue keeps draining. Engagement is still
+ * double-checked here even though an open/click already upgrades the opportunity
+ * to Warm/Hot (convex/tracking.ts) and the caller only writes Cold over Pending
+ * — a message the recipient engaged with must never be handed to the Cold path.
  */
 export const listUnengagedOpportunityMessages = internalQuery({
     args: {
         sentBefore: v.number(), // timestamp in ms
         limit: v.number(),
     },
-    handler: async (ctx, args) => {
-        const messages = await ctx.db
-            .query("messages")
-            .withIndex("by_status", (q) => q.eq("status", "sent"))
-            .filter((q) =>
-                q.and(
-                    q.neq(q.field("opportunityId"), undefined),
-                    q.lt(q.field("sentAt"), args.sentBefore)
-                )
-            )
-            .take(args.limit);
+    handler: (ctx, args) => listColdSweepPage(ctx, args),
+});
 
-        // Filter out messages that have been opened or clicked
-        const unengaged = [];
-        for (const msg of messages) {
-            if (!msg.opportunityId) continue;
+/** Plain form of the sweep read, so its bounded-read shape is testable without a deployment. */
+export async function listColdSweepPage(
+    ctx: { db: any },
+    args: { sentBefore: number; limit: number }
+): Promise<ColdSweepVerdict[]> {
+    const due = await ctx.db
+        .query("messages")
+        .withIndex("by_cold_sweep", (q: any) =>
+            q.eq("coldSweep", "pending").lt("sentAt", args.sentBefore)
+        )
+        .take(args.limit);
 
-            const campaignId = msg.campaignId;
-            const recipientId = msg.recipientId;
+    const verdicts: ColdSweepVerdict[] = [];
 
-            const hasOpen = await ctx.db
-                .query("opens")
-                .withIndex("by_campaign_recipient", (q) =>
-                    q.eq("campaignId", campaignId).eq("recipientId", recipientId)
-                )
-                .first();
+    for (const msg of due) {
+        // Defensive: only a clean `sent` row with an opportunity and a send time
+        // is a Cold candidate — a row bounced to `failed` after the fact is not.
+        // Such a row is still returned so it gets marked swept and leaves the
+        // queue rather than sitting at its head forever.
+        const eligible = msg.status === "sent" && msg.sentAt !== undefined && !!msg.opportunityId;
 
-            if (hasOpen) continue;
-
-            const hasClick = await ctx.db
-                .query("clicks")
-                .withIndex("by_campaign_recipient", (q) =>
-                    q.eq("campaignId", campaignId).eq("recipientId", recipientId)
-                )
-                .first();
-
-            if (hasClick) continue;
-
-            unengaged.push({ messageId: msg._id, opportunityId: msg.opportunityId });
+        if (!eligible) {
+            verdicts.push({ messageId: msg._id, markCold: false });
+            continue;
         }
 
-        return unengaged;
+        const hasOpen = await ctx.db
+            .query("opens")
+            .withIndex("by_campaign_recipient", (q: any) =>
+                q.eq("campaignId", msg.campaignId).eq("recipientId", msg.recipientId)
+            )
+            .first();
+
+        const hasClick = hasOpen
+            ? null
+            : await ctx.db
+                  .query("clicks")
+                  .withIndex("by_campaign_recipient", (q: any) =>
+                      q.eq("campaignId", msg.campaignId).eq("recipientId", msg.recipientId)
+                  )
+                  .first();
+
+        verdicts.push(
+            !hasOpen && !hasClick
+                ? { messageId: msg._id, opportunityId: msg.opportunityId, markCold: true }
+                : { messageId: msg._id, opportunityId: msg.opportunityId, markCold: false }
+        );
+    }
+
+    return verdicts;
+}
+
+/**
+ * Retire rows from the cold-sweep queue. Called by the cron once it has acted on
+ * a page, so each message is evaluated exactly once. Rows whose Dynamics write
+ * failed are deliberately NOT passed here — leaving them `pending` retries them
+ * on the next run instead of silently dropping them.
+ */
+export const markColdSweepSwept = internalMutation({
+    args: { messageIds: v.array(v.id("messages")) },
+    handler: async (ctx, args) => {
+        for (const messageId of args.messageIds) {
+            await ctx.db.patch(messageId, { coldSweep: "swept" });
+        }
+    },
+});
+
+/**
+ * One-off catch-up: enqueue the opportunity-linked messages that were sent
+ * before `coldSweep` existed. Walks the `by_status` "sent" range one page at a
+ * time and self-schedules the next page, so no single transaction approaches the
+ * documents-read limit. Idempotent — a row that already carries a marker is left
+ * alone, so a re-run cannot resurrect an already-swept message.
+ *
+ * Run it once per deployment (it is not on a cron):
+ *   npx convex run messages:backfillColdSweepMarks '{}'
+ */
+export const backfillColdSweepMarks = internalMutation({
+    args: {
+        cursor: v.optional(v.string()),
+        pageSize: v.optional(v.number()),
+    },
+    handler: async (ctx, args) => {
+        const pageSize = args.pageSize ?? 1000;
+
+        const page = await ctx.db
+            .query("messages")
+            .withIndex("by_status", (q) => q.eq("status", "sent"))
+            .paginate({ cursor: args.cursor ?? null, numItems: pageSize });
+
+        let marked = 0;
+        for (const msg of page.page) {
+            if (msg.opportunityId && msg.coldSweep === undefined) {
+                await ctx.db.patch(msg._id, { coldSweep: "pending" });
+                marked++;
+            }
+        }
+
+        if (!page.isDone) {
+            await ctx.scheduler.runAfter(0, internal.messages.backfillColdSweepMarks, {
+                cursor: page.continueCursor,
+                pageSize,
+            });
+        }
+
+        console.log(
+            `[cold-sweep-backfill] scanned ${page.page.length}, enqueued ${marked}, done=${page.isDone}`
+        );
+
+        return { scanned: page.page.length, marked, isDone: page.isDone };
     },
 });
 
