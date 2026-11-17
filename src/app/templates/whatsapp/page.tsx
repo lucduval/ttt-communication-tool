@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery, useMutation } from "convex/react";
+import { useQuery, useMutation, useAction } from "convex/react";
 import { api } from "@/../convex/_generated/api";
 import { Header } from "@/components/layout";
 import { Button, Card, Badge } from "@/components/ui";
@@ -15,9 +15,11 @@ import {
     Loader2,
     Globe,
     Lock,
+    Send,
+    RefreshCw,
 } from "lucide-react";
 import type { Doc, Id } from "@/../convex/_generated/dataModel";
-import { TemplateForm } from "@/components/whatsapp";
+import { TemplateForm, SubmitToMetaModal } from "@/components/whatsapp";
 
 export default function WhatsAppTemplatesPage() {
     const templates = useQuery(api.whatsappTemplates.list, {});
@@ -28,6 +30,27 @@ export default function WhatsAppTemplatesPage() {
     const [showForm, setShowForm] = useState(false);
     const [editingTemplate, setEditingTemplate] = useState<Doc<"whatsappTemplates"> | null>(null);
     const [togglingId, setTogglingId] = useState<string | null>(null);
+    const [submittingTemplate, setSubmittingTemplate] = useState<Doc<"whatsappTemplates"> | null>(null);
+    const syncFromMeta = useAction(api.actions.whatsappTemplateAdmin.syncTemplateStatusesFromMeta);
+    const [syncing, setSyncing] = useState(false);
+    const [syncMessage, setSyncMessage] = useState<string | null>(null);
+
+    const handleSync = async () => {
+        setSyncing(true);
+        setSyncMessage(null);
+        try {
+            const r = await syncFromMeta({});
+            setSyncMessage(
+                `Synced ${r.inMeta} templates from Meta: ${r.updated} updated, ${r.unchanged} unchanged` +
+                    (r.notInMeta.length ? `, ${r.notInMeta.length} not in Meta yet.` : "."),
+            );
+        } catch (err) {
+            const data = (err as { data?: unknown }).data;
+            setSyncMessage(typeof data === "string" ? data : err instanceof Error ? err.message : "Sync failed");
+        } finally {
+            setSyncing(false);
+        }
+    };
 
     const isAdmin = currentUser?.role === "admin";
 
@@ -89,9 +112,11 @@ export default function WhatsAppTemplatesPage() {
                                     Template Management
                                 </h4>
                                 <p className="text-sm text-blue-700 mt-1">
-                                    Templates must be created and approved in Meta Business Suite first.
-                                    Add them here to use in your WhatsApp campaigns. The template body
-                                    should match exactly what&apos;s in Meta.
+                                    Create a template here, then use <strong>Submit to Meta</strong> to send
+                                    it for Meta&apos;s approval. Use <strong>Sync from Meta</strong> to pick up
+                                    the review outcome. Only approved templates can be used in campaigns.
+                                    Templates already approved in Meta Business Suite can still be added
+                                    here directly, with a body that matches Meta exactly.
                                 </p>
                             </div>
                         </div>
@@ -108,12 +133,26 @@ export default function WhatsAppTemplatesPage() {
                             </p>
                         </div>
                         {isAdmin && (
-                            <Button onClick={() => setShowForm(true)}>
-                                <Plus size={18} />
-                                Add Template
-                            </Button>
+                            <div className="flex items-center gap-2">
+                                <Button variant="secondary" onClick={handleSync} disabled={syncing}>
+                                    <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
+                                    Sync from Meta
+                                </Button>
+                                <Button onClick={() => setShowForm(true)}>
+                                    <Plus size={18} />
+                                    Add Template
+                                </Button>
+                            </div>
                         )}
                     </div>
+                    {syncMessage && <p className="text-sm text-gray-600">{syncMessage}</p>}
+
+                    {submittingTemplate && (
+                        <SubmitToMetaModal
+                            template={submittingTemplate}
+                            onClose={() => setSubmittingTemplate(null)}
+                        />
+                    )}
 
                     {/* Template Form Modal */}
                     {showForm && (
@@ -198,6 +237,12 @@ export default function WhatsAppTemplatesPage() {
                                             {template.body}
                                         </p>
 
+                                        {template.metaRejectedReason && template.status === "rejected" && (
+                                            <p className="text-xs text-red-600 mb-3">
+                                                Meta rejected: {template.metaRejectedReason}
+                                            </p>
+                                        )}
+
                                         {template.variables.length > 0 && (
                                             <div className="flex flex-wrap gap-1 mb-3">
                                                 {template.variables.map((v) => (
@@ -280,6 +325,15 @@ export default function WhatsAppTemplatesPage() {
 
                                                 {isAdmin && (
                                                     <>
+                                                        {(!template.metaId || template.status === "rejected") && (
+                                                            <button
+                                                                onClick={() => setSubmittingTemplate(template)}
+                                                                title="Submit to Meta for approval"
+                                                                className="p-1.5 hover:bg-green-50 rounded"
+                                                            >
+                                                                <Send size={16} className="text-green-600" />
+                                                            </button>
+                                                        )}
                                                         <button
                                                             onClick={() => openEditForm(template)}
                                                             className="p-1.5 hover:bg-gray-100 rounded"

@@ -3,6 +3,8 @@
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { OPPORTUNITY_TEMPERATURE } from "./actions/dynamics";
+// Type-only (erased at build), so the node bundle stays free of the query module.
+import type { ColdSweepMarkCold } from "./messages";
 
 /**
  * Update the temperature of a Dynamics opportunity.
@@ -46,8 +48,12 @@ export const updateTemperature = internalAction({
 });
 
 /**
- * Mark all unengaged opportunities as Cold (1).
- * Called by the daily cron job for messages older than 30 days with no opens or clicks.
+ * Mark unengaged opportunities as Cold (1).
+ *
+ * Drains a bounded page of the cold-sweep queue (messages with an opportunity,
+ * sent more than 30 days ago, not yet evaluated), PATCHes the still-Pending ones
+ * to Cold, then retires the page from the queue so the next run picks up fresh
+ * work instead of re-reading the same head. Called by the daily cron.
  */
 export const markStaleOpportunitiesCold = internalAction({
     args: {},
@@ -57,14 +63,23 @@ export const markStaleOpportunitiesCold = internalAction({
 
         const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
 
-        const unengaged = await ctx.runQuery(internal.messages.listUnengagedOpportunityMessages, {
+        const verdicts = await ctx.runQuery(internal.messages.listUnengagedOpportunityMessages, {
             sentBefore: thirtyDaysAgo,
-            limit: 100,
+            limit: 200,
         });
 
-        console.log(`[cold-cron] Found ${unengaged.length} unengaged opportunities to mark Cold`);
+        const unengaged = verdicts.filter((v): v is ColdSweepMarkCold => v.markCold);
+        console.log(
+            `[cold-cron] Evaluated ${verdicts.length} due messages; ${unengaged.length} unengaged`
+        );
 
-        for (const { opportunityId } of unengaged) {
+        // Rows we are done with. An engaged (or ineligible) row is retired
+        // immediately; a Cold candidate only once its Dynamics write has actually
+        // landed, so a transient CRM failure is retried on the next run rather
+        // than silently dropped.
+        const swept = verdicts.filter((v) => !v.markCold).map((v) => v.messageId);
+
+        for (const { messageId, opportunityId } of unengaged) {
             try {
                 // Only mark Cold if currently Pending — don't overwrite Warm/Hot
                 const current = await dynamicsRequest<{ riivo_opportunitytemperature: number | null }>(
@@ -83,9 +98,16 @@ export const markStaleOpportunitiesCold = internalAction({
                         }
                     );
                 }
+
+                swept.push(messageId);
             } catch (err) {
                 console.error(`Failed to mark opportunity ${opportunityId} as Cold:`, err);
             }
         }
+
+        if (swept.length > 0) {
+            await ctx.runMutation(internal.messages.markColdSweepSwept, { messageIds: swept });
+        }
+        console.log(`[cold-cron] Retired ${swept.length}/${verdicts.length} messages from the queue`);
     },
 });

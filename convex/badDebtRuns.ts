@@ -250,7 +250,12 @@ export const markSent = internalMutation({
 });
 
 /** Apply a fold: upsert ledger entries, add bounces, mark the campaign folded. */
-export const applyFold = internalMutation({
+/**
+ * Write one chunk of a campaign's fold. The entries are absolute (ledger + this campaign), so a row already
+ * stamped with this campaign is skipped: a retry after a partial write must not add the campaign twice.
+ * Written in chunks because one mutation for a whole campaign ran out of time ("too many system operations").
+ */
+export const applyFoldChunk = internalMutation({
     args: {
         runId: v.id("badDebtRuns"),
         campaignId: v.id("campaigns"),
@@ -265,16 +270,26 @@ export const applyFold = internalMutation({
         if (!run || !c || c.folded) return; // folding twice would double-count
         for (const e of entries) {
             const have = await ctx.db.query("badDebtLedger").withIndex("by_bad_debt", (q) => q.eq("badDebtId", e.badDebtId)).first();
-            if (have) await ctx.db.patch(have._id, e);
-            else await ctx.db.insert("badDebtLedger", e);
+            if (have?.foldedCampaignId === campaignId) continue;
+            if (have) await ctx.db.patch(have._id, { ...e, foldedCampaignId: campaignId });
+            else await ctx.db.insert("badDebtLedger", { ...e, foldedCampaignId: campaignId });
         }
         for (const b of bounces) {
             const have = await ctx.db.query("badDebtBounces")
                 .withIndex("by_contact_address", (q) => q.eq("contactId", b.contactId).eq("address", b.address)).first();
             if (!have) await ctx.db.insert("badDebtBounces", b);
         }
+    },
+});
+
+/** Mark a campaign folded, once every chunk is written. */
+export const markFolded = internalMutation({
+    args: { runId: v.id("badDebtRuns"), campaignId: v.id("campaigns") },
+    handler: async (ctx, { runId, campaignId }) => {
+        const run = await ctx.db.get(runId);
+        if (!run?.campaigns) return;
         await ctx.db.patch(runId, {
-            campaigns: run.campaigns!.map((x) => (x.campaignId === campaignId ? { ...x, folded: true } : x)),
+            campaigns: run.campaigns.map((x) => (x.campaignId === campaignId ? { ...x, folded: true } : x)),
         });
     },
 });
@@ -393,7 +408,7 @@ export const sendTest = mutation({
     },
 });
 
-/** Build a run now instead of waiting for Monday. It still waits out the review window. */
+/** Build a run now instead of waiting for Monday or Friday. It still waits out the review window. */
 export const buildNow = mutation({
     args: {},
     handler: async (ctx) => {

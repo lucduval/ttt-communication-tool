@@ -1,6 +1,6 @@
 "use node";
 import { v, ConvexError } from "convex/values";
-import { internalAction } from "../_generated/server";
+import { action, internalAction, type ActionCtx } from "../_generated/server";
 import { internal } from "../_generated/api";
 
 import { getMetaWhatsAppConfig, type MetaWhatsAppConfig } from "../lib/whatsapp";
@@ -11,6 +11,11 @@ import {
     PAY_URL_PREFIX,
     type SeedWaTemplate,
 } from "../seedWhatsappTemplates";
+import {
+    buildCreateTemplatePayload,
+    mediaHeaderFormat,
+    validateForMeta,
+} from "../lib/whatsappTemplateCreate";
 
 /**
  * Create the 24 bad-debt WhatsApp templates in Meta via the Graph API — the
@@ -118,12 +123,14 @@ async function uploadSampleHeaderHandle(
     config: MetaWhatsAppConfig,
     appId: string,
     pdf: ArrayBuffer,
+    fileName = "sample-invoice.pdf",
+    mimeType = "application/pdf",
 ): Promise<string> {
     const createUrl =
         `${GRAPH}/${config.graphApiVersion}/${appId}/uploads` +
-        `?file_name=${encodeURIComponent("sample-invoice.pdf")}` +
+        `?file_name=${encodeURIComponent(fileName)}` +
         `&file_length=${pdf.byteLength}` +
-        `&file_type=${encodeURIComponent("application/pdf")}`;
+        `&file_type=${encodeURIComponent(mimeType)}`;
     const createResp = await fetch(createUrl, {
         method: "POST",
         headers: { Authorization: `Bearer ${config.token}` },
@@ -143,7 +150,7 @@ async function uploadSampleHeaderHandle(
             Authorization: `OAuth ${config.token}`,
             file_offset: "0",
         },
-        body: new Blob([pdf], { type: "application/pdf" }),
+        body: new Blob([pdf], { type: mimeType }),
     });
     const uploadJson = (await uploadResp.json()) as { h?: string; error?: { message?: string } };
     if (!uploadResp.ok || !uploadJson.h) {
@@ -424,5 +431,194 @@ export const createBadDebtTemplatesInMeta = internalAction({
             failed,
             results,
         };
+    },
+});
+
+// ---------------------------------------------------------------------------
+// Generic template authoring from the UI (any template row, not just the 24
+// bad-debt ones). Admin-only, because a create lands on the shared WABA that
+// dev and prod both send from.
+// ---------------------------------------------------------------------------
+
+async function requireAdmin(ctx: ActionCtx): Promise<void> {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) throw new ConvexError("Not signed in.");
+    const user = (await ctx.runQuery(internal.users.getCurrentUserInternal, { clerkId: identity.subject })) as
+        | { status: string; role: string }
+        | null;
+    if (!user || user.status !== "active" || user.role !== "admin") {
+        throw new ConvexError("Only admins can create or sync templates in Meta.");
+    }
+}
+
+function requireWabaId(): string {
+    const wabaId = process.env.META_WABA_ID;
+    if (!wabaId) {
+        throw new ConvexError("META_WABA_ID is not set on this deployment — it's needed to create templates in Meta.");
+    }
+    return wabaId;
+}
+
+/**
+ * Create one stored template in Meta and put it into Meta's review queue.
+ * Meta needs sample values for every body variable and dynamic button; the
+ * UI collects them. A media header's sample is the file already uploaded on
+ * the template (`headerUrl`). On success the row is marked with Meta's id and
+ * status (usually PENDING); run `syncTemplateStatusesFromMeta` to see the
+ * review outcome.
+ */
+export const submitTemplateToMeta = action({
+    args: {
+        id: v.id("whatsappTemplates"),
+        bodyExamples: v.record(v.string(), v.string()),
+        button1Example: v.optional(v.string()),
+        button2Example: v.optional(v.string()),
+    },
+    returns: v.object({ metaId: v.string(), status: v.string(), category: v.string() }),
+    handler: async (ctx, args): Promise<{ metaId: string; status: string; category: string }> => {
+        await requireAdmin(ctx);
+        const template = await ctx.runQuery(internal.whatsappTemplates.getByIdInternal, { id: args.id });
+        if (!template) throw new ConvexError("Template not found.");
+
+        const examples = { body: args.bodyExamples, button1: args.button1Example, button2: args.button2Example };
+        const problems = validateForMeta(template, examples);
+        if (problems.length > 0) throw new ConvexError(problems.join("\n"));
+
+        const config = getMetaWhatsAppConfig();
+        const wabaId = requireWabaId();
+
+        // A rejected template keeps its name in Meta; it is fixed by editing it
+        // in place (POST /{template_id}), not by creating it again.
+        const isResubmit = !!template.metaId && template.status === "rejected";
+        const existing = await fetchExistingTemplateNames(config, wabaId);
+        if (!isResubmit && existing.has(template.metaTemplateId)) {
+            throw new ConvexError(
+                `A template named "${template.metaTemplateId}" already exists in Meta. ` +
+                    `Use "Sync from Meta" to pick up its status, or give this one a new Meta Template ID (e.g. _v2).`,
+            );
+        }
+
+        let headerHandle: string | undefined;
+        if (mediaHeaderFormat(template.headerType) && template.headerUrl) {
+            const tokenInfo = await inspectToken(config);
+            const appId = process.env.META_APP_ID || tokenInfo.appId;
+            if (!appId) throw new ConvexError("Could not determine the Meta App ID from the token; set META_APP_ID.");
+            const resp = await fetch(template.headerUrl);
+            if (!resp.ok) throw new ConvexError(`Couldn't fetch the header sample file (HTTP ${resp.status}).`);
+            const bytes = await resp.arrayBuffer();
+            const mimeType =
+                resp.headers.get("content-type")?.split(";")[0].trim() ||
+                template.headerMediaMimeType ||
+                "application/octet-stream";
+            const ext = mimeType.split("/")[1]?.replace("jpeg", "jpg") ?? "bin";
+            headerHandle = await uploadSampleHeaderHandle(config, appId, bytes, `sample.${ext}`, mimeType);
+        }
+
+        const payload = buildCreateTemplatePayload(template, examples, headerHandle);
+        // Name, language and parameter format can't change on an edit; send only
+        // what Meta lets us change.
+        const url = isResubmit
+            ? `${GRAPH}/${config.graphApiVersion}/${template.metaId}`
+            : `${GRAPH}/${config.graphApiVersion}/${wabaId}/message_templates`;
+        const body = isResubmit ? { category: payload.category, components: payload.components } : payload;
+        const resp = await fetch(url, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const raw = (await resp.json()) as {
+            id?: string;
+            success?: boolean;
+            status?: string;
+            category?: string;
+            error?: { message?: string; error_user_title?: string; error_user_msg?: string };
+        };
+        // An edit answers { success: true } with no id; it goes back to review.
+        const json = isResubmit && raw.success ? { ...raw, id: template.metaId, status: "pending" } : raw;
+        if (!resp.ok || !json.id) {
+            const e = json.error;
+            throw new ConvexError(
+                `Meta refused the template: ${[e?.error_user_title, e?.error_user_msg ?? e?.message]
+                    .filter(Boolean)
+                    .join(" — ") || `HTTP ${resp.status}`}`,
+            );
+        }
+
+        const status = (json.status ?? "pending").toLowerCase();
+        const category = (json.category ?? template.category).toLowerCase();
+        await ctx.runMutation(internal.whatsappTemplates.markSubmittedToMeta, {
+            id: args.id,
+            metaId: json.id,
+            status,
+            category,
+        });
+        return { metaId: json.id, status, category };
+    },
+});
+
+/**
+ * Pull status, category, Meta id and rejection reason for every template on
+ * the WABA and apply them to our rows (matched by name). Read-only against Meta.
+ */
+export const syncTemplateStatusesFromMeta = action({
+    args: {},
+    returns: v.object({
+        inMeta: v.number(),
+        updated: v.number(),
+        unchanged: v.number(),
+        notInMeta: v.array(v.string()),
+    }),
+    handler: async (ctx): Promise<{ inMeta: number; updated: number; unchanged: number; notInMeta: string[] }> => {
+        await requireAdmin(ctx);
+        const config = getMetaWhatsAppConfig();
+        const wabaId = requireWabaId();
+
+        const rows: Array<{
+            name: string;
+            language: string;
+            metaId: string;
+            status: string;
+            category: string;
+            rejectedReason?: string;
+        }> = [];
+        let next: string | null =
+            `${GRAPH}/${config.graphApiVersion}/${wabaId}/message_templates` +
+            `?fields=id,name,language,status,category,rejected_reason&limit=200`;
+        while (next) {
+            const resp = await fetch(next, { headers: { Authorization: `Bearer ${config.token}` } });
+            const json = (await resp.json()) as {
+                data?: Array<{
+                    id?: string;
+                    name?: string;
+                    language?: string;
+                    status?: string;
+                    category?: string;
+                    rejected_reason?: string;
+                }>;
+                paging?: { next?: string };
+                error?: { message?: string };
+            };
+            if (!resp.ok) {
+                throw new ConvexError(`Could not list templates (HTTP ${resp.status}): ${json.error?.message ?? "unknown"}`);
+            }
+            for (const r of json.data ?? []) {
+                if (!r.id || !r.name) continue;
+                rows.push({
+                    name: r.name,
+                    language: r.language ?? "",
+                    metaId: r.id,
+                    status: (r.status ?? "").toLowerCase(),
+                    category: (r.category ?? "").toLowerCase(),
+                    rejectedReason: r.rejected_reason,
+                });
+            }
+            next = json.paging?.next ?? null;
+        }
+
+        const result: { updated: number; unchanged: number; notInMeta: string[] } = await ctx.runMutation(
+            internal.whatsappTemplates.applyMetaSync,
+            { rows },
+        );
+        return { inMeta: rows.length, ...result };
     },
 });

@@ -1,7 +1,7 @@
 "use node";
 
 /**
- * The weekly bad-debt run: build (Monday 08:00 SAST), send (end of the review
+ * The weekly bad-debt run: build (Monday and Friday 08:00 SAST), send (end of the review
  * window), and the write-back of send counts to `riivo_baddebt`.
  *
  * This does what each hand-built run did (`.scratch/bad-debt-recovery/run13/RUNBOOK.md`):
@@ -225,6 +225,9 @@ export const buildRun = internalAction({
 });
 
 /** Exported for the local dry-run harness; production enters through {@link buildRun}. */
+/** Ledger rows per fold mutation. Two reads/writes a row; a whole campaign in one mutation timed out. */
+const FOLD_CHUNK = 150;
+
 export async function build(ctx: ActionCtx, runId: Id<"badDebtRuns">) {
     const settings = (await ctx.runQuery(internal.badDebtRuns.getSettings, {}))!;
     const run = (await ctx.runQuery(internal.badDebtRuns.getRun, { runId }))!;
@@ -243,9 +246,15 @@ export async function build(ctx: ActionCtx, runId: Id<"badDebtRuns">) {
             const ledger = new Map<string, LedgerEntry>(inputs.ledger.map((e) => [e.badDebtId, e]));
             const msgs = await ctx.runQuery(internal.badDebtRuns.campaignMessages, { campaignId: c.campaignId });
             const fold = foldCampaign(ledger, msgs, map);
-            await ctx.runMutation(internal.badDebtRuns.applyFold, {
-                runId: prev._id, campaignId: c.campaignId, entries: [...fold.entries.values()], bounces: fold.bounces,
-            });
+            const entries = [...fold.entries.values()];
+            const span = Math.max(entries.length, fold.bounces.length);
+            for (let i = 0; i < span; i += FOLD_CHUNK) {
+                await ctx.runMutation(internal.badDebtRuns.applyFoldChunk, {
+                    runId: prev._id, campaignId: c.campaignId,
+                    entries: entries.slice(i, i + FOLD_CHUNK), bounces: fold.bounces.slice(i, i + FOLD_CHUNK),
+                });
+            }
+            await ctx.runMutation(internal.badDebtRuns.markFolded, { runId: prev._id, campaignId: c.campaignId });
             folded.push(`run ${prev.runNumber} ${c.file}`);
             inputs = await ctx.runQuery(internal.badDebtRuns.getBuildInputs, {});
         }
